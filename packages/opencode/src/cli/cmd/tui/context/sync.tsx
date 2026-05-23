@@ -33,6 +33,7 @@ import * as Log from "@opencode-ai/core/util/log"
 import { emptyConsoleState, type ConsoleState } from "@/config/console-state"
 import path from "path"
 import { aggregateFailures } from "./aggregate-failures"
+import { mergeFetchedMessages, optimisticParts, type OptimisticPromptPart } from "./sync-optimistic"
 
 export const { use: useSync, provider: SyncProvider } = createSimpleContext({
   name: "Sync",
@@ -114,6 +115,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     const [autoaccept] = kv.signal<"none" | "edit">("permission_auto_accept", "edit")
 
     const fullSyncedSessions = new Set<string>()
+    const optimisticMessages = new Set<string>()
+    let syncedWorkspace = project.workspace.current()
 
     function sessionListQuery(): { scope?: "project"; path?: string } {
       if (!kv.get("session_directory_filter_enabled", true)) return { scope: "project" }
@@ -227,6 +230,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           break
 
         case "session.deleted": {
+          for (const message of store.message[event.properties.info.id] ?? []) optimisticMessages.delete(message.id)
           const result = Binary.search(store.session, event.properties.info.id, (s) => s.id)
           if (result.found) {
             setStore(
@@ -298,6 +302,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           break
         }
         case "message.removed": {
+          optimisticMessages.delete(event.properties.messageID)
           const messages = store.message[event.properties.sessionID]
           const result = Binary.search(messages, event.properties.messageID, (m) => m.id)
           if (result.found) {
@@ -312,6 +317,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           break
         }
         case "message.part.updated": {
+          optimisticMessages.delete(event.properties.part.messageID)
           const parts = store.part[event.properties.part.messageID]
           if (!parts) {
             setStore("part", event.properties.part.messageID, [event.properties.part])
@@ -386,6 +392,11 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     async function bootstrap(input: { fatal?: boolean } = {}) {
       const fatal = input.fatal ?? true
       const workspace = project.workspace.current()
+      if (workspace !== syncedWorkspace) {
+        fullSyncedSessions.clear()
+        optimisticMessages.clear()
+        syncedWorkspace = workspace
+      }
       const projectPromise = project.sync()
       const sessionListPromise = projectPromise.then(() => listSessions())
 
@@ -526,6 +537,66 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           if (last.role === "user") return "working"
           return last.time.completed ? "idle" : "working"
         },
+        addOptimisticPrompt(input: {
+          sessionID: string
+          messageID: string
+          agent: string
+          model: { providerID: string; modelID: string }
+          variant?: string
+          parts: OptimisticPromptPart[]
+        }) {
+          optimisticMessages.add(input.messageID)
+          const messages = store.message[input.sessionID]
+          const match = messages ? Binary.search(messages, input.messageID, (m) => m.id) : undefined
+          const info: Message = {
+            id: input.messageID,
+            sessionID: input.sessionID,
+            role: "user",
+            time: { created: Date.now() },
+            agent: input.agent,
+            model: {
+              providerID: input.model.providerID,
+              modelID: input.model.modelID,
+              ...(input.variant ? { variant: input.variant } : {}),
+            },
+          }
+          batch(() => {
+            if (!messages) {
+              setStore("message", input.sessionID, [info])
+            } else if (!match?.found) {
+              setStore(
+                "message",
+                input.sessionID,
+                produce((draft) => {
+                  Binary.insert(draft, info, (message) => message.id)
+                }),
+              )
+            }
+            setStore("part", input.messageID, reconcile(optimisticParts(input)))
+          })
+        },
+        removeOptimisticPrompt(sessionID: string, messageID: string) {
+          if (!optimisticMessages.delete(messageID)) return
+          const messages = store.message[sessionID]
+          const match = messages ? Binary.search(messages, messageID, (m) => m.id) : undefined
+          batch(() => {
+            if (match?.found) {
+              setStore(
+                "message",
+                sessionID,
+                produce((draft) => {
+                  draft.splice(match.index, 1)
+                }),
+              )
+            }
+            setStore(
+              "part",
+              produce((draft) => {
+                delete draft[messageID]
+              }),
+            )
+          })
+        },
         async sync(sessionID: string) {
           if (fullSyncedSessions.has(sessionID)) return
           const [session, messages, todo, diff] = await Promise.all([
@@ -537,15 +608,22 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           setStore(
             produce((draft) => {
               const match = Binary.search(draft.session, sessionID, (s) => s.id)
+              const merged = mergeFetchedMessages({
+                currentMessages: draft.message[sessionID] ?? [],
+                currentParts: draft.part,
+                fetched: messages.data!,
+                optimisticMessages,
+              })
               if (match.found) draft.session[match.index] = session.data!
               if (!match.found) draft.session.splice(match.index, 0, session.data!)
               draft.todo[sessionID] = todo.data ?? []
-              const infos: (typeof draft.message)[string] = []
-              for (const message of messages.data ?? []) {
-                infos.push(message.info)
-                draft.part[message.info.id] = message.parts
+              draft.message[sessionID] = merged.messages
+              for (const messageID of merged.resolved) {
+                optimisticMessages.delete(messageID)
               }
-              draft.message[sessionID] = infos
+              for (const [messageID, parts] of merged.parts) {
+                draft.part[messageID] = parts
+              }
               draft.session_diff[sessionID] = diff.data ?? []
             }),
           )
