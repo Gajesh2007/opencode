@@ -183,7 +183,7 @@ export const SessionReview = (props: SessionReviewProps) => {
 
   const open = () => props.open ?? store.open
   const items = createMemo<Item[]>(() =>
-    list(props.diffs).map((diff) => ({ ...normalize(diff), preloaded: diff.preloaded })),
+    list(props.diffs).map((diff) => Object.assign(normalize(diff), { preloaded: diff.preloaded })),
   )
   const files = createMemo(() => items().map((diff) => diff.file))
   const grouped = createMemo(() => {
