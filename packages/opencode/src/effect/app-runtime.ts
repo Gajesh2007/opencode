@@ -3,6 +3,7 @@ import { attach } from "./run-service"
 import * as Observability from "@opencode-ai/core/effect/observability"
 
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { AuthWellKnown } from "@opencode-ai/core/auth-well-known"
 import { Bus } from "@/bus"
 import { Auth } from "@/auth"
 import { Account } from "@/account/account"
@@ -62,6 +63,7 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 export const AppLayer = Layer.mergeAll(
   Npm.defaultLayer,
   AppFileSystem.defaultLayer,
+  AuthWellKnown.defaultLayer,
   Bus.defaultLayer,
   Auth.defaultLayer,
   Account.defaultLayer,

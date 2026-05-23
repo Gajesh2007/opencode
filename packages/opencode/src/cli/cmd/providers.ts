@@ -1,4 +1,5 @@
 import { Auth } from "../../auth"
+import { AuthWellKnown } from "@opencode-ai/core/auth-well-known"
 import { cmd } from "./cmd"
 import { CliError, effectCmd, fail } from "../effect-cmd"
 import { UI } from "../ui"
@@ -252,6 +253,7 @@ export const ProvidersListCommand = effectCmd({
   instance: false,
   handler: Effect.fn("Cli.providers.list")(function* (_args) {
     const authSvc = yield* Auth.Service
+    const authWellKnown = yield* AuthWellKnown.Service
     const modelsDev = yield* ModelsDev.Service
 
     UI.empty()
@@ -259,7 +261,8 @@ export const ProvidersListCommand = effectCmd({
     const homedir = os.homedir()
     const displayPath = authPath.startsWith(homedir) ? authPath.replace(homedir, "~") : authPath
     yield* Prompt.intro(`Credentials ${UI.Style.TEXT_DIM}${displayPath}`)
-    const results = Object.entries(yield* Effect.orDie(authSvc.all()))
+    const results = Object.entries(yield* Effect.orDie(authSvc.all())).filter(([, result]) => result.type !== "wellknown")
+    const wellKnownResults = Object.entries(yield* Effect.orDie(authWellKnown.all()))
     const database = yield* modelsDev.get()
 
     for (const [providerID, result] of results) {
@@ -267,7 +270,11 @@ export const ProvidersListCommand = effectCmd({
       yield* Prompt.log.info(`${name} ${UI.Style.TEXT_DIM}${result.type}`)
     }
 
-    yield* Prompt.outro(`${results.length} credentials`)
+    for (const [url] of wellKnownResults) {
+      yield* Prompt.log.info(`${url} ${UI.Style.TEXT_DIM}wellknown`)
+    }
+
+    yield* Prompt.outro(`${results.length + wellKnownResults.length} credentials`)
 
     const activeEnvVars: Array<{ provider: string; envVar: string }> = []
 
@@ -316,19 +323,19 @@ export const ProvidersLoginCommand = effectCmd({
       }),
   handler: Effect.fn("Cli.providers.login")(function* (args) {
     const authSvc = yield* Auth.Service
+    const authWellKnown = yield* AuthWellKnown.Service
 
     UI.empty()
     yield* Prompt.intro("Add credential")
     if (args.url) {
       const url = args.url.replace(/\/+$/, "")
-      const wellknown = (yield* cliTry(`Failed to load auth provider metadata from ${url}: `, () =>
-        fetch(`${url}/.well-known/opencode`).then((x) => x.json()),
-      )) as {
-        auth: { command: string[]; env: string }
-      }
+      const wellknown = yield* authWellKnown.metadata(url).pipe(
+        Effect.mapError((error) => new CliError({ message: `Failed to load auth provider metadata from ${url}: ${errorMessage(error)}` })),
+      )
+      if (!wellknown.auth) return yield* fail(`Auth provider metadata from ${url} is missing auth configuration`)
       yield* Prompt.log.info(`Running \`${wellknown.auth.command.join(" ")}\``)
       const abort = new AbortController()
-      const proc = Process.spawn(wellknown.auth.command, { stdout: "pipe", stderr: "inherit", abort: abort.signal })
+      const proc = Process.spawn([...wellknown.auth.command], { stdout: "pipe", stderr: "inherit", abort: abort.signal })
       if (!proc.stdout) {
         yield* Prompt.log.error("Failed")
         yield* Prompt.outro("Done")
@@ -342,7 +349,7 @@ export const ProvidersLoginCommand = effectCmd({
         yield* Prompt.outro("Done")
         return
       }
-      yield* Effect.orDie(authSvc.set(url, { type: "wellknown", key: wellknown.auth.env, token: token.trim() }))
+      yield* Effect.orDie(authWellKnown.set(url, new AuthWellKnown.Entry({ key: wellknown.auth.env, token: token.trim() })))
       yield* Prompt.log.success("Logged into " + url)
       yield* Prompt.outro("Done")
       return
@@ -492,10 +499,20 @@ export const ProvidersLogoutCommand = effectCmd({
   instance: false,
   handler: Effect.fn("Cli.providers.logout")(function* (_args) {
     const authSvc = yield* Auth.Service
+    const authWellKnown = yield* AuthWellKnown.Service
     const modelsDev = yield* ModelsDev.Service
 
     UI.empty()
-    const credentials: Array<[string, Auth.Info]> = Object.entries(yield* Effect.orDie(authSvc.all()))
+    const credentials = [
+      ...Object.entries(yield* Effect.orDie(authSvc.all()))
+        .filter(([, value]) => value.type !== "wellknown")
+        .map(([key, value]) => ({ key, type: value.type, auth: "provider" as const })),
+      ...Object.keys(yield* Effect.orDie(authWellKnown.all())).map((key) => ({
+        key,
+        type: "wellknown" as const,
+        auth: "wellknown" as const,
+      })),
+    ]
     yield* Prompt.intro("Remove credential")
     if (credentials.length === 0) {
       yield* Prompt.log.error("No credentials found")
@@ -504,12 +521,15 @@ export const ProvidersLogoutCommand = effectCmd({
     const database = yield* modelsDev.get()
     const selected = yield* Prompt.select({
       message: "Select provider",
-      options: credentials.map(([key, value]) => ({
-        label: (database[key]?.name || key) + UI.Style.TEXT_DIM + " (" + value.type + ")",
-        value: key,
+      options: credentials.map((item, index) => ({
+        label: (database[item.key]?.name || item.key) + UI.Style.TEXT_DIM + " (" + item.type + ")",
+        value: index,
       })),
     })
-    yield* Effect.orDie(authSvc.remove(yield* promptValue(selected)))
+    const credential = credentials[yield* promptValue(selected)]
+    if (!credential) return
+    if (credential.auth === "wellknown") yield* Effect.orDie(authWellKnown.remove(credential.key))
+    else yield* Effect.orDie(authSvc.remove(credential.key))
     yield* Prompt.outro("Logout successful")
   }),
 })
