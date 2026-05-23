@@ -690,6 +690,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
                   },
                   release_date: "",
                   variants: {},
+                  serviceTiers: {},
                 }
               }
             }
@@ -931,6 +932,7 @@ export const Model = Schema.Struct({
   headers: Schema.Record(Schema.String, Schema.String),
   release_date: Schema.String,
   variants: optionalOmitUndefined(Schema.Record(Schema.String, Schema.Record(Schema.String, Schema.Any))),
+  serviceTiers: optionalOmitUndefined(Schema.Record(Schema.String, Schema.Record(Schema.String, Schema.Any))),
 }).annotate({ identifier: "Model" })
 export type Model = Types.DeepMutable<Schema.Schema.Type<typeof Model>>
 
@@ -1113,11 +1115,13 @@ function fromModelsDevModel(provider: ModelsDev.Provider, model: ModelsDev.Model
     },
     release_date: model.release_date ?? "",
     variants: {},
+    serviceTiers: {},
   }
 
   return {
     ...base,
     variants: mapValues(ProviderTransform.variants(base), (v) => v),
+    serviceTiers: mapValues(ProviderTransform.serviceTiers(base), (v) => v),
   }
 }
 
@@ -1365,10 +1369,19 @@ export const layer = Layer.effect(
               family: model.family ?? existingModel?.family ?? "",
               release_date: model.release_date ?? existingModel?.release_date ?? "",
               variants: {},
+              serviceTiers: {},
             }
             const merged = mergeDeep(ProviderTransform.variants(parsedModel), model.variants ?? {})
             parsedModel.variants = mapValues(
               pickBy(merged, (v) => !v.disabled),
+              (v) => omit(v, ["disabled"]),
+            )
+            const mergedTiers = mergeDeep(
+              ProviderTransform.serviceTiers(parsedModel),
+              model.serviceTiers ?? {},
+            )
+            parsedModel.serviceTiers = mapValues(
+              pickBy(mergedTiers, (v) => !v.disabled),
               (v) => omit(v, ["disabled"]),
             )
             parsed.models[modelID] = parsedModel
@@ -1505,6 +1518,19 @@ export const layer = Layer.effect(
             if (configVariants && model.variants) {
               const merged = mergeDeep(model.variants, configVariants)
               model.variants = mapValues(
+                pickBy(merged, (v) => !v.disabled),
+                (v) => omit(v, ["disabled"]),
+              )
+            }
+
+            if (!model.serviceTiers || Object.keys(model.serviceTiers).length === 0) {
+              model.serviceTiers = mapValues(ProviderTransform.serviceTiers(model), (v) => v)
+            }
+
+            const configServiceTiers = configProvider?.models?.[modelID]?.serviceTiers
+            if (configServiceTiers && model.serviceTiers) {
+              const merged = mergeDeep(model.serviceTiers, configServiceTiers)
+              model.serviceTiers = mapValues(
                 pickBy(merged, (v) => !v.disabled),
                 (v) => omit(v, ["disabled"]),
               )

@@ -6,6 +6,7 @@ import { DialogSelect } from "@tui/ui/dialog-select"
 import { useDialog } from "@tui/ui/dialog"
 import { createDialogProviderOptions, DialogProvider } from "./dialog-provider"
 import { DialogVariant } from "./dialog-variant"
+import { DialogServiceTier } from "./dialog-service-tier"
 import * as fuzzysort from "fuzzysort"
 import { useConnected } from "./use-connected"
 
@@ -132,14 +133,18 @@ export function DialogModel(props: { providerID?: string }) {
 
   function onSelect(providerID: string, modelID: string) {
     local.model.set({ providerID, modelID }, { recent: true })
-    const list = local.model.variant.list()
-    const cur = local.model.variant.selected()
-    if (cur === "default" || (cur && list.includes(cur))) {
-      dialog.clear()
+    const variants = local.model.variant.list()
+    const variantCur = local.model.variant.selected()
+    const variantNeedsPick = !(variantCur === "default" || (variantCur && variants.includes(variantCur)))
+    if (variants.length > 0 && variantNeedsPick) {
+      dialog.replace(() => <DialogVariant />)
       return
     }
-    if (list.length > 0) {
-      dialog.replace(() => <DialogVariant />)
+    const tiers = local.model.serviceTier.list()
+    const tierCur = local.model.serviceTier.selected()
+    const tierNeedsPick = !(tierCur === "default" || (tierCur && tiers.includes(tierCur)))
+    if (tiers.length > 0 && tierNeedsPick) {
+      dialog.replace(() => <DialogServiceTier />)
       return
     }
     dialog.clear()

@@ -121,12 +121,14 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           modelID: string
         }[]
         variant: Record<string, string | undefined>
+        serviceTier: Record<string, string | undefined>
       }>({
         ready: false,
         model: {},
         recent: [],
         favorite: [],
         variant: {},
+        serviceTier: {},
       })
 
       const filePath = path.join(Global.Path.state, "model.json")
@@ -144,6 +146,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           recent: modelStore.recent,
           favorite: modelStore.favorite,
           variant: modelStore.variant,
+          serviceTier: modelStore.serviceTier,
         })
       }
 
@@ -152,6 +155,8 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           if (Array.isArray(x.recent)) setModelStore("recent", x.recent)
           if (Array.isArray(x.favorite)) setModelStore("favorite", x.favorite)
           if (typeof x.variant === "object" && x.variant !== null) setModelStore("variant", x.variant)
+          if (typeof x.serviceTier === "object" && x.serviceTier !== null)
+            setModelStore("serviceTier", x.serviceTier)
         })
         .catch(() => {})
         .finally(() => {
@@ -377,6 +382,50 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
               return
             }
             this.set(variants[index + 1])
+          },
+        },
+        serviceTier: {
+          selected() {
+            const m = currentModel()
+            if (!m) return undefined
+            const key = `${m.providerID}/${m.modelID}`
+            return modelStore.serviceTier[key]
+          },
+          current() {
+            const v = this.selected()
+            if (!v) return undefined
+            if (!this.list().includes(v)) return undefined
+            return v
+          },
+          list() {
+            const m = currentModel()
+            if (!m) return []
+            const provider = sync.data.provider.find((x) => x.id === m.providerID)
+            const info = provider?.models[m.modelID]
+            if (!info?.serviceTiers) return []
+            return Object.keys(info.serviceTiers)
+          },
+          set(value: string | undefined) {
+            const m = currentModel()
+            if (!m) return
+            const key = `${m.providerID}/${m.modelID}`
+            setModelStore("serviceTier", key, value ?? "default")
+            save()
+          },
+          cycle() {
+            const tiers = this.list()
+            if (tiers.length === 0) return
+            const current = this.current()
+            if (!current) {
+              this.set(tiers[0])
+              return
+            }
+            const index = tiers.indexOf(current)
+            if (index === -1 || index === tiers.length - 1) {
+              this.set(undefined)
+              return
+            }
+            this.set(tiers[index + 1])
           },
         },
       }

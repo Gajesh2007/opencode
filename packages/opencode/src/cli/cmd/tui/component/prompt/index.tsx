@@ -1055,6 +1055,7 @@ export function Prompt(props: PromptProps) {
     }
 
     const variant = local.model.variant.current()
+    const serviceTier = local.model.serviceTier.current()
     let sessionID = props.sessionID
     if (sessionID == null) {
       const workspace = workspaceSelection()
@@ -1166,6 +1167,7 @@ export function Prompt(props: PromptProps) {
         model: `${selectedModel.providerID}/${selectedModel.modelID}`,
         messageID,
         variant,
+        serviceTier,
         parts: nonTextParts
           .filter((x) => x.type === "file")
           .map((x) => ({
@@ -1182,6 +1184,7 @@ export function Prompt(props: PromptProps) {
           agent: agent.name,
           model: selectedModel,
           variant,
+          serviceTier,
           parts: [
             ...editorParts,
             {

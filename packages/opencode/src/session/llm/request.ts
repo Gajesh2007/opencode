@@ -79,6 +79,17 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     !input.small && input.model.variants && input.user.model.variant
       ? input.model.variants[input.user.model.variant]
       : {}
+  // serviceTier entries may carry a `headers` field for headers the provider
+  // requires alongside the body change (e.g. anthropic-beta for fast mode).
+  // The @ai-sdk/anthropic provider currently auto-adds the fast-mode beta
+  // header on its own when speed === "fast", but explicit headers stay
+  // supported for future tiers that don't have SDK auto-injection.
+  const tierEntry =
+    !input.small && input.model.serviceTiers && input.user.model.serviceTier
+      ? input.model.serviceTiers[input.user.model.serviceTier]
+      : undefined
+  const tierHeaders: Record<string, string> = (tierEntry?.headers as Record<string, string> | undefined) ?? {}
+  const tierOptions = tierEntry ? Object.fromEntries(Object.entries(tierEntry).filter(([k]) => k !== "headers")) : {}
   const base = input.small
     ? ProviderTransform.smallOptions(input.model)
     : ProviderTransform.options({
@@ -86,7 +97,10 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
         sessionID: input.sessionID,
         providerOptions: input.provider.options,
       })
-  const options = mergeOptions(mergeOptions(mergeOptions(base, input.model.options), input.agent.options), variant)
+  const options = mergeOptions(
+    mergeOptions(mergeOptions(mergeOptions(base, input.model.options), input.agent.options), variant),
+    tierOptions,
+  )
   if (isOpenaiOauth) options.instructions = system.join("\n")
 
   const messages =
@@ -180,6 +194,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
             "User-Agent": USER_AGENT,
           }),
       ...input.model.headers,
+      ...tierHeaders,
       ...headers,
     },
   }

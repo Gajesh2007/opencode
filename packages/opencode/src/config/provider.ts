@@ -66,6 +66,25 @@ export const Model = Schema.Struct({
       ),
     ).annotate({ description: "Variant-specific configuration" }),
   ),
+  serviceTiers: Schema.optional(
+    Schema.Record(
+      Schema.String,
+      Schema.StructWithRest(
+        Schema.Struct({
+          disabled: Schema.optional(Schema.Boolean).annotate({
+            description: "Disable this service tier for the model",
+          }),
+          headers: Schema.optional(Schema.Record(Schema.String, Schema.String)).annotate({
+            description: "Extra request headers required by this service tier (e.g. anthropic-beta)",
+          }),
+        }),
+        [Schema.Record(Schema.String, Schema.Any)],
+      ),
+    ).annotate({
+      description:
+        "Service-tier-specific configuration. Keys are tier names ('priority', 'fast', 'flex', 'throughput', ...) and values are providerOptions to merge into the request.",
+    }),
+  ),
 })
 
 export const Info = Schema.Struct({

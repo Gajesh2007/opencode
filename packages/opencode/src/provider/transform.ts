@@ -341,28 +341,33 @@ function applyCaching(msgs: ModelMessage[], model: Provider.Model): ModelMessage
   const system = msgs.filter((msg) => msg.role === "system").slice(0, 2)
   const final = msgs.filter((msg) => msg.role !== "system").slice(-2)
 
-  const providerOptions = {
-    anthropic: {
-      cacheControl: { type: "ephemeral" },
-    },
-    openrouter: {
-      cacheControl: { type: "ephemeral" },
-    },
-    bedrock: {
-      cachePoint: { type: "default" },
-    },
-    openaiCompatible: {
-      cache_control: { type: "ephemeral" },
-    },
-    copilot: {
-      copilot_cache_control: { type: "ephemeral" },
-    },
-    alibaba: {
-      cacheControl: { type: "ephemeral" },
-    },
+  // Anthropic prompt caching has two TTLs: 5-minute (default) and 1-hour.
+  // Cache reads are 0.1× base for both; cache writes are 1.25× at 5m and 2× at
+  // 1h. The system prompt is stable across a coding session that easily runs
+  // longer than 5m, so the 2× write pays itself back well before the cache
+  // expires; the trailing user/assistant pair is transient and stays at 5m.
+  // The Anthropic API also requires 1h breakpoints to appear before 5m
+  // breakpoints in the request, which the system-then-final order satisfies.
+  const ANTHROPIC_LONG = { cacheControl: { type: "ephemeral", ttl: "1h" } }
+  const ANTHROPIC_SHORT = { cacheControl: { type: "ephemeral" } }
+  const longLived = {
+    anthropic: ANTHROPIC_LONG,
+    openrouter: ANTHROPIC_LONG,
+    bedrock: { cachePoint: { type: "default" } },
+    openaiCompatible: { cache_control: { type: "ephemeral", ttl: "1h" } },
+    copilot: { copilot_cache_control: { type: "ephemeral" } },
+    alibaba: { cacheControl: { type: "ephemeral", ttl: "1h" } },
+  }
+  const transient = {
+    anthropic: ANTHROPIC_SHORT,
+    openrouter: ANTHROPIC_SHORT,
+    bedrock: { cachePoint: { type: "default" } },
+    openaiCompatible: { cache_control: { type: "ephemeral" } },
+    copilot: { copilot_cache_control: { type: "ephemeral" } },
+    alibaba: { cacheControl: { type: "ephemeral" } },
   }
 
-  for (const msg of unique([...system, ...final])) {
+  const apply = (msg: ModelMessage, providerOptions: Record<string, any>) => {
     const useMessageLevelOptions =
       model.providerID === "anthropic" ||
       model.providerID.includes("bedrock") ||
@@ -378,12 +383,15 @@ function applyCaching(msgs: ModelMessage[], model: Provider.Model): ModelMessage
         lastContent.type !== "tool-approval-response"
       ) {
         lastContent.providerOptions = mergeDeep(lastContent.providerOptions ?? {}, providerOptions)
-        continue
+        return
       }
     }
 
     msg.providerOptions = mergeDeep(msg.providerOptions ?? {}, providerOptions)
   }
+
+  for (const msg of unique(system)) apply(msg, longLived)
+  for (const msg of unique(final)) apply(msg, transient)
 
   return msgs
 }
@@ -429,17 +437,20 @@ function unsupportedParts(msgs: ModelMessage[], model: Provider.Model): ModelMes
 export function message(msgs: ModelMessage[], model: Provider.Model, options: Record<string, unknown>) {
   msgs = unsupportedParts(msgs, model)
   msgs = normalizeMessages(msgs, model, options)
-  if (
-    (model.providerID === "anthropic" ||
-      model.providerID === "google-vertex-anthropic" ||
-      model.api.id.includes("anthropic") ||
-      model.api.id.includes("claude") ||
-      model.id.includes("anthropic") ||
-      model.id.includes("claude") ||
-      model.api.npm === "@ai-sdk/anthropic" ||
-      model.api.npm === "@ai-sdk/alibaba") &&
-    model.api.npm !== "@ai-sdk/gateway"
-  ) {
+  const looksAnthropic =
+    model.providerID === "anthropic" ||
+    model.providerID === "google-vertex-anthropic" ||
+    model.api.id.includes("anthropic") ||
+    model.api.id.includes("claude") ||
+    model.id.includes("anthropic") ||
+    model.id.includes("claude") ||
+    model.api.npm === "@ai-sdk/anthropic" ||
+    model.api.npm === "@ai-sdk/alibaba"
+  // Gateway: only apply manual caching for Anthropic upstreams. Other upstreams
+  // (OpenAI/Google) cache implicitly and don't need breakpoints.
+  const gatewayAnthropic =
+    model.api.npm === "@ai-sdk/gateway" && model.api.id.toLowerCase().startsWith("anthropic/")
+  if ((looksAnthropic && model.api.npm !== "@ai-sdk/gateway") || gatewayAnthropic) {
     msgs = applyCaching(msgs, model)
   }
 
@@ -1030,6 +1041,72 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
   return {}
 }
 
+// Built-in performance/cost service tiers per provider. Each entry's options
+// are merged into the request's providerOptions when the user selects the tier.
+// Tier names are user-facing so they show up verbatim in the picker.
+export function serviceTiers(model: Provider.Model): Record<string, Record<string, any>> {
+  const apiId = model.api.id.toLowerCase()
+  const isOpus46Or47 = ["opus-4-6", "opus-4.6", "opus-4-7", "opus-4.7"].some((v) => apiId.includes(v))
+
+  switch (model.api.npm) {
+    case "@ai-sdk/anthropic":
+    case "@ai-sdk/google-vertex/anthropic": {
+      const tiers: Record<string, Record<string, any>> = {}
+      // Fast mode: Opus 4.6 / 4.7 only. @ai-sdk/anthropic auto-adds the
+      // anthropic-beta: fast-mode-2026-02-01 header when speed === "fast".
+      // Pricing is 6x standard. Not compatible with Priority Tier or Batch.
+      if (isOpus46Or47) tiers["fast"] = { speed: "fast" }
+      return tiers
+    }
+
+    case "@ai-sdk/openai": {
+      const tiers: Record<string, Record<string, any>> = {}
+      // Priority: gpt-4 / gpt-5 / gpt-5-mini / o3 / o4-mini (NOT gpt-5-nano)
+      const hasPriority = /(^|\/)(gpt-4|gpt-5-mini|o3|o4-mini)(?:[.-]|$)/.test(apiId) ||
+        (/(^|\/)gpt-5(?:[.-]|$)/.test(apiId) && !apiId.includes("gpt-5-nano"))
+      // Flex: o3 / o4-mini / gpt-5 family
+      const hasFlex = /(^|\/)(o3|o4-mini)(?:[.-]|$)/.test(apiId) || /(^|\/)gpt-5(?:[.-]|$)/.test(apiId)
+      if (hasPriority) tiers["priority"] = { serviceTier: "priority" }
+      if (hasFlex) tiers["flex"] = { serviceTier: "flex" }
+      return tiers
+    }
+
+    case "@ai-sdk/gateway": {
+      // Per Vercel docs: serviceTier is honored for OpenAI / Google AI Studio /
+      // Google Vertex AI upstreams. Setting it on other models is a no-op, so
+      // only offer those tiers when the model id targets a supported upstream.
+      const tiers: Record<string, Record<string, any>> = {
+        throughput: { gateway: { sort: "tps" } },
+        latency: { gateway: { sort: "ttft" } },
+        cheapest: { gateway: { sort: "cost" } },
+      }
+      const supportsTierField = apiId.startsWith("openai/") || apiId.startsWith("google/") || apiId.startsWith("vertex/")
+      if (supportsTierField) {
+        tiers["priority"] = { gateway: { serviceTier: "priority" } }
+        tiers["flex"] = { gateway: { serviceTier: "flex" } }
+      }
+      // Anthropic fast mode through AI Gateway. Vercel changelog:
+      //   https://vercel.com/changelog/opus-4-6-fast-mode-available-on-ai-gateway
+      // The field is `providerOptions.anthropic.speed = "fast"`, NOT
+      // gateway.serviceTier. Our gateway providerOptions() routes any non-
+      // `gateway` keys under the upstream slug, so emitting flat `{ speed }`
+      // here lands as `{ anthropic: { speed: "fast" } }` on the wire.
+      if (apiId.startsWith("anthropic/") && isOpus46Or47) {
+        tiers["fast"] = { speed: "fast" }
+      }
+      return tiers
+    }
+
+    case "@openrouter/ai-sdk-provider":
+      return {
+        throughput: { provider: { sort: "throughput" } },
+        latency: { provider: { sort: "latency" } },
+        cheapest: { provider: { sort: "price" } },
+      }
+  }
+  return {}
+}
+
 export function options(input: {
   model: Provider.Model
   sessionID: string
@@ -1162,8 +1239,15 @@ export function options(input: {
     result["prompt_cache_key"] = input.sessionID
   }
   if (input.model.api.npm === "@ai-sdk/gateway") {
-    result["gateway"] = {
-      caching: "auto",
+    // Vercel's `caching: "auto"` adds a single 5-minute breakpoint at the end
+    // of static content for Anthropic upstreams. For Anthropic models we
+    // instead place our own breakpoints (1h on system, 5m on the trailing
+    // pair) via applyCaching below, which is forwarded to the upstream as
+    // per-message providerOptions.anthropic.cacheControl. For non-Anthropic
+    // upstreams we leave Gateway's auto-caching on.
+    const isAnthropicUpstream = input.model.api.id.toLowerCase().startsWith("anthropic/")
+    if (!isAnthropicUpstream) {
+      result["gateway"] = { caching: "auto" }
     }
   }
 
