@@ -1507,6 +1507,8 @@ const PART_MAPPING = {
   reasoning: ReasoningPart,
 }
 
+const INLINE_TOOL_ICON_WIDTH = 2
+
 function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: AssistantMessage }) {
   const { theme } = useTheme()
   const ctx = use()
@@ -1754,18 +1756,12 @@ function InlineTool(props: {
   const sync = useSync()
   const renderer = useRenderer()
   const [hover, setHover] = createSignal(false)
+  const [errorExpanded, setErrorExpanded] = createSignal(false)
 
   const permission = createMemo(() => {
     const callID = sync.data.permission[ctx.sessionID]?.at(0)?.tool?.callID
     if (!callID) return false
     return callID === props.part.callID
-  })
-
-  const fg = createMemo(() => {
-    if (permission()) return theme.warning
-    if (hover() && props.onClick) return theme.text
-    if (props.complete) return theme.textMuted
-    return theme.text
   })
 
   const error = createMemo(() => (props.part.state.status === "error" ? props.part.state.error : undefined))
@@ -1778,14 +1774,28 @@ function InlineTool(props: {
       error()?.includes("user dismissed"),
   )
 
+  const failed = createMemo(() => Boolean(error() && !denied()))
+  const clickable = createMemo(() => Boolean(props.onClick || failed()))
+  const fg = createMemo(() => {
+    if (permission()) return theme.warning
+    if (failed()) return theme.error
+    if (hover() && props.onClick) return theme.text
+    if (props.complete) return theme.textMuted
+    return theme.text
+  })
+
   return (
     <box
       marginTop={margin()}
       paddingLeft={3}
-      onMouseOver={() => props.onClick && setHover(true)}
+      onMouseOver={() => clickable() && setHover(true)}
       onMouseOut={() => setHover(false)}
       onMouseUp={() => {
         if (renderer.getSelection()?.getSelectedText()) return
+        if (failed()) {
+          setErrorExpanded((value) => !value)
+          return
+        }
         props.onClick?.()
       }}
       renderBefore={function () {
@@ -1794,21 +1804,10 @@ function InlineTool(props: {
         if (!parent) {
           return
         }
-        if (el.height > 1) {
-          setMargin(1)
-          return
-        }
         const children = parent.getChildren()
         const index = children.indexOf(el)
         const previous = children[index - 1]
-        if (!previous) {
-          setMargin(0)
-          return
-        }
-        if (previous.height > 1 || previous.id.startsWith("text-")) {
-          setMargin(1)
-          return
-        }
+        setMargin(previous?.id.startsWith("text-") ? 1 : 0)
       }}
     >
       <Switch>
@@ -1816,15 +1815,37 @@ function InlineTool(props: {
           <Spinner color={fg()} children={props.children} />
         </Match>
         <Match when={true}>
-          <text paddingLeft={3} fg={fg()} attributes={denied() ? TextAttributes.STRIKETHROUGH : undefined}>
-            <Show fallback={<>~ {props.pending}</>} when={props.complete}>
-              <span style={{ fg: props.iconColor }}>{props.icon}</span> {props.children}
-            </Show>
-          </text>
+          <Show
+            fallback={
+              <text paddingLeft={3} fg={fg()} attributes={denied() ? TextAttributes.STRIKETHROUGH : undefined}>
+                ~ {props.pending}
+              </text>
+            }
+            when={props.complete}
+          >
+            <box flexDirection="row">
+              <text
+                width={INLINE_TOOL_ICON_WIDTH}
+                fg={failed() ? theme.error : (props.iconColor ?? fg())}
+                attributes={denied() ? TextAttributes.STRIKETHROUGH : undefined}
+              >
+                {props.icon}
+              </text>
+              <text
+                flexGrow={1}
+                fg={failed() ? theme.error : fg()}
+                attributes={denied() ? TextAttributes.STRIKETHROUGH : undefined}
+              >
+                {props.children}
+              </text>
+            </box>
+          </Show>
         </Match>
       </Switch>
-      <Show when={error() && !denied()}>
-        <text fg={theme.error}>{error()}</text>
+      <Show when={failed() && errorExpanded()}>
+        <box paddingLeft={INLINE_TOOL_ICON_WIDTH}>
+          <text fg={theme.error}>{error()}</text>
+        </box>
       </Show>
     </box>
   )
