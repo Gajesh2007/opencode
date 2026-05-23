@@ -184,7 +184,9 @@ type PromptSubmitInput = {
   resetHistoryNavigation: () => void
   setMode: (mode: "normal" | "shell") => void
   setPopover: (popover: "at" | "slash" | null) => void
+  newSessionProjectDirectory?: Accessor<string | undefined>
   newSessionWorktree?: Accessor<string | undefined>
+  newSessionWorktreeBranch?: Accessor<string | undefined>
   onNewSessionWorktreeReset?: () => void
   shouldQueue?: Accessor<boolean>
   onQueue?: (draft: FollowupDraft) => void
@@ -313,18 +315,25 @@ export function createPromptSubmit(input: PromptSubmitInput) {
     input.addToHistory(currentPrompt, mode)
     input.resetHistoryNavigation()
 
-    const projectDirectory = sdk.directory
     const isNewSession = !params.id
+    const projectDirectory = isNewSession ? (input.newSessionProjectDirectory?.() ?? sdk.directory) : sdk.directory
     const shouldAutoAccept = isNewSession && input.autoAccept()
     const worktreeSelection = input.newSessionWorktree?.() || "main"
 
     let sessionDirectory = projectDirectory
-    let client = sdk.client
+    let client =
+      projectDirectory === sdk.directory
+        ? sdk.client
+        : sdk.createClient({
+            directory: projectDirectory,
+            throwOnError: true,
+          })
 
     if (isNewSession) {
       if (worktreeSelection === "create") {
+        const branch = input.newSessionWorktreeBranch?.()?.trim()
         const createdWorktree = await client.worktree
-          .create({ directory: projectDirectory })
+          .create(branch ? { directory: projectDirectory, worktreeCreateInput: { branch } } : { directory: projectDirectory })
           .then((x) => x.data)
           .catch((err) => {
             showToast({
@@ -348,6 +357,8 @@ export function createPromptSubmit(input: PromptSubmitInput) {
       if (worktreeSelection !== "main" && worktreeSelection !== "create") {
         sessionDirectory = worktreeSelection
       }
+
+      if (projectDirectory !== sdk.directory) globalSync.child(projectDirectory)
 
       if (sessionDirectory !== projectDirectory) {
         client = sdk.createClient({

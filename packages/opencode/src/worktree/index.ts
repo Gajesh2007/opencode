@@ -46,6 +46,7 @@ export type Info = Schema.Schema.Type<typeof Info>
 
 export const CreateInput = Schema.Struct({
   name: Schema.optional(Schema.String),
+  branch: Schema.optional(Schema.String),
   startCommand: Schema.optional(
     Schema.String.annotate({ description: "Additional startup script to run after the project's start command" }),
   ),
@@ -134,9 +135,10 @@ function failedRemoves(...chunks: string[]) {
 // ---------------------------------------------------------------------------
 
 export interface Interface {
-  readonly makeWorktreeInfo: (options?: { name?: string; detached?: boolean }) => Effect.Effect<Info, Error>
+  readonly makeWorktreeInfo: (options?: { name?: string; branch?: string; detached?: boolean }) => Effect.Effect<Info, Error>
   readonly createFromInfo: (info: Info, startCommand?: string) => Effect.Effect<void, Error>
   readonly create: (input?: CreateInput) => Effect.Effect<Info, Error>
+  readonly branches: () => Effect.Effect<string[], Error>
   readonly list: () => Effect.Effect<(Omit<Info, "branch"> & { branch?: string })[], Error>
   readonly remove: (input: RemoveInput) => Effect.Effect<boolean, Error>
   readonly reset: (input: ResetInput) => Effect.Effect<boolean, Error>
@@ -185,17 +187,18 @@ export const layer: Layer.Layer<
     const candidate = Effect.fn("Worktree.candidate")(function* (input: {
       root: string
       name?: string
+      branch?: string
       detached?: boolean
     }) {
       const ctx = yield* InstanceState.context
       for (const attempt of Array.from({ length: MAX_NAME_ATTEMPTS }, (_, i) => i)) {
         const name = input.name ? (attempt === 0 ? input.name : `${input.name}-${Slug.create()}`) : Slug.create()
-        const branch = input.detached ? undefined : `opencode/${name}`
+        const branch = input.branch ?? (input.detached ? undefined : `opencode/${name}`)
         const directory = pathSvc.join(input.root, name)
 
         if (yield* fs.exists(directory).pipe(Effect.orDie)) continue
 
-        if (branch) {
+        if (branch && !input.branch) {
           const ref = `refs/heads/${branch}`
           const branchCheck = yield* git(["show-ref", "--verify", "--quiet", ref], { cwd: ctx.worktree })
           if (branchCheck.code === 0) continue
@@ -208,6 +211,7 @@ export const layer: Layer.Layer<
 
     const makeWorktreeInfo = Effect.fn("Worktree.makeWorktreeInfo")(function* (input?: {
       name?: string
+      branch?: string
       detached?: boolean
     }) {
       const ctx = yield* InstanceState.context
@@ -218,14 +222,24 @@ export const layer: Layer.Layer<
       const root = pathSvc.join(Global.Path.data, "worktree", ctx.project.id)
       yield* fs.makeDirectory(root, { recursive: true }).pipe(Effect.orDie)
 
-      return yield* candidate({ root, name: input?.name ? slugify(input.name) : "", detached: input?.detached })
+      return yield* candidate({
+        root,
+        name: input?.name ? slugify(input.name) : input?.branch ? slugify(input.branch) : "",
+        branch: input?.branch?.trim() || undefined,
+        detached: input?.detached,
+      })
     })
 
     const setup = Effect.fnUntraced(function* (info: Info) {
       const ctx = yield* InstanceState.context
+      const branchExists = info.branch
+        ? (yield* git(["show-ref", "--verify", "--quiet", `refs/heads/${info.branch}`], { cwd: ctx.worktree })).code === 0
+        : false
       const created = yield* git(
         info.branch
-          ? ["worktree", "add", "--no-checkout", "-b", info.branch, info.directory]
+          ? branchExists
+            ? ["worktree", "add", "--no-checkout", info.directory, info.branch]
+            : ["worktree", "add", "--no-checkout", "-b", info.branch, info.directory]
           : ["worktree", "add", "--no-checkout", "--detach", info.directory, "HEAD"],
         { cwd: ctx.worktree },
       )
@@ -297,9 +311,25 @@ export const layer: Layer.Layer<
     })
 
     const create = Effect.fn("Worktree.create")(function* (input?: CreateInput) {
-      const info = yield* makeWorktreeInfo({ name: input?.name })
+      const info = yield* makeWorktreeInfo({ name: input?.name, branch: input?.branch })
       yield* createFromInfo(info, input?.startCommand)
       return info
+    })
+
+    const branches = Effect.fn("Worktree.branches")(function* () {
+      const ctx = yield* InstanceState.context
+      if (ctx.project.vcs !== "git") return []
+
+      const result = yield* git(["for-each-ref", "--format=%(refname:short)", "refs/heads"], { cwd: ctx.worktree })
+      if (result.code !== 0) {
+        return yield* new ListFailedError({ message: result.stderr || result.text || "Failed to read git branches" })
+      }
+
+      return result.text
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .sort((a, b) => a.localeCompare(b))
     })
 
     const canonical = Effect.fnUntraced(function* (input: string) {
@@ -603,7 +633,7 @@ export const layer: Layer.Layer<
       return true
     })
 
-    return Service.of({ makeWorktreeInfo, createFromInfo, create, list, remove, reset })
+    return Service.of({ makeWorktreeInfo, createFromInfo, create, branches, list, remove, reset })
   }),
 )
 

@@ -54,6 +54,7 @@ export const ToolListQuery = Schema.Struct({
 })
 
 const WorktreeList = Schema.Array(Schema.String)
+const WorktreeBranchList = Schema.Array(Schema.String)
 const WorktreeErrorName = Schema.Union([
   Schema.Literal("WorktreeNotGitError"),
   Schema.Literal("WorktreeNameGenerationFailedError"),
@@ -87,6 +88,7 @@ export const ExperimentalPaths = {
   tool: "/experimental/tool",
   toolIDs: "/experimental/tool/ids",
   worktree: "/experimental/worktree",
+  worktreeBranch: "/experimental/worktree/branch",
   worktreeReset: "/experimental/worktree/reset",
   session: "/experimental/session",
   resource: "/experimental/resource",
@@ -163,6 +165,17 @@ export const ExperimentalApi = HttpApi.make("experimental")
             identifier: "worktree.list",
             summary: "List worktrees",
             description: "List all sandbox worktrees for the current project.",
+          }),
+        ),
+        HttpApiEndpoint.get("worktreeBranch", ExperimentalPaths.worktreeBranch, {
+          query: WorkspaceRoutingQuery,
+          success: described(WorktreeBranchList, "List of git branch names"),
+          error: WorktreeApiError,
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "worktree.branches",
+            summary: "List git branches",
+            description: "List all local git branches for the current project.",
           }),
         ),
         HttpApiEndpoint.post("worktreeCreate", ExperimentalPaths.worktree, {

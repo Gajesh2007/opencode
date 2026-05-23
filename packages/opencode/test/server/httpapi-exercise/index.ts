@@ -463,6 +463,7 @@ const scenarios: Scenario[] = [
     .json(200, array, "status"),
   http.protected.get("/experimental/tool/ids", "tool.ids").json(200, array),
   http.protected.get("/experimental/worktree", "worktree.list").json(200, array),
+  http.protected.get("/experimental/worktree/branch", "worktree.branches").json(200, array),
   http.protected
     .post("/experimental/worktree", "worktree.create")
     .mutating()

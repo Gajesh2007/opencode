@@ -20,6 +20,7 @@ const storedSessions: Record<string, Array<{ id: string; title?: string }>> = {}
 const promoted: Array<{ directory: string; sessionID: string }> = []
 const sentShell: string[] = []
 const syncedDirectories: string[] = []
+const createdWorktrees: Array<{ directory: string; input: unknown }> = []
 
 let params: { id?: string } = {}
 let selected = "/repo/worktree-a"
@@ -50,7 +51,10 @@ const clientFor = (directory: string) => {
       abort: async () => ({ data: undefined }),
     },
     worktree: {
-      create: async () => ({ data: { directory: `${directory}/new` } }),
+      create: async (input: unknown) => {
+        createdWorktrees.push({ directory, input })
+        return { data: { directory: `${directory}/new` } }
+      },
     },
   }
 }
@@ -211,6 +215,7 @@ beforeEach(() => {
   params = {}
   sentShell.length = 0
   syncedDirectories.length = 0
+  createdWorktrees.length = 0
   selected = "/repo/worktree-a"
   variant = undefined
   for (const key of Object.keys(storedSessions)) delete storedSessions[key]
@@ -279,6 +284,93 @@ describe("prompt submit worktree selection", () => {
     await submit.handleSubmit(event)
 
     expect(enabledAutoAccept).toEqual([{ sessionID: "session-1", directory: "/repo/worktree-a" }])
+  })
+
+  test("creates new sessions in the selected project", async () => {
+    const submit = createPromptSubmit({
+      info: () => undefined,
+      imageAttachments: () => [],
+      commentCount: () => 0,
+      autoAccept: () => false,
+      mode: () => "shell",
+      working: () => false,
+      editor: () => undefined,
+      queueScroll: () => undefined,
+      promptLength: (value) => value.reduce((sum, part) => sum + ("content" in part ? part.content.length : 0), 0),
+      addToHistory: () => undefined,
+      resetHistoryNavigation: () => undefined,
+      setMode: () => undefined,
+      setPopover: () => undefined,
+      newSessionProjectDirectory: () => "/repo/other",
+      newSessionWorktree: () => "main",
+      onNewSessionWorktreeReset: () => undefined,
+      onSubmit: () => undefined,
+    })
+
+    await submit.handleSubmit({ preventDefault: () => undefined } as unknown as Event)
+
+    expect(createdClients).toEqual(["/repo/other"])
+    expect(createdSessions).toEqual(["/repo/other"])
+    expect(sentShell).toEqual(["/repo/other"])
+    expect(promoted).toEqual([{ directory: "/repo/other", sessionID: "session-1" }])
+  })
+
+  test("passes selected branch when creating a worktree", async () => {
+    const submit = createPromptSubmit({
+      info: () => undefined,
+      imageAttachments: () => [],
+      commentCount: () => 0,
+      autoAccept: () => false,
+      mode: () => "shell",
+      working: () => false,
+      editor: () => undefined,
+      queueScroll: () => undefined,
+      promptLength: (value) => value.reduce((sum, part) => sum + ("content" in part ? part.content.length : 0), 0),
+      addToHistory: () => undefined,
+      resetHistoryNavigation: () => undefined,
+      setMode: () => undefined,
+      setPopover: () => undefined,
+      newSessionProjectDirectory: () => "/repo/main",
+      newSessionWorktree: () => "create",
+      newSessionWorktreeBranch: () => "figma-plugin",
+      onNewSessionWorktreeReset: () => undefined,
+      onSubmit: () => undefined,
+    })
+
+    await submit.handleSubmit({ preventDefault: () => undefined } as unknown as Event)
+
+    expect(createdWorktrees).toEqual([
+      { directory: "/repo/main", input: { directory: "/repo/main", worktreeCreateInput: { branch: "figma-plugin" } } },
+    ])
+    expect(createdSessions).toEqual(["/repo/main/new"])
+  })
+
+  test("ignores new-session project selection for active sessions", async () => {
+    params = { id: "session-1" }
+
+    const submit = createPromptSubmit({
+      info: () => ({ id: "session-1" }),
+      imageAttachments: () => [],
+      commentCount: () => 0,
+      autoAccept: () => false,
+      mode: () => "shell",
+      working: () => false,
+      editor: () => undefined,
+      queueScroll: () => undefined,
+      promptLength: (value) => value.reduce((sum, part) => sum + ("content" in part ? part.content.length : 0), 0),
+      addToHistory: () => undefined,
+      resetHistoryNavigation: () => undefined,
+      setMode: () => undefined,
+      setPopover: () => undefined,
+      newSessionProjectDirectory: () => "/repo/other",
+      newSessionWorktree: () => "main",
+      onSubmit: () => undefined,
+    })
+
+    await submit.handleSubmit({ preventDefault: () => undefined } as unknown as Event)
+
+    expect(createdClients).toEqual([])
+    expect(sentShell).toEqual(["/repo/main"])
   })
 
   test("includes the selected variant on optimistic prompts", async () => {

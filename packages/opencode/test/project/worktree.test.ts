@@ -111,6 +111,19 @@ describe("Worktree", () => {
     )
 
     it.instance(
+      "uses requested branch as branch and directory base",
+      () =>
+        Effect.gen(function* () {
+          const svc = yield* Worktree.Service
+          const info = yield* svc.makeWorktreeInfo({ branch: "feat/new-sidebar" })
+
+          expect(info.name).toBe("feat-new-sidebar")
+          expect(info.branch).toBe("feat/new-sidebar")
+        }),
+      { git: true },
+    )
+
+    it.instance(
       "slugifies the provided name",
       () =>
         Effect.gen(function* () {
@@ -182,6 +195,20 @@ describe("Worktree", () => {
 
   describe("create + remove lifecycle", () => {
     it.instance(
+      "lists local branches",
+      () =>
+        Effect.gen(function* () {
+          const test = yield* TestInstance
+          const svc = yield* Worktree.Service
+
+          yield* git(test.directory, ["branch", "feat/new-sidebar"])
+
+          expect(yield* svc.branches()).toEqual(expect.arrayContaining(["feat/new-sidebar"]))
+        }),
+      { git: true },
+    )
+
+    it.instance(
       "create returns worktree info and remove cleans up",
       () =>
         withCreatedWorktree(undefined, ({ info }) =>
@@ -209,6 +236,21 @@ describe("Worktree", () => {
 
             const list = yield* svc.list()
             expect(list).toContainEqual(expect.objectContaining({ name: info.name, branch: info.branch }))
+          }),
+        ),
+      { git: true },
+    )
+
+    wintest(
+      "create uses requested branch",
+      () =>
+        withCreatedWorktree({ branch: "figma-plugin" }, ({ info, ready }) =>
+          Effect.gen(function* () {
+            expect(info.name).toBe("figma-plugin")
+            expect(info.branch).toBe("figma-plugin")
+            expect(ready.branch).toBe("figma-plugin")
+
+            expect((yield* git(info.directory, ["symbolic-ref", "--short", "HEAD"])).trim()).toBe("figma-plugin")
           }),
         ),
       { git: true },
