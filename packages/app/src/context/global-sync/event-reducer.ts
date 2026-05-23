@@ -2,6 +2,7 @@ import { Binary } from "@opencode-ai/core/util/binary"
 import { produce, reconcile, type SetStoreFunction, type Store } from "solid-js/store"
 import type {
   Message,
+  McpStatus,
   Part,
   PermissionRequest,
   Project,
@@ -180,6 +181,11 @@ export function applyDirectoryEvent(input: {
     case "session.status": {
       const props = event.properties as { sessionID: string; status: SessionStatus }
       input.setStore("session_status", props.sessionID, reconcile(props.status))
+      break
+    }
+    case "mcp.status.changed": {
+      const props = event.properties as { name: string; status: McpStatus }
+      input.setStore("mcp", props.name, reconcile(props.status))
       break
     }
     case "message.updated": {

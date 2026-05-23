@@ -29,6 +29,7 @@ export type Event =
   | EventSessionIdle
   | EventMcpToolsChanged
   | EventMcpBrowserOpenFailed
+  | EventMcpStatusChanged
   | EventCommandExecuted
   | EventProjectUpdated
   | EventSessionCompacted
@@ -351,6 +352,40 @@ export type SessionStatus =
   | {
       type: "busy"
     }
+
+export type McpStatusConnected = {
+  status: "connected"
+}
+
+export type McpStatusDisabled = {
+  status: "disabled"
+}
+
+export type McpStatusConnecting = {
+  status: "connecting"
+}
+
+export type McpStatusFailed = {
+  status: "failed"
+  error: string
+}
+
+export type McpStatusNeedsAuth = {
+  status: "needs_auth"
+}
+
+export type McpStatusNeedsClientRegistration = {
+  status: "needs_client_registration"
+  error: string
+}
+
+export type McpStatus =
+  | McpStatusConnected
+  | McpStatusDisabled
+  | McpStatusConnecting
+  | McpStatusFailed
+  | McpStatusNeedsAuth
+  | McpStatusNeedsClientRegistration
 
 export type Project = {
   id: string
@@ -830,6 +865,7 @@ export type GlobalEvent = {
     | EventSessionIdle
     | EventMcpToolsChanged
     | EventMcpBrowserOpenFailed
+    | EventMcpStatusChanged
     | EventCommandExecuted
     | EventProjectUpdated
     | EventSessionCompacted
@@ -1661,35 +1697,6 @@ export type FormatterStatus = {
   extensions: Array<string>
   enabled: boolean
 }
-
-export type McpStatusConnected = {
-  status: "connected"
-}
-
-export type McpStatusDisabled = {
-  status: "disabled"
-}
-
-export type McpStatusFailed = {
-  status: "failed"
-  error: string
-}
-
-export type McpStatusNeedsAuth = {
-  status: "needs_auth"
-}
-
-export type McpStatusNeedsClientRegistration = {
-  status: "needs_client_registration"
-  error: string
-}
-
-export type McpStatus =
-  | McpStatusConnected
-  | McpStatusDisabled
-  | McpStatusFailed
-  | McpStatusNeedsAuth
-  | McpStatusNeedsClientRegistration
 
 export type McpUnsupportedOAuthError = {
   error: string
@@ -2669,6 +2676,15 @@ export type EventMcpBrowserOpenFailed = {
   properties: {
     mcpName: string
     url: string
+  }
+}
+
+export type EventMcpStatusChanged = {
+  id: string
+  type: "mcp.status.changed"
+  properties: {
+    name: string
+    status: McpStatus
   }
 }
 

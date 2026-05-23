@@ -377,6 +377,13 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           break
         }
 
+        case "mcp.status.changed": {
+          if (workspace === project.workspace.current()) {
+            setStore("mcp", event.properties.name, reconcile(event.properties.status))
+          }
+          break
+        }
+
         case "vcs.branch.updated": {
           if (workspace === project.workspace.current()) {
             setStore("vcs", { branch: event.properties.branch })

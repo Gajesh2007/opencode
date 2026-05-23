@@ -26,7 +26,7 @@ import { BusEvent } from "../bus/bus-event"
 import { Bus } from "@/bus"
 import { TuiEvent } from "@/cli/cmd/tui/event"
 import open from "open"
-import { Effect, Exit, Layer, Option, Context, Schema, Stream } from "effect"
+import { Effect, Exit, Layer, Option, Context, Schema, Stream, Scope, Semaphore } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
@@ -79,6 +79,9 @@ const StatusConnected = Schema.Struct({ status: Schema.Literal("connected") }).a
 const StatusDisabled = Schema.Struct({ status: Schema.Literal("disabled") }).annotate({
   identifier: "MCPStatusDisabled",
 })
+const StatusConnecting = Schema.Struct({ status: Schema.Literal("connecting") }).annotate({
+  identifier: "MCPStatusConnecting",
+})
 const StatusFailed = Schema.Struct({ status: Schema.Literal("failed"), error: Schema.String }).annotate({
   identifier: "MCPStatusFailed",
 })
@@ -93,11 +96,20 @@ const StatusNeedsClientRegistration = Schema.Struct({
 export const Status = Schema.Union([
   StatusConnected,
   StatusDisabled,
+  StatusConnecting,
   StatusFailed,
   StatusNeedsAuth,
   StatusNeedsClientRegistration,
 ]).annotate({ identifier: "MCPStatus", discriminator: "status" })
 export type Status = Schema.Schema.Type<typeof Status>
+
+export const StatusChanged = BusEvent.define(
+  "mcp.status.changed",
+  Schema.Struct({
+    name: Schema.String,
+    status: Status,
+  }),
+)
 
 // Store transports for OAuth servers to allow finishing auth
 type TransportWithAuth = StreamableHTTPClientTransport | SSEClientTransport
@@ -237,6 +249,7 @@ interface State {
   status: Record<string, Status>
   clients: Record<string, MCPClient>
   defs: Record<string, MCPToolDef[]>
+  revision: Record<string, number>
 }
 
 export interface Interface {
@@ -480,6 +493,7 @@ export const layer = Layer.effect(
       return { mcpClient, status, defs: listed } satisfies CreateResult
     })
     const cfgSvc = yield* Config.Service
+    const startupLock = Semaphore.makeUnsafe(1)
 
     const descendants = Effect.fnUntraced(
       function* (pid: number) {
@@ -519,43 +533,133 @@ export const layer = Layer.effect(
       })
     }
 
+    function failedStatus(error: unknown): Status {
+      return { status: "failed", error: error instanceof Error ? error.message : String(error) }
+    }
+
+    function bump(s: State, name: string) {
+      const next = (s.revision[name] ?? 0) + 1
+      s.revision[name] = next
+      return next
+    }
+
+    function closeClient(s: State, name: string) {
+      const client = s.clients[name]
+      delete s.defs[name]
+      if (!client) return Effect.void
+      return Effect.tryPromise(() => client.close()).pipe(Effect.ignore)
+    }
+
+    function closeCreateResult(result: CreateResult) {
+      const client = result.mcpClient
+      if (!client) return Effect.void
+      return Effect.tryPromise(() => client.close()).pipe(Effect.ignore)
+    }
+
+    const setStatus = Effect.fnUntraced(function* (s: State, name: string, status: Status) {
+      s.status[name] = status
+      yield* bus.publish(StatusChanged, { name, status }).pipe(Effect.ignore)
+      return status
+    })
+
+    const storeClient = Effect.fnUntraced(function* (
+      s: State,
+      name: string,
+      client: MCPClient,
+      listed: MCPToolDef[],
+      timeout?: number,
+    ) {
+      const bridge = yield* EffectBridge.make()
+      yield* closeClient(s, name)
+      s.clients[name] = client
+      s.defs[name] = listed
+      watch(s, name, client, bridge, timeout)
+      return yield* setStatus(s, name, { status: "connected" })
+    })
+
+    const applyCreateResult = Effect.fnUntraced(function* (
+      s: State,
+      name: string,
+      result: CreateResult,
+      timeout?: number,
+    ) {
+      const client = result.mcpClient
+      if (!client) {
+        yield* closeClient(s, name)
+        delete s.clients[name]
+        return yield* setStatus(s, name, result.status)
+      }
+
+      if (!result.defs) {
+        yield* closeCreateResult(result)
+        yield* closeClient(s, name)
+        delete s.clients[name]
+        return yield* setStatus(s, name, { status: "failed", error: "Failed to get tools" })
+      }
+
+      return yield* storeClient(s, name, client, result.defs, timeout)
+    })
+
+    const createSafely = (key: string, mcp: ConfigMCP.Info) =>
+      create(key, mcp).pipe(
+        Effect.catch((error) => {
+          log.error("mcp startup failed", { key, error })
+          return Effect.succeed({ status: failedStatus(error) } satisfies CreateResult)
+        }),
+      )
+
+    const startConfigured = Effect.fn("MCP.startConfigured")(function* (
+      s: State,
+      entries: ReadonlyArray<readonly [string, ConfigMCP.Info, number]>,
+    ) {
+      yield* startupLock.withPermits(1)(
+        Effect.forEach(
+          entries,
+          ([key, mcp, revision]) =>
+            Effect.gen(function* () {
+              if ((s.revision[key] ?? 0) !== revision) return
+              const result = yield* createSafely(key, mcp)
+              if ((s.revision[key] ?? 0) !== revision) {
+                yield* closeCreateResult(result)
+                return
+              }
+              yield* applyCreateResult(s, key, result, mcp.timeout)
+            }),
+          { concurrency: "unbounded", discard: true },
+        ),
+      )
+    })
+
     const state = yield* InstanceState.make<State>(
       Effect.fn("MCP.state")(function* () {
         const cfg = yield* cfgSvc.get()
-        const bridge = yield* EffectBridge.make()
+        const scope = yield* Scope.Scope
         const config = cfg.mcp ?? {}
         const s: State = {
           status: {},
           clients: {},
           defs: {},
+          revision: {},
         }
 
-        yield* Effect.forEach(
-          Object.entries(config),
-          ([key, mcp]) =>
-            Effect.gen(function* () {
-              if (!isMcpConfigured(mcp)) {
-                log.error("Ignoring MCP config entry without type", { key })
-                return
-              }
+        const configured = Object.entries(config).flatMap(([key, mcp]) => {
+          if (!isMcpConfigured(mcp)) {
+            log.error("Ignoring MCP config entry without type", { key })
+            return []
+          }
 
-              if (mcp.enabled === false) {
-                s.status[key] = { status: "disabled" }
-                return
-              }
+          if (mcp.enabled === false) {
+            s.status[key] = { status: "disabled" }
+            return []
+          }
 
-              const result = yield* create(key, mcp).pipe(Effect.catch(() => Effect.void))
-              if (!result) return
+          s.status[key] = { status: "connecting" }
+          return [[key, mcp, bump(s, key)] as const]
+        })
 
-              s.status[key] = result.status
-              if (result.mcpClient) {
-                s.clients[key] = result.mcpClient
-                s.defs[key] = result.defs!
-                watch(s, key, result.mcpClient, bridge, mcp.timeout)
-              }
-            }),
-          { concurrency: "unbounded" },
-        )
+        if (configured.length > 0) {
+          yield* startConfigured(s, configured).pipe(Effect.ignore, Effect.forkIn(scope), Effect.asVoid)
+        }
 
         yield* Effect.addFinalizer(() =>
           Effect.gen(function* () {
@@ -584,29 +688,6 @@ export const layer = Layer.effect(
       }),
     )
 
-    function closeClient(s: State, name: string) {
-      const client = s.clients[name]
-      delete s.defs[name]
-      if (!client) return Effect.void
-      return Effect.tryPromise(() => client.close()).pipe(Effect.ignore)
-    }
-
-    const storeClient = Effect.fnUntraced(function* (
-      s: State,
-      name: string,
-      client: MCPClient,
-      listed: MCPToolDef[],
-      timeout?: number,
-    ) {
-      const bridge = yield* EffectBridge.make()
-      yield* closeClient(s, name)
-      s.status[name] = { status: "connected" }
-      s.clients[name] = client
-      s.defs[name] = listed
-      watch(s, name, client, bridge, timeout)
-      return s.status[name]
-    })
-
     const status = Effect.fn("MCP.status")(function* () {
       const s = yield* InstanceState.get(state)
 
@@ -629,16 +710,15 @@ export const layer = Layer.effect(
 
     const createAndStore = Effect.fn("MCP.createAndStore")(function* (name: string, mcp: ConfigMCP.Info) {
       const s = yield* InstanceState.get(state)
-      const result = yield* create(name, mcp)
-
-      s.status[name] = result.status
-      if (!result.mcpClient) {
-        yield* closeClient(s, name)
-        delete s.clients[name]
-        return result.status
+      const revision = bump(s, name)
+      yield* setStatus(s, name, mcp.enabled === false ? { status: "disabled" } : { status: "connecting" })
+      const result = yield* createSafely(name, mcp)
+      if ((s.revision[name] ?? 0) !== revision) {
+        yield* closeCreateResult(result)
+        return s.status[name] ?? result.status
       }
 
-      return yield* storeClient(s, name, result.mcpClient, result.defs!, mcp.timeout)
+      return yield* applyCreateResult(s, name, result, mcp.timeout)
     })
 
     const add = Effect.fn("MCP.add")(function* (name: string, mcp: ConfigMCP.Info) {
@@ -655,9 +735,10 @@ export const layer = Layer.effect(
     const disconnect = Effect.fn("MCP.disconnect")(function* (name: string) {
       yield* requireMcpConfig(name)
       const s = yield* InstanceState.get(state)
+      bump(s, name)
       yield* closeClient(s, name)
       delete s.clients[name]
-      s.status[name] = { status: "disabled" }
+      yield* setStatus(s, name, { status: "disabled" })
     })
 
     const tools = Effect.fn("MCP.tools")(function* () {

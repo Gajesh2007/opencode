@@ -49,6 +49,8 @@ export const loadMcpQuery = (directory: string, sdk: OpencodeClient) =>
   queryOptions({
     queryKey: [directory, "mcp"] as const,
     queryFn: () => sdk.mcp.status().then((r) => r.data ?? {}),
+    refetchInterval: (query) =>
+      Object.values(query.state.data ?? {}).some((status) => status.status === "connecting") ? 1000 : false,
   })
 
 export const loadLspQuery = (directory: string, sdk: OpencodeClient) =>

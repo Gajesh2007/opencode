@@ -1,7 +1,9 @@
 import { expect, mock, beforeEach } from "bun:test"
 import { Cause, Effect, Exit } from "effect"
+import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import type { MCP as MCPNS } from "../../src/mcp/index"
-import { testEffect } from "../lib/effect"
+import { provideInstance, tmpdirScoped } from "../fixture/fixture"
+import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
 
 // --- Mock infrastructure ---
 
@@ -25,6 +27,10 @@ let lastCreatedClientName: string | undefined
 let connectShouldFail = false
 let connectShouldHang = false
 let connectError = "Mock transport cannot connect"
+let connectHook: (() => Promise<void>) | undefined
+let activeConnects = 0
+let maxActiveConnects = 0
+let connectStarts = 0
 // Tracks how many Client instances were created (detects leaks)
 let clientCreateCount = 0
 // Tracks how many times transport.close() is called across all mock transports
@@ -52,6 +58,19 @@ function getOrCreateClientState(name?: string): MockClientState {
   return state
 }
 
+async function runMockConnect() {
+  activeConnects++
+  connectStarts++
+  maxActiveConnects = Math.max(maxActiveConnects, activeConnects)
+  try {
+    await connectHook?.()
+    if (connectShouldHang) return new Promise<void>(() => {}) // never resolves
+    if (connectShouldFail) throw new Error(connectError)
+  } finally {
+    activeConnects--
+  }
+}
+
 // Mock transport that succeeds or fails based on connectShouldFail / connectShouldHang
 class MockStdioTransport {
   stderr: null = null
@@ -59,8 +78,7 @@ class MockStdioTransport {
   // oxlint-disable-next-line no-useless-constructor
   constructor(_opts: any) {}
   async start() {
-    if (connectShouldHang) return new Promise<void>(() => {}) // never resolves
-    if (connectShouldFail) throw new Error(connectError)
+    return runMockConnect()
   }
   async close() {
     transportCloseCount++
@@ -71,8 +89,7 @@ class MockStreamableHTTP {
   // oxlint-disable-next-line no-useless-constructor
   constructor(_url: URL, _opts?: any) {}
   async start() {
-    if (connectShouldHang) return new Promise<void>(() => {}) // never resolves
-    if (connectShouldFail) throw new Error(connectError)
+    return runMockConnect()
   }
   async close() {
     transportCloseCount++
@@ -84,8 +101,7 @@ class MockSSE {
   // oxlint-disable-next-line no-useless-constructor
   constructor(_url: URL, _opts?: any) {}
   async start() {
-    if (connectShouldHang) return new Promise<void>(() => {}) // never resolves
-    if (connectShouldFail) throw new Error(connectError)
+    return runMockConnect()
   }
   async close() {
     transportCloseCount++
@@ -173,6 +189,10 @@ beforeEach(() => {
   connectShouldFail = false
   connectShouldHang = false
   connectError = "Mock transport cannot connect"
+  connectHook = undefined
+  activeConnects = 0
+  maxActiveConnects = 0
+  connectStarts = 0
   clientCreateCount = 0
   transportCloseCount = 0
 })
@@ -187,6 +207,118 @@ function statusName(status: Record<string, MCPNS.Status> | MCPNS.Status, server:
   if ("status" in status) return status.status
   return status[server]?.status
 }
+
+function deferred() {
+  let resolve = () => {}
+  const promise = new Promise<void>((done) => {
+    resolve = done
+  })
+  return { promise, resolve }
+}
+
+const waitConnected = (mcp: MCPNS.Interface, name: string) =>
+  pollWithTimeout(
+    Effect.gen(function* () {
+      const status = yield* mcp.status()
+      return status[name]?.status === "connected" ? true : undefined
+    }),
+    `configured mcp ${name} did not connect`,
+  )
+
+it.instance(
+  "status() returns connecting without waiting for configured startup",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        const connect = deferred()
+        connectHook = () => connect.promise
+
+        const status = yield* awaitWithTimeout(mcp.status(), "mcp status blocked on startup", "200 millis")
+        expect(status["slow-server"]?.status).toBe("connecting")
+
+        yield* pollWithTimeout(
+          Effect.sync(() => (connectStarts === 1 ? true : undefined)),
+          "configured mcp startup did not begin",
+        )
+
+        connect.resolve()
+
+        yield* pollWithTimeout(
+          Effect.gen(function* () {
+            const next = yield* mcp.status()
+            return next["slow-server"]?.status === "connected" ? true : undefined
+          }),
+          "configured mcp startup did not complete",
+        )
+      }),
+    ),
+  {
+    config: {
+      mcp: {
+        "slow-server": {
+          type: "local",
+          command: ["echo", "test"],
+        },
+      },
+    },
+  },
+)
+
+it.instance(
+  "configured MCP startup runs for one project at a time",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        const connect = deferred()
+        connectHook = () => connect.promise
+        const config = {
+          mcp: {
+            "slow-server": {
+              type: "local" as const,
+              command: ["echo", "test"],
+            },
+          },
+        }
+        const second = yield* tmpdirScoped({ config })
+
+        yield* mcp.status()
+        yield* pollWithTimeout(
+          Effect.sync(() => (connectStarts === 1 ? true : undefined)),
+          "first configured mcp startup did not begin",
+        )
+
+        yield* mcp.status().pipe(provideInstance(second))
+        yield* Effect.sleep("100 millis")
+        expect(connectStarts).toBe(1)
+        expect(maxActiveConnects).toBe(1)
+
+        connect.resolve()
+
+        yield* pollWithTimeout(
+          Effect.gen(function* () {
+            const first = yield* mcp.status()
+            const next = yield* mcp.status().pipe(provideInstance(second))
+            return first["slow-server"]?.status === "connected" && next["slow-server"]?.status === "connected"
+              ? true
+              : undefined
+          }),
+          "configured mcp startups did not complete",
+        )
+        expect(connectStarts).toBe(2)
+        expect(maxActiveConnects).toBe(1)
+      }),
+    ).pipe(Effect.provide(CrossSpawnSpawner.defaultLayer)),
+  {
+    config: {
+      mcp: {
+        "slow-server": {
+          type: "local",
+          command: ["echo", "test"],
+        },
+      },
+    },
+  },
+)
 
 // ========================================================================
 // Test: tools() are cached after connect
@@ -272,10 +404,8 @@ it.instance(
         lastCreatedClientName = "disc-server"
         getOrCreateClientState("disc-server")
 
-        yield* mcp.add("disc-server", {
-          type: "local",
-          command: ["echo", "test"],
-        })
+        yield* mcp.status()
+        yield* waitConnected(mcp, "disc-server")
 
         const statusBefore = yield* mcp.status()
         expect(statusBefore["disc-server"]?.status).toBe("connected")
@@ -313,10 +443,8 @@ it.instance(
           { name: "my_tool", description: "a tool", inputSchema: { type: "object", properties: {} } },
         ]
 
-        yield* mcp.add("reconn-server", {
-          type: "local",
-          command: ["echo", "test"],
-        })
+        yield* mcp.status()
+        yield* waitConnected(mcp, "reconn-server")
 
         yield* mcp.disconnect("reconn-server")
         expect((yield* mcp.status())["reconn-server"]?.status).toBe("disabled")
@@ -383,7 +511,7 @@ it.instance(
 // ========================================================================
 
 it.instance(
-  "init connects available servers even when one fails",
+  "connects available servers even when one fails",
   () =>
     MCP.Service.use((mcp: MCPNS.Interface) =>
       Effect.gen(function* () {
@@ -421,14 +549,8 @@ it.instance(
   {
     config: {
       mcp: {
-        "good-server": {
-          type: "local",
-          command: ["echo", "good"],
-        },
-        "bad-server": {
-          type: "local",
-          command: ["echo", "bad"],
-        },
+        "good-server": { type: "local", command: ["echo", "good"], enabled: false },
+        "bad-server": { type: "local", command: ["echo", "bad"], enabled: false },
       },
     },
   },
@@ -553,16 +675,7 @@ it.instance(
         expect(key).toContain("my-prompt")
       }),
     ),
-  {
-    config: {
-      mcp: {
-        "prompt-server": {
-          type: "local",
-          command: ["echo", "test"],
-        },
-      },
-    },
-  },
+  { config: { mcp: {} } },
 )
 
 it.instance(
@@ -586,16 +699,7 @@ it.instance(
         expect(key).toContain("my-resource")
       }),
     ),
-  {
-    config: {
-      mcp: {
-        "resource-server": {
-          type: "local",
-          command: ["echo", "test"],
-        },
-      },
-    },
-  },
+  { config: { mcp: {} } },
 )
 
 it.instance(
@@ -607,10 +711,8 @@ it.instance(
         const serverState = getOrCreateClientState("prompt-disc-server")
         serverState.prompts = [{ name: "hidden-prompt", description: "Should not appear" }]
 
-        yield* mcp.add("prompt-disc-server", {
-          type: "local",
-          command: ["echo", "test"],
-        })
+        yield* mcp.status()
+        yield* waitConnected(mcp, "prompt-disc-server")
 
         yield* mcp.disconnect("prompt-disc-server")
 
@@ -719,10 +821,7 @@ it.instance(
   {
     config: {
       mcp: {
-        "fail-connect": {
-          type: "local",
-          command: ["echo", "test"],
-        },
+        "fail-connect": { type: "local", command: ["echo", "test"], enabled: false },
       },
     },
   },
@@ -790,10 +889,7 @@ it.instance(
   {
     config: {
       mcp: {
-        "my.special-server": {
-          type: "local",
-          command: ["echo", "test"],
-        },
+        "my.special-server": { type: "local", command: ["echo", "test"], enabled: false },
       },
     },
   },
