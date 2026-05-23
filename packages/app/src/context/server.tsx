@@ -180,6 +180,12 @@ export const { use: useServer, provider: ServerProvider } = createSimpleContext(
       if (state.active !== input) setState("active", input)
     }
 
+    createEffect(() => {
+      if (typeof window === "undefined") return
+      window.__OPENCODE__ ??= {}
+      window.__OPENCODE__.activeServer = state.active
+    })
+
     function add(input: ServerConnection.Http) {
       const url_ = normalizeServerUrl(input.http.url)
       if (!url_) return
@@ -230,7 +236,7 @@ export const { use: useServer, provider: ServerProvider } = createSimpleContext(
     )
     const isLocal = createMemo(() => {
       const c = current()
-      return (c?.type === "sidecar" && c.variant === "base") || (c?.type === "http" && isLocalHost(c.http.url))
+      return c?.type === "sidecar" || (c?.type === "http" && isLocalHost(c.http.url))
     })
 
     return {
