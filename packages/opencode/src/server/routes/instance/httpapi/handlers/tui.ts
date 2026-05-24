@@ -91,6 +91,8 @@ export const tuiHandlers = HttpApiBuilder.group(InstanceHttpApi, "tui", (handler
       if (ctx.payload.type === TuiEvent.ToastShow.type) yield* bus.publish(TuiEvent.ToastShow, ctx.payload.properties)
       if (ctx.payload.type === TuiEvent.SessionSelect.type)
         yield* bus.publish(TuiEvent.SessionSelect, ctx.payload.properties)
+      if (ctx.payload.type === TuiEvent.SubagentDemote.type)
+        yield* bus.publish(TuiEvent.SubagentDemote, ctx.payload.properties)
       return true
     })
 

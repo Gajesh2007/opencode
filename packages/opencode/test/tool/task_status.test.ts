@@ -29,7 +29,7 @@ const layer = (flags: Partial<RuntimeFlags.Info> = {}) =>
     RuntimeFlags.layer(flags),
   )
 
-const it = testEffect(layer({ experimentalBackgroundSubagents: true }))
+const it = testEffect(layer())
 
 describe("tool.task_status", () => {
   it.instance("returns completed background job output", () =>

@@ -4,6 +4,94 @@ This file tracks customizations made to this personal fork of opencode on top of
 
 ## [Unreleased] — 2026-05-24
 
+### Added — background subagents promoted from experimental to first-class
+
+The `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS` flag and the gating it implied
+are gone. The TaskTool now unconditionally exposes:
+
+- `background: true` — launches the subagent asynchronously, returns immediately
+  with a `task_id`. The parent agent keeps working. When the subagent finishes,
+  a synthetic user message with `<task_result>...</task_result>` is auto-injected
+  into the parent session and the parent's loop auto-resumes if it was idle.
+- `task_status(task_id, wait?)` — poll a background task, or block until done.
+
+The runtime flag definition (`runtime-flags.ts:experimentalBackgroundSubagents`)
+has been deleted. Tests that asserted the gating now assert that the parameters
+and `task_status` tool are always visible.
+
+### Added — `worktree: true` parameter on TaskTool
+
+When set, the subagent runs inside a **fresh git worktree** branched off the
+parent session's HEAD (`opencode-subagent/<slug>` branch under
+`~/.local/share/opencode/data/worktree-subagent/<slug>/`). The subagent's
+file edits land in the isolated directory — no conflicts with the parent
+agent's in-progress work. The worktree path is reported in the tool output
+so the LLM can decide to keep, merge, or clean it up later. Combine with
+`background: true` for fully-parallel side-tasks.
+
+Implementation note: `Session.create` gained an optional `directory` override
+so subagent sessions can be scoped to a different working directory than the
+parent's instance. Worktree creation itself shells out to `git worktree add`
+directly rather than going through `Worktree.Service`, keeping the TaskTool's
+Effect-layer surface narrow (the full service has a long dependency chain
+that cascades through every test using `ToolRegistry`).
+
+### Added — `Ctrl+B` mid-flight demotion: move a running subagent to background
+
+Inspired by Claude Code's `Ctrl+B`. While a synchronous subagent tool call is
+running, the user can press `Ctrl+B` (registered as `subagent.background`,
+keybind `subagent_background`). The TUI publishes a `tui.subagent.demote`
+event keyed on the current session. The TaskTool's sync waiter — which now
+races `background.wait()` against `bus.subscribe(TuiEvent.SubagentDemote)` —
+sees the event and returns the standard "background task started" stub to
+the parent LLM. **The subagent fiber keeps running uninterrupted** — no
+cancellation, no restart, no cache miss. When it eventually finishes, the
+existing `inject()` path drops a synthetic user message into the parent
+session and auto-resumes the loop, identical to LLM-elected background.
+
+From the parent LLM's perspective, demoted and LLM-elected background are
+indistinguishable: same stub format, same `task_id`, same eventual
+completion notification. The LLM is told *"Background task started.
+Continue your current work — you'll get the result when it lands."*
+
+Tight-race handling: if the user presses Ctrl+B at the exact moment the
+job finished, the demote handler checks `background.get(taskID)` first.
+If the job is already complete, the actual result is returned inline
+instead of forking a duplicate inject watcher.
+
+### Changed — unified subagent dispatch
+
+Sync and background paths now share infrastructure. Both register a
+`BackgroundJob` and use its fiber to run `runTask()`. Sync mode awaits
+`background.wait()` (raced against the demote signal); background mode
+forks an `injectOnComplete` watcher and returns immediately. This let us
+delete the separate `Effect.acquireUseRelease` sync path and the
+`Effect.tap → Deferred.await(shouldInject)` inject-decision Deferred that
+was deadlocking the fiber against the waiter (the pipeline couldn't
+finish until the waiter set the Deferred, and the waiter awaited the
+pipeline finishing). The fork-a-watcher design dodges that entirely.
+
+### TUI bits
+
+- New keybind `subagent_background: keybind("ctrl+b", "Move in-flight subagent to background")` (was unbound; `ctrl+b` removed from the `input_move_left` chord since `left` alone covers the cursor case).
+- New TUI command `subagent.background` registered in `app.tsx` next to `variant.cycle` / `service_tier.cycle`. Reads the current session ID from `useRoute()`, publishes `TuiEvent.SubagentDemote` via `sdk.client.tui.publish`, and toasts "Subagent moved to background — you'll get the result when it finishes."
+- New `BusEvent` `tui.subagent.demote` defined in `cli/cmd/tui/event.ts`. Schema: `{ sessionID }`.
+- Server route `POST /tui/publish` extended to dispatch the new event type into the in-process `Bus.publish`.
+
+### Files changed
+
+- `packages/opencode/src/tool/task.ts` — unified flow + worktree creation + demote race + Description fields for background/worktree
+- `packages/opencode/src/tool/task_status.ts` — drop experimental check
+- `packages/opencode/src/tool/registry.ts` — `task_status` is always registered
+- `packages/opencode/src/session/session.ts` — `Session.create` accepts optional `directory`
+- `packages/opencode/src/effect/runtime-flags.ts` — delete `experimentalBackgroundSubagents`
+- `packages/opencode/src/cli/cmd/tui/event.ts` — new `SubagentDemote` BusEvent
+- `packages/opencode/src/cli/cmd/tui/config/keybind.ts` — `subagent_background` keybind + command map
+- `packages/opencode/src/cli/cmd/tui/app.tsx` — new `subagent.background` command + name list entry
+- `packages/opencode/src/server/routes/instance/httpapi/groups/tui.ts` — `TuiPublishPayload` union gains `EventTuiSubagentDemote`
+- `packages/opencode/src/server/routes/instance/httpapi/handlers/tui.ts` — dispatch on `SubagentDemote.type`
+- 4 test files updated (`runtime-flags`, `registry`, `task`, `task_status`) — drop flag references, retarget assertions for the new behavior
+
 ### Added — `/tier` slash command, cycle action, footer indicator
 
 Mirroring the existing `/variants` flow exactly. Pickable from the prompt with `/tier`, hidden when the active model exposes no tiers. New keybinding `service_tier_cycle` (unbound by default — `ctrl+t` is already variant cycle) cycles through the available tiers in place. The active tier renders in the bottom-line footer in `theme.success` (green) right after the variant chip, with the same fade-in animation.

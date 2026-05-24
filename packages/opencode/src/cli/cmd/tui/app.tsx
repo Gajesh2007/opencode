@@ -105,6 +105,7 @@ const appBindingCommands = [
   "agent.cycle.reverse",
   "variant.cycle",
   "variant.list",
+  "subagent.background",
   "service_tier.cycle",
   "service_tier.list",
   "provider.connect",
@@ -609,6 +610,29 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
         slashName: "variants",
         run: () => {
           dialog.replace(() => <DialogVariant />)
+        },
+      },
+      {
+        name: "subagent.background",
+        title: "Move subagent to background",
+        category: "Agent",
+        run: () => {
+          const sessionID = route.data.type === "session" ? route.data.sessionID : undefined
+          if (!sessionID) {
+            toast.show({ message: "Open a session first", variant: "warning", duration: 3000 })
+            return
+          }
+          void sdk.client.tui.publish({
+            body: {
+              type: TuiEvent.SubagentDemote.type,
+              properties: { sessionID },
+            } as any,
+          })
+          toast.show({
+            message: "Subagent moved to background — you'll get the result when it finishes",
+            variant: "info",
+            duration: 4000,
+          })
         },
       },
       {

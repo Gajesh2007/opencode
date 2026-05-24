@@ -1,6 +1,5 @@
 import * as Tool from "./tool"
 import DESCRIPTION from "./task.txt"
-import { ToolJsonSchema } from "./json-schema"
 import { BackgroundJob } from "@/background/job"
 import { Bus } from "@/bus"
 import { Session } from "@/session/session"
@@ -12,9 +11,12 @@ import type { SessionPrompt } from "../session/prompt"
 import { SessionStatus } from "@/session/status"
 import { Config } from "@/config/config"
 import { TuiEvent } from "@/cli/cmd/tui/event"
-import { Cause, Effect, Exit, Option, Schema, Scope } from "effect"
+import { Cause, Deferred, Effect, Option, Schema, Scope, Stream } from "effect"
 import { EffectBridge } from "@/effect/bridge"
-import { RuntimeFlags } from "@/effect/runtime-flags"
+import { Global } from "@opencode-ai/core/global"
+import { spawnSync } from "node:child_process"
+import * as nodePath from "node:path"
+import * as nodeFs from "node:fs"
 
 export interface TaskPromptOps {
   cancel(sessionID: SessionID): Effect.Effect<void>
@@ -24,25 +26,23 @@ export interface TaskPromptOps {
 }
 
 const id = "task"
-const BACKGROUND_DESCRIPTION = [
+const EXTRA_DESCRIPTION = [
   "",
   "",
   [
-    "Background mode: background=true launches the subagent asynchronously.",
-    "Use task_status(task_id=..., wait=false) to poll, or wait=true to block until done.",
+    "Background mode: pass background=true to launch the subagent asynchronously and",
+    "return immediately. Use task_status(task_id=..., wait=false) to poll, or wait=true",
+    "to block until done. The result is also auto-injected into this session as a new",
+    "synthetic user message when the background task finishes, so you do NOT need to",
+    "poll if you're happy to receive it whenever it lands.",
+    "",
+    "Worktree mode: pass worktree=true to run the subagent inside a fresh git worktree",
+    "branched off the current HEAD. Use this when the subagent's edits could conflict",
+    "with your in-progress work — research/refactor/build agents are good candidates.",
+    "The worktree directory is reported in the task output; you can leave it alone or",
+    "clean it up later. Combine with background=true for fully parallel side-tasks.",
   ].join(" "),
 ].join("\n")
-
-const BaseParameters = Schema.Struct({
-  description: Schema.String.annotate({ description: "A short (3-5 words) description of the task" }),
-  prompt: Schema.String.annotate({ description: "The task for the agent to perform" }),
-  subagent_type: Schema.String.annotate({ description: "The type of specialized agent to use for this task" }),
-  task_id: Schema.optional(Schema.String).annotate({
-    description:
-      "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
-  }),
-  command: Schema.optional(Schema.String).annotate({ description: "The command that triggered this task" }),
-})
 
 export const Parameters = Schema.Struct({
   description: Schema.String.annotate({ description: "A short (3-5 words) description of the task" }),
@@ -56,6 +56,10 @@ export const Parameters = Schema.Struct({
   background: Schema.optional(Schema.Boolean).annotate({
     description: "When true, launch the subagent in the background and return immediately",
   }),
+  worktree: Schema.optional(Schema.Boolean).annotate({
+    description:
+      "When true, run the subagent inside a fresh git worktree branched off the current HEAD so its file edits don't conflict with the main session's work. Only valid for git-tracked projects.",
+  }),
 })
 
 function output(sessionID: SessionID, text: string) {
@@ -68,13 +72,25 @@ function output(sessionID: SessionID, text: string) {
   ].join("\n")
 }
 
-function backgroundOutput(sessionID: SessionID) {
+function backgroundOutput(sessionID: SessionID, worktreeDir?: string) {
+  const worktreeLine = worktreeDir ? `worktree: ${worktreeDir}\n` : ""
   return [
     `task_id: ${sessionID} (for polling this task with task_status)`,
     "state: running",
+    worktreeLine + "",
+    "<task_result>",
+    "Background task started. Continue your current work and call task_status when you need the result, or wait for the auto-injected completion message.",
+    "</task_result>",
+  ].join("\n")
+}
+
+function syncOutput(sessionID: SessionID, text: string, worktreeDir?: string) {
+  const worktreeLine = worktreeDir ? `\nworktree: ${worktreeDir}` : ""
+  return [
+    `task_id: ${sessionID} (for resuming to continue this task if needed)${worktreeLine}`,
     "",
     "<task_result>",
-    "Background task started. Continue your current work and call task_status when you need the result.",
+    text,
     "</task_result>",
   ].join("\n")
 }
@@ -100,6 +116,63 @@ function errorText(error: unknown) {
   return String(error)
 }
 
+function slugify(input: string) {
+  return (
+    input
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 40) || "subagent"
+  )
+}
+
+function gitToplevel(cwd: string): string | undefined {
+  const result = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf8" })
+  if (result.status !== 0) return undefined
+  return result.stdout.trim() || undefined
+}
+
+/**
+ * Create a fresh git worktree branched off the parent session's HEAD,
+ * intended to host a subagent's isolated edits. Returns the new directory
+ * and branch name. Picks a unique directory under opencode's data dir so
+ * subagent worktrees stay segregated from any user-managed ones.
+ *
+ * Direct git invocation (sync) instead of going through Worktree.Service so
+ * the TaskTool's layer doesn't pull in the InstanceLayer + Project + Bus
+ * fan-out that the full Worktree service requires — that fan-out turned out
+ * to cascade into every test that uses ToolRegistry.
+ */
+function createSubagentWorktree(parentDirectory: string, description: string): { directory: string; branch: string } {
+  const top = gitToplevel(parentDirectory)
+  if (!top) {
+    throw new Error("worktree=true requires a git-tracked project; the parent session's directory is not a git repo")
+  }
+
+  const root = nodePath.join(Global.Path.data, "worktree-subagent")
+  nodeFs.mkdirSync(root, { recursive: true })
+
+  const slug = slugify(description)
+  let name = slug
+  let candidate = nodePath.join(root, name)
+  let n = 1
+  while (nodeFs.existsSync(candidate)) {
+    n += 1
+    name = `${slug}-${n}`
+    candidate = nodePath.join(root, name)
+    if (n > 100) throw new Error("could not allocate a unique worktree directory")
+  }
+  const branch = `opencode-subagent/${name}`
+
+  const created = spawnSync("git", ["worktree", "add", "-b", branch, candidate], { cwd: top, encoding: "utf8" })
+  if (created.status !== 0) {
+    throw new Error((created.stderr || created.stdout || "git worktree add failed").trim())
+  }
+
+  return { directory: candidate, branch }
+}
+
 export const TaskTool = Tool.define(
   id,
   Effect.gen(function* () {
@@ -110,7 +183,6 @@ export const TaskTool = Tool.define(
     const sessions = yield* Session.Service
     const scope = yield* Scope.Scope
     const status = yield* SessionStatus.Service
-    const flags = yield* RuntimeFlags.Service
 
     const run = Effect.fn("TaskTool.execute")(function* (
       params: Schema.Schema.Type<typeof Parameters>,
@@ -118,11 +190,7 @@ export const TaskTool = Tool.define(
     ) {
       const cfg = yield* config.get()
       const runInBackground = params.background === true
-      if (runInBackground && !flags.experimentalBackgroundSubagents) {
-        return yield* Effect.fail(
-          new Error("Background subagents require OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true"),
-        )
-      }
+      const useWorktree = params.worktree === true
 
       if (!ctx.extra?.bypassAgentCheck) {
         yield* ctx.ask({
@@ -149,11 +217,27 @@ export const TaskTool = Tool.define(
       const parentAgent = parent.agent
         ? yield* agent.get(parent.agent).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
         : undefined
+
+      // If the LLM asked for a worktree, create it before the subagent session
+      // so the new session can be scoped to the isolated directory. Resuming
+      // a task_id skips worktree creation — the existing session keeps its
+      // own directory. Inline git invocation (instead of taking a hard
+      // dependency on the Worktree service) so the tool registry's layer
+      // surface stays narrow and tests don't need a worktree-capable instance.
+      const worktreeInfo =
+        useWorktree && !session
+          ? yield* Effect.try({
+              try: () => createSubagentWorktree(parent.directory, params.description),
+              catch: (e) => new Error(`Failed to create worktree: ${e instanceof Error ? e.message : String(e)}`),
+            })
+          : undefined
+
       const nextSession =
         session ??
         (yield* sessions.create({
           parentID: ctx.sessionID,
           title: params.description + ` (@${next.name} subagent)`,
+          ...(worktreeInfo ? { directory: worktreeInfo.directory } : {}),
           permission: [
             ...deriveSubagentSessionPermission({
               parentSessionPermission: parent.permission ?? [],
@@ -180,7 +264,11 @@ export const TaskTool = Tool.define(
         sessionId: nextSession.id,
         model,
         ...(runInBackground ? { background: true } : {}),
+        ...(worktreeInfo
+          ? { worktree: worktreeInfo.directory, ...(worktreeInfo.branch ? { worktreeBranch: worktreeInfo.branch } : {}) }
+          : {}),
       }
+      const worktreeDir = worktreeInfo?.directory
 
       yield* ctx.metadata({
         title: params.description,
@@ -275,69 +363,129 @@ export const TaskTool = Tool.define(
         )
       }
 
-      if (runInBackground) {
-        const info = yield* background.start({
-          id: nextSession.id,
-          type: id,
-          title: params.description,
-          metadata,
-          run: runTask().pipe(
-            Effect.tap((text) => inject("completed", text).pipe(Effect.ignore)),
-            Effect.catchCause((cause) =>
-              (Cause.hasInterruptsOnly(cause)
-                ? Effect.void
-                : inject("error", errorText(Cause.squash(cause))).pipe(Effect.ignore)
-              ).pipe(Effect.andThen(Effect.failCause(cause))),
-            ),
-          ),
-        })
+      // Unified flow: ALWAYS register the subagent run as a BackgroundJob.
+      // The job's `run` is just `runTask()` — no extra pipeline. We decide
+      // whether to inject the result back into the parent session by FORKING
+      // a separate watcher that awaits `background.wait` and calls inject()
+      // when the job finishes. Forking happens for:
+      //   - LLM-initiated background (params.background === true)
+      //   - User-initiated demote (Ctrl+B → TuiEvent.SubagentDemote)
+      // Sync mode that completes normally returns the result inline and
+      // does NOT fork a watcher (the parent tool's response carries the
+      // result, no synthetic user message needed).
+      const job = yield* background.start({
+        id: nextSession.id,
+        type: id,
+        title: params.description,
+        metadata,
+        run: runTask(),
+      })
 
+      const injectOnComplete = Effect.fn("TaskTool.injectOnComplete")(function* () {
+        const waited = yield* background.wait({ id: nextSession.id })
+        const info = waited.info
+        if (!info) return
+        if (info.status === "completed") {
+          yield* inject("completed", info.output ?? "").pipe(Effect.ignore)
+        } else if (info.status === "error") {
+          yield* inject("error", info.error ?? "Subagent failed").pipe(Effect.ignore)
+        }
+        // "cancelled" → silently skip; parent (or whoever cancelled) already knows.
+      })
+
+      if (runInBackground) {
+        yield* injectOnComplete().pipe(Effect.forkIn(scope, { startImmediately: true }))
         return {
           title: params.description,
-          metadata: {
-            ...metadata,
-            jobId: info.id,
-          },
-          output: backgroundOutput(nextSession.id),
+          metadata: { ...metadata, jobId: job.id },
+          output: backgroundOutput(nextSession.id, worktreeDir),
         }
       }
 
+      // Sync mode: bridge ctx.abort (DOM AbortSignal) → Effect so parent
+      // interrupt cancels the subagent fiber, matching the prior behavior.
       const cancel = ops.cancel(nextSession.id)
-
       function onAbort() {
         runCancel.fork(cancel)
       }
 
-      return yield* Effect.acquireUseRelease(
-        Effect.sync(() => {
-          ctx.abort.addEventListener("abort", onAbort)
+      // Demote signal: the first SubagentDemote event keyed on this parent
+      // session. Effect.scoped + Stream.runHead auto-cleans the subscription
+      // whether we win or lose the race.
+      const demoteSignal = Effect.scoped(
+        Effect.gen(function* () {
+          const stream = yield* bus.subscribe(TuiEvent.SubagentDemote)
+          return yield* stream.pipe(
+            Stream.filter((event) => event.properties.sessionID === ctx.sessionID),
+            Stream.runHead,
+          )
         }),
-        () =>
+      )
+
+      type WaitOutcome = { kind: "done"; info: { info?: BackgroundJob.Info; timedOut: boolean } } | { kind: "demoted" }
+      const result: WaitOutcome = yield* Effect.acquireUseRelease(
+        Effect.sync(() => ctx.abort.addEventListener("abort", onAbort)),
+        (): Effect.Effect<WaitOutcome, never, never> =>
+          Effect.race(
+            background.wait({ id: nextSession.id }).pipe(Effect.map((info): WaitOutcome => ({ kind: "done", info }))),
+            demoteSignal.pipe(Effect.map((): WaitOutcome => ({ kind: "demoted" }))),
+          ),
+        (_acquired, exit) =>
           Effect.gen(function* () {
-            const text = yield* runTask()
-            return {
-              title: params.description,
-              metadata,
-              output: output(nextSession.id, text),
+            ctx.abort.removeEventListener("abort", onAbort)
+            if (exit._tag === "Failure" && Cause.hasInterrupts(exit.cause)) {
+              yield* cancel.pipe(Effect.ignore)
             }
           }),
-        (_, exit) =>
-          Effect.gen(function* () {
-            if (Exit.hasInterrupts(exit)) yield* cancel
-          }).pipe(
-            Effect.ensuring(
-              Effect.sync(() => {
-                ctx.abort.removeEventListener("abort", onAbort)
-              }),
-            ),
-          ),
       )
+
+      if (result.kind === "demoted") {
+        // Tight race: the user may have pressed Ctrl+B at the exact moment
+        // the job finished. If background.get says the job is already done,
+        // return the actual result inline instead of forking a watcher that
+        // would inject a duplicate.
+        const status = yield* background.get(nextSession.id)
+        if (status && status.status !== "running") {
+          if (status.status === "completed") {
+            return {
+              title: params.description,
+              metadata: { ...metadata, jobId: job.id },
+              output: syncOutput(nextSession.id, status.output ?? "", worktreeDir),
+            }
+          }
+          if (status.status === "error") {
+            return yield* Effect.fail(new Error(status.error ?? "Subagent failed"))
+          }
+          // "cancelled" — fall through to background path; nothing to inject.
+        }
+        yield* injectOnComplete().pipe(Effect.forkIn(scope, { startImmediately: true }))
+        return {
+          title: params.description,
+          metadata: { ...metadata, jobId: job.id },
+          output: backgroundOutput(nextSession.id, worktreeDir),
+        }
+      }
+
+      const info = result.info.info
+      if (!info) {
+        return yield* Effect.fail(new Error("Subagent finished but produced no result"))
+      }
+      if (info.status === "cancelled") {
+        return yield* Effect.fail(new Error("Subagent was cancelled"))
+      }
+      if (info.status === "error") {
+        return yield* Effect.fail(new Error(info.error ?? "Subagent failed"))
+      }
+      return {
+        title: params.description,
+        metadata: { ...metadata, jobId: job.id },
+        output: syncOutput(nextSession.id, info.output ?? "", worktreeDir),
+      }
     })
 
     return {
-      description: flags.experimentalBackgroundSubagents ? DESCRIPTION + BACKGROUND_DESCRIPTION : DESCRIPTION,
+      description: DESCRIPTION + EXTRA_DESCRIPTION,
       parameters: Parameters,
-      jsonSchema: flags.experimentalBackgroundSubagents ? undefined : ToolJsonSchema.fromSchema(BaseParameters),
       execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
         run(params, ctx).pipe(Effect.orDie),
     }

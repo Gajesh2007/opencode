@@ -50,4 +50,12 @@ export const TuiEvent = {
       sessionID: SessionID.annotate({ description: "Session ID to navigate to" }),
     }),
   ),
+  SubagentDemote: BusEvent.define(
+    "tui.subagent.demote",
+    Schema.Struct({
+      sessionID: SessionID.annotate({
+        description: "Parent session whose in-flight subagent tool calls should be moved to the background",
+      }),
+    }),
+  ),
 }

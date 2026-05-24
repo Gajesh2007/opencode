@@ -260,7 +260,7 @@ export const layer: Layer.Layer<
             tool.edit,
             tool.write,
             tool.task,
-            ...(flags.experimentalBackgroundSubagents ? [tool.task_status] : []),
+            tool.task_status,
             tool.fetch,
             tool.todo,
             tool.search,

@@ -44,7 +44,7 @@ const layer = (flags: Partial<RuntimeFlags.Info> = {}) =>
   )
 
 const it = testEffect(layer())
-const background = testEffect(layer({ experimentalBackgroundSubagents: true }))
+const background = testEffect(layer())
 
 function defer<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void
@@ -447,7 +447,7 @@ describe("tool.task", () => {
     },
   )
 
-  it.instance("rejects background execution when the experiment is disabled", () =>
+  it.instance("accepts background execution without any experimental gating", () =>
     Effect.gen(function* () {
       const { chat, assistant } = yield* seed()
       const tool = yield* TaskTool
@@ -474,7 +474,14 @@ describe("tool.task", () => {
         )
         .pipe(Effect.exit)
 
-      expect(Exit.isFailure(exit)).toBe(true)
+      // Background mode is now first-class — the call should succeed and
+      // return a "task started" stub with a jobId on metadata.
+      expect(Exit.isSuccess(exit)).toBe(true)
+      if (Exit.isSuccess(exit)) {
+        const result = exit.value as { metadata: { jobId?: string }; output: string }
+        expect(typeof result.metadata.jobId).toBe("string")
+        expect(result.output).toContain("Background task started")
+      }
     }),
   )
 

@@ -674,13 +674,24 @@ export const layer: Layer.Layer<
       model?: Schema.Schema.Type<typeof Model>
       permission?: Permission.Ruleset
       workspaceID?: WorkspaceID
+      /**
+       * Override the working directory for this session. Defaults to the
+       * current instance's directory. Used for subagents that need to run
+       * inside an isolated git worktree.
+       */
+      directory?: string
     }) {
       const ctx = yield* InstanceState.context
       const workspace = yield* InstanceState.workspaceID
+      const directory = input?.directory ?? ctx.directory
+      // When the caller supplies a custom directory (e.g. a worktree path),
+      // pin the path's root to that directory too so the session's stored
+      // path stays self-consistent. Otherwise use the instance's worktree.
+      const worktree = input?.directory ?? ctx.worktree
       return yield* createNext({
         parentID: input?.parentID,
-        directory: ctx.directory,
-        path: sessionPath(ctx.worktree, ctx.directory),
+        directory,
+        path: sessionPath(worktree, directory),
         title: input?.title,
         agent: input?.agent,
         model: input?.model,
