@@ -4,6 +4,76 @@ This file tracks customizations made to this personal fork of opencode on top of
 
 ## [Unreleased] — 2026-05-24
 
+### Added — `/provider` slash command: pin requests to a specific upstream
+
+A fourth orthogonal model-dimension picker, after `model → variant → tier`.
+Press `/provider` (or cycle via `upstream_cycle` keybind, unbound by default)
+to pin all requests for the current model to a specific upstream provider.
+Persisted per `${providerID}/${modelID}` in `model.json`, surfaced as a
+`via <slug>` chip in the prompt footer (info-blue color), and chained into
+the model-selection flow so a fresh model with available upstreams prompts
+for one.
+
+**Wire format** — translated in `session/llm/request.ts` based on the route:
+
+| Route | Wire format |
+|---|---|
+| `@ai-sdk/gateway` | `providerOptions.gateway.only: [<slug>]` ([Vercel docs](https://vercel.com/docs/ai-gateway/models-and-providers/provider-filtering-and-ordering)) |
+| `@openrouter/ai-sdk-provider` | `providerOptions.openrouter.provider.only: [<slug>]` ([OpenRouter docs](https://openrouter.ai/docs/guides/routing/provider-selection)) |
+| Direct providers | no-op (single upstream) |
+
+The pin is merged AFTER the service tier so an explicit pin can't be
+overridden by a sort-tier that emits its own `only`/`order` array.
+
+**Static defaults** — `ProviderTransform.availableUpstreams(model)` returns the
+hardcoded list per family (e.g. Anthropic → `anthropic`/`bedrock`/`vertex`;
+GPT → `openai`/`azure`; Llama → `bedrock`/`fireworks`/`groq`/`together`/etc.).
+Users can override per-model via `opencode.json`'s `upstreams` array.
+
+**Dynamic discovery** — for OpenRouter routes, the picker fires
+`GET https://openrouter.ai/api/v1/models/{author}/{slug}/endpoints` on dialog
+open (5s timeout, best-effort, public endpoint). Discovered slugs are
+unioned with the hardcoded list and cached in-memory keyed by
+`providerID/modelID` (not persisted — pure cache). Vercel AI Gateway has
+no equivalent runtime API, so Gateway routes rely on the hardcoded list.
+
+**New files**:
+- `cli/cmd/tui/component/dialog-upstream.tsx` — picker with on-mount discovery.
+
+**Touched**:
+- `config/provider.ts`, `provider/provider.ts` — `upstreams: string[]` field +
+  4 attach points + config override.
+- `provider/transform.ts` — `availableUpstreams()` per-family defaults.
+- `cli/cmd/tui/context/local.tsx` — `model.upstream` API (selected/list/set/
+  cycle + `recordDiscovered`) mirroring variant/serviceTier.
+- `cli/cmd/tui/component/dialog-{model,variant,service-tier}.tsx` — chain into
+  upstream dialog when picking is needed.
+- `cli/cmd/tui/config/keybind.ts` — `upstream_cycle` / `upstream_list` keybinds.
+- `cli/cmd/tui/app.tsx` — `upstream.cycle` / `upstream.list` commands
+  (`slashName: "provider"`).
+- `session/message-v2.ts` — `upstream?: string` on `UserMessage.model`.
+- `session/prompt.ts` — `upstream` on `PromptInput` / `CommandInput` +
+  `createUserMessage`.
+- `session/llm/request.ts` — translate pin into provider-specific options
+  merged after tier.
+- `cli/cmd/tui/component/prompt/index.tsx` — send `upstream` on
+  session.prompt / session.command; footer indicator with `theme.info`
+  color + "via" prefix.
+- `@opencode-ai/sdk` regenerated.
+
+### Confirmed — background subagents already run in parallel
+
+(No code change; documenting capability discovered while reading the
+TaskTool implementation.) Each `task(background=true)` invocation creates
+its own `nextSession.id`, registers an independent `BackgroundJob`, and
+forks via `Effect.forkIn(scope, { startImmediately: true })`. No
+serialization between concurrent background tasks; the only collision
+guard is against the SAME `task_id` running twice (for resume safety),
+which doesn't apply to fresh task calls. The AI SDK supports parallel
+tool calls on Claude Opus 4.x / GPT-5.x / etc., so the model can fire
+several `task(background=true)` invocations in one tool-use turn and
+they'll all run concurrently.
+
 ### Added — background subagents promoted from experimental to first-class
 
 The `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS` flag and the gating it implied

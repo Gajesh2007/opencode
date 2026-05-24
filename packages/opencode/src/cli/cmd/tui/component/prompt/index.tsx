@@ -1058,6 +1058,7 @@ export function Prompt(props: PromptProps) {
 
     const variant = local.model.variant.current()
     const serviceTier = local.model.serviceTier.current()
+    const upstream = local.model.upstream.current()
     let sessionID = props.sessionID
     if (sessionID == null) {
       const workspace = workspaceSelection()
@@ -1170,6 +1171,7 @@ export function Prompt(props: PromptProps) {
         messageID,
         variant,
         serviceTier,
+        upstream,
         parts: nonTextParts
           .filter((x) => x.type === "file")
           .map((x) => ({
@@ -1187,6 +1189,7 @@ export function Prompt(props: PromptProps) {
           model: selectedModel,
           variant,
           serviceTier,
+          upstream,
           parts: [
             ...editorParts,
             {
@@ -1407,6 +1410,13 @@ export function Prompt(props: PromptProps) {
     return !!current
   })
 
+  const showUpstream = createMemo(() => {
+    const ups = local.model.upstream.list()
+    if (ups.length === 0) return false
+    const current = local.model.upstream.current()
+    return !!current
+  })
+
   const agentMetaAlpha = createFadeIn(() => !!local.agent.current(), animationsEnabled)
   const modelMetaAlpha = createFadeIn(() => !!local.agent.current() && store.mode === "normal", animationsEnabled)
   const variantMetaAlpha = createFadeIn(
@@ -1415,6 +1425,10 @@ export function Prompt(props: PromptProps) {
   )
   const serviceTierMetaAlpha = createFadeIn(
     () => !!local.agent.current() && store.mode === "normal" && showServiceTier(),
+    animationsEnabled,
+  )
+  const upstreamMetaAlpha = createFadeIn(
+    () => !!local.agent.current() && store.mode === "normal" && showUpstream(),
     animationsEnabled,
   )
   const borderHighlight = createMemo(() => tint(theme.border, highlight(), agentMetaAlpha()))
@@ -1599,6 +1613,15 @@ export function Prompt(props: PromptProps) {
                             <text>
                               <span style={{ fg: fadeColor(theme.success, serviceTierMetaAlpha()), bold: true }}>
                                 {local.model.serviceTier.current()}
+                              </span>
+                            </text>
+                          </Show>
+                          <Show when={showUpstream()}>
+                            <text fg={fadeColor(theme.textMuted, upstreamMetaAlpha())}>·</text>
+                            <text>
+                              <span style={{ fg: fadeColor(theme.info, upstreamMetaAlpha()) }}>via </span>
+                              <span style={{ fg: fadeColor(theme.info, upstreamMetaAlpha()), bold: true }}>
+                                {local.model.upstream.current()}
                               </span>
                             </text>
                           </Show>

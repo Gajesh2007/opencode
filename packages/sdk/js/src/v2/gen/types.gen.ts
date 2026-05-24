@@ -25,6 +25,7 @@ export type Event =
   | EventTuiCommandExecute
   | EventTuiToastShow1
   | EventTuiSessionSelect
+  | EventTuiSubagentDemote
   | EventMcpToolsChanged
   | EventMcpBrowserOpenFailed
   | EventCommandExecuted
@@ -352,6 +353,17 @@ export type EventTuiSessionSelect = {
   }
 }
 
+export type EventTuiSubagentDemote = {
+  id: string
+  type: "tui.subagent.demote"
+  properties: {
+    /**
+     * Parent session whose in-flight subagent tool calls should be moved to the background
+     */
+    sessionID: string
+  }
+}
+
 export type Project = {
   id: string
   worktree: string
@@ -421,6 +433,7 @@ export type UserMessage = {
     modelID: string
     variant?: string
     serviceTier?: string
+    upstream?: string
   }
   system?: string
   tools?: {
@@ -828,6 +841,7 @@ export type GlobalEvent = {
     | EventTuiCommandExecute
     | EventTuiToastShow
     | EventTuiSessionSelect
+    | EventTuiSubagentDemote
     | EventMcpToolsChanged
     | EventMcpBrowserOpenFailed
     | EventCommandExecuted
@@ -1114,6 +1128,10 @@ export type ProviderConfig = {
           [key: string]: unknown | boolean | undefined
         }
       }
+      /**
+       * Whitelist of upstream provider slugs this model can be pinned to (gateway/openrouter routes). When empty, falls back to defaults derived from the model id.
+       */
+      upstreams?: Array<string>
       /**
        * Service-tier-specific configuration. Keys are tier names ('priority', 'fast', 'flex', 'throughput', ...) and values are providerOptions to merge into the request.
        */
@@ -1414,6 +1432,7 @@ export type Model = {
       [key: string]: unknown
     }
   }
+  upstreams?: Array<string>
 }
 
 export type Provider = {
@@ -1958,6 +1977,16 @@ export type EventTuiSessionSelect2 = {
   properties: {
     /**
      * Session ID to navigate to
+     */
+    sessionID: string
+  }
+}
+
+export type EventTuiSubagentDemote2 = {
+  type: "tui.subagent.demote"
+  properties: {
+    /**
+     * Parent session whose in-flight subagent tool calls should be moved to the background
      */
     sessionID: string
   }
@@ -6402,6 +6431,7 @@ export type SessionPromptData = {
     system?: string
     variant?: string
     serviceTier?: string
+    upstream?: string
     parts: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
   }
   path: {
@@ -6750,6 +6780,7 @@ export type SessionPromptAsyncData = {
     system?: string
     variant?: string
     serviceTier?: string
+    upstream?: string
     parts: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
   }
   path: {
@@ -6793,6 +6824,7 @@ export type SessionCommandData = {
     command: string
     variant?: string
     serviceTier?: string
+    upstream?: string
     parts?: Array<{
       id?: string
       type: "file"
@@ -7856,7 +7888,12 @@ export type TuiShowToastResponses = {
 export type TuiShowToastResponse = TuiShowToastResponses[keyof TuiShowToastResponses]
 
 export type TuiPublishData = {
-  body?: EventTuiPromptAppend2 | EventTuiCommandExecute2 | EventTuiToastShow2 | EventTuiSessionSelect2
+  body?:
+    | EventTuiPromptAppend2
+    | EventTuiCommandExecute2
+    | EventTuiToastShow2
+    | EventTuiSessionSelect2
+    | EventTuiSubagentDemote2
   path?: never
   query?: {
     directory?: string

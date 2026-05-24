@@ -66,6 +66,12 @@ export const Model = Schema.Struct({
       ),
     ).annotate({ description: "Variant-specific configuration" }),
   ),
+  upstreams: Schema.optional(
+    Schema.Array(Schema.String).annotate({
+      description:
+        "Whitelist of upstream provider slugs this model can be pinned to (gateway/openrouter routes). When empty, falls back to defaults derived from the model id.",
+    }),
+  ),
   serviceTiers: Schema.optional(
     Schema.Record(
       Schema.String,

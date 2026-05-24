@@ -90,6 +90,26 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
       : undefined
   const tierHeaders: Record<string, string> = (tierEntry?.headers as Record<string, string> | undefined) ?? {}
   const tierOptions = tierEntry ? Object.fromEntries(Object.entries(tierEntry).filter(([k]) => k !== "headers")) : {}
+  // Upstream pin: when the user pinned a specific provider via /provider
+  // (info.model.upstream), translate it to the provider-specific only-array
+  // routing knob. Gateway uses providerOptions.gateway.only (Vercel docs);
+  // OpenRouter uses providerOptions.openrouter.provider.only (OR docs).
+  // For direct-provider routes there's no upstream to pin, so this is a no-op.
+  // Merged AFTER the service tier so the tier's `only`/`order` (e.g.
+  // sort-tier variants that set gateway.only) can't override an explicit
+  // user pin.
+  const upstreamOptions = (() => {
+    if (input.small) return {}
+    const pin = input.user.model.upstream
+    if (!pin || pin === "default") return {}
+    if (input.model.api.npm === "@ai-sdk/gateway") {
+      return { gateway: { only: [pin] } }
+    }
+    if (input.model.api.npm === "@openrouter/ai-sdk-provider") {
+      return { provider: { only: [pin] } }
+    }
+    return {}
+  })()
   const base = input.small
     ? ProviderTransform.smallOptions(input.model)
     : ProviderTransform.options({
@@ -98,8 +118,11 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
         providerOptions: input.provider.options,
       })
   const options = mergeOptions(
-    mergeOptions(mergeOptions(mergeOptions(base, input.model.options), input.agent.options), variant),
-    tierOptions,
+    mergeOptions(
+      mergeOptions(mergeOptions(mergeOptions(base, input.model.options), input.agent.options), variant),
+      tierOptions,
+    ),
+    upstreamOptions,
   )
   if (isOpenaiOauth) options.instructions = system.join("\n")
 

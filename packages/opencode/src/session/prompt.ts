@@ -713,6 +713,7 @@ export const layer = Layer.effect(
           : undefined
       const variant = input.variant ?? (ag.variant && full?.variants?.[ag.variant] ? ag.variant : undefined)
       const serviceTier = input.serviceTier && input.serviceTier !== "default" ? input.serviceTier : undefined
+      const upstream = input.upstream && input.upstream !== "default" ? input.upstream : undefined
 
       const info: MessageV2.User = {
         id: input.messageID ?? MessageID.ascending(),
@@ -726,6 +727,7 @@ export const layer = Layer.effect(
           modelID: model.modelID,
           variant,
           serviceTier,
+          upstream,
         },
         system: input.system,
         format: input.format,
@@ -1604,6 +1606,7 @@ export const layer = Layer.effect(
         parts,
         variant: input.variant,
         serviceTier: input.serviceTier,
+        upstream: input.upstream,
       })
       yield* bus.publish(Command.Event.Executed, {
         name: input.command,
@@ -1679,6 +1682,7 @@ export const PromptInput = Schema.Struct({
   system: Schema.optional(Schema.String),
   variant: Schema.optional(Schema.String),
   serviceTier: Schema.optional(Schema.String),
+  upstream: Schema.optional(Schema.String),
   parts: Schema.Array(
     Schema.Union([
       MessageV2.TextPartInput,
@@ -1712,6 +1716,7 @@ export const CommandInput = Schema.Struct({
   command: Schema.String,
   variant: Schema.optional(Schema.String),
   serviceTier: Schema.optional(Schema.String),
+  upstream: Schema.optional(Schema.String),
   // Inlined (no identifier annotation) to keep the original SDK output — the
   // PromptInput call site below references FilePartInput by ref via the
   // Schema export in message-v2.ts.

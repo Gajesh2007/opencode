@@ -1046,6 +1046,43 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
   return {}
 }
 
+// Hardcoded fallbacks for which upstream provider slugs a model can be pinned
+// to via the /upstream picker. Only populated for gateway / openrouter routes;
+// direct-provider routes don't need pinning (single upstream). The picker may
+// override this list at open-time via dynamic discovery (OpenRouter exposes
+// GET /api/v1/models/{author}/{slug}/endpoints; Gateway has no such API).
+export function availableUpstreams(model: Provider.Model): string[] {
+  const apiId = model.api.id.toLowerCase()
+  if (model.api.npm === "@ai-sdk/gateway") {
+    // Vercel AI Gateway provider slugs per upstream family. Curated from the
+    // Vercel "Available Providers" table; will be stale on new entries.
+    if (apiId.startsWith("anthropic/")) return ["anthropic", "bedrock", "vertex"]
+    if (apiId.startsWith("openai/")) return ["openai", "azure"]
+    if (apiId.startsWith("google/")) return ["google", "vertex"]
+    if (apiId.startsWith("vertex/")) return ["vertex"]
+    if (apiId.startsWith("bedrock/")) return ["bedrock"]
+    if (apiId.startsWith("mistral/")) return ["mistral", "bedrock"]
+    if (apiId.startsWith("deepseek/")) return ["deepseek", "fireworks", "together", "deepinfra", "novita"]
+    if (apiId.startsWith("xai/") || apiId.startsWith("grok/")) return ["xai"]
+    if (apiId.includes("llama") || apiId.startsWith("meta/")) {
+      return ["bedrock", "fireworks", "groq", "together", "deepinfra", "novita"]
+    }
+    return []
+  }
+  if (model.api.npm === "@openrouter/ai-sdk-provider") {
+    // OpenRouter has hundreds of providers and resolves them per model. The
+    // dialog hits GET /api/v1/models/{author}/{slug}/endpoints on open to
+    // refresh this list; we just seed with the common ones so the picker
+    // isn't empty on first open while the network call is in flight.
+    if (apiId.includes("anthropic/") || apiId.includes("claude")) return ["anthropic", "bedrock", "vertex"]
+    if (apiId.includes("openai/") || apiId.includes("gpt-")) return ["openai", "azure"]
+    if (apiId.includes("google/") || apiId.includes("gemini")) return ["google", "vertex"]
+    if (apiId.includes("xai/") || apiId.includes("grok")) return ["xai"]
+    return []
+  }
+  return []
+}
+
 // Built-in performance/cost service tiers per provider. Each entry's options
 // are merged into the request's providerOptions when the user selects the tier.
 // Tier names are user-facing so they show up verbatim in the picker.

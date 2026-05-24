@@ -7,6 +7,7 @@ import { useDialog } from "@tui/ui/dialog"
 import { createDialogProviderOptions, DialogProvider } from "./dialog-provider"
 import { DialogVariant } from "./dialog-variant"
 import { DialogServiceTier } from "./dialog-service-tier"
+import { DialogUpstream } from "./dialog-upstream"
 import * as fuzzysort from "fuzzysort"
 import { useConnected } from "./use-connected"
 
@@ -145,6 +146,13 @@ export function DialogModel(props: { providerID?: string }) {
     const tierNeedsPick = !(tierCur === "default" || (tierCur && tiers.includes(tierCur)))
     if (tiers.length > 0 && tierNeedsPick) {
       dialog.replace(() => <DialogServiceTier />)
+      return
+    }
+    const upstreams = local.model.upstream.list()
+    const upstreamCur = local.model.upstream.selected()
+    const upstreamNeedsPick = !(upstreamCur === "default" || (upstreamCur && upstreams.includes(upstreamCur)))
+    if (upstreams.length > 0 && upstreamNeedsPick) {
+      dialog.replace(() => <DialogUpstream />)
       return
     }
     dialog.clear()

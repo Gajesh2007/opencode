@@ -122,6 +122,8 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         }[]
         variant: Record<string, string | undefined>
         serviceTier: Record<string, string | undefined>
+        upstream: Record<string, string | undefined>
+        upstreamDiscovered: Record<string, string[]>
       }>({
         ready: false,
         model: {},
@@ -129,6 +131,8 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         favorite: [],
         variant: {},
         serviceTier: {},
+        upstream: {},
+        upstreamDiscovered: {},
       })
 
       const filePath = path.join(Global.Path.state, "model.json")
@@ -147,6 +151,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           favorite: modelStore.favorite,
           variant: modelStore.variant,
           serviceTier: modelStore.serviceTier,
+          upstream: modelStore.upstream,
         })
       }
 
@@ -157,6 +162,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           if (typeof x.variant === "object" && x.variant !== null) setModelStore("variant", x.variant)
           if (typeof x.serviceTier === "object" && x.serviceTier !== null)
             setModelStore("serviceTier", x.serviceTier)
+          if (typeof x.upstream === "object" && x.upstream !== null) setModelStore("upstream", x.upstream)
         })
         .catch(() => {})
         .finally(() => {
@@ -426,6 +432,86 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
               return
             }
             this.set(tiers[index + 1])
+          },
+        },
+        upstream: {
+          selected() {
+            const m = currentModel()
+            if (!m) return undefined
+            const key = `${m.providerID}/${m.modelID}`
+            return modelStore.upstream[key]
+          },
+          current() {
+            const v = this.selected()
+            if (!v) return undefined
+            if (!this.list().includes(v)) return undefined
+            return v
+          },
+          /**
+           * Available upstream provider slugs for the current model. Starts
+           * with the static list from `model.upstreams` (populated by
+           * ProviderTransform.availableUpstreams) and unions in any
+           * dynamically-discovered entries fetched from OpenRouter's
+           * /endpoints API by the dialog. Persistence of the discovered list
+           * lives in the in-memory `upstreamDiscovered` map keyed by
+           * "providerID/modelID" — not written to model.json, since it's a
+           * cache, not a preference.
+           */
+          list() {
+            const m = currentModel()
+            if (!m) return []
+            const provider = sync.data.provider.find((x) => x.id === m.providerID)
+            const info = provider?.models[m.modelID]
+            const fromModel = info?.upstreams ?? []
+            const key = `${m.providerID}/${m.modelID}`
+            const discovered = modelStore.upstreamDiscovered[key] ?? []
+            // Preserve model-order first, then append any discovered slugs not already present.
+            const seen = new Set(fromModel)
+            const merged = [...fromModel]
+            for (const slug of discovered) {
+              if (!seen.has(slug)) {
+                merged.push(slug)
+                seen.add(slug)
+              }
+            }
+            return merged
+          },
+          set(value: string | undefined) {
+            const m = currentModel()
+            if (!m) return
+            const key = `${m.providerID}/${m.modelID}`
+            setModelStore("upstream", key, value ?? "default")
+            save()
+          },
+          cycle() {
+            const ups = this.list()
+            if (ups.length === 0) return
+            const current = this.current()
+            if (!current) {
+              this.set(ups[0])
+              return
+            }
+            const index = ups.indexOf(current)
+            if (index === -1 || index === ups.length - 1) {
+              this.set(undefined)
+              return
+            }
+            this.set(ups[index + 1])
+          },
+          /**
+           * Merge a freshly-discovered list of upstream slugs for the
+           * currently-selected model. Idempotent — only writes the store if
+           * the merged list actually changed, so consumers won't see noisy
+           * memo invalidations on every dialog open.
+           */
+          recordDiscovered(slugs: string[]) {
+            const m = currentModel()
+            if (!m) return
+            const key = `${m.providerID}/${m.modelID}`
+            const prev = modelStore.upstreamDiscovered[key] ?? []
+            const next = Array.from(new Set([...prev, ...slugs]))
+            if (next.length === prev.length && next.every((s, i) => s === prev[i])) return
+            setModelStore("upstreamDiscovered", key, next)
           },
         },
       }

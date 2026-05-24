@@ -28,6 +28,7 @@ import type {
   EventTuiCommandExecute2,
   EventTuiPromptAppend2,
   EventTuiSessionSelect2,
+  EventTuiSubagentDemote2,
   EventTuiToastShow2,
   ExperimentalConsoleGetErrors,
   ExperimentalConsoleGetResponses,
@@ -3427,6 +3428,7 @@ export class Session2 extends HeyApiClient {
       system?: string
       variant?: string
       serviceTier?: string
+      upstream?: string
       parts?: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
     },
     options?: Options<never, ThrowOnError>,
@@ -3448,6 +3450,7 @@ export class Session2 extends HeyApiClient {
             { in: "body", key: "system" },
             { in: "body", key: "variant" },
             { in: "body", key: "serviceTier" },
+            { in: "body", key: "upstream" },
             { in: "body", key: "parts" },
           ],
         },
@@ -3782,6 +3785,7 @@ export class Session2 extends HeyApiClient {
       system?: string
       variant?: string
       serviceTier?: string
+      upstream?: string
       parts?: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
     },
     options?: Options<never, ThrowOnError>,
@@ -3803,6 +3807,7 @@ export class Session2 extends HeyApiClient {
             { in: "body", key: "system" },
             { in: "body", key: "variant" },
             { in: "body", key: "serviceTier" },
+            { in: "body", key: "upstream" },
             { in: "body", key: "parts" },
           ],
         },
@@ -3837,6 +3842,7 @@ export class Session2 extends HeyApiClient {
       command?: string
       variant?: string
       serviceTier?: string
+      upstream?: string
       parts?: Array<{
         id?: string
         type: "file"
@@ -3863,6 +3869,7 @@ export class Session2 extends HeyApiClient {
             { in: "body", key: "command" },
             { in: "body", key: "variant" },
             { in: "body", key: "serviceTier" },
+            { in: "body", key: "upstream" },
             { in: "body", key: "parts" },
           ],
         },
@@ -4944,7 +4951,12 @@ export class Tui extends HeyApiClient {
     parameters?: {
       directory?: string
       workspace?: string
-      body?: EventTuiPromptAppend2 | EventTuiCommandExecute2 | EventTuiToastShow2 | EventTuiSessionSelect2
+      body?:
+        | EventTuiPromptAppend2
+        | EventTuiCommandExecute2
+        | EventTuiToastShow2
+        | EventTuiSessionSelect2
+        | EventTuiSubagentDemote2
     },
     options?: Options<never, ThrowOnError>,
   ) {

@@ -80,6 +80,7 @@ import {
 import type { EventSource } from "./context/sdk"
 import { DialogVariant } from "./component/dialog-variant"
 import { DialogServiceTier } from "./component/dialog-service-tier"
+import { DialogUpstream } from "./component/dialog-upstream"
 
 const appBindingCommands = [
   "command.palette.show",
@@ -108,6 +109,8 @@ const appBindingCommands = [
   "subagent.background",
   "service_tier.cycle",
   "service_tier.list",
+  "upstream.cycle",
+  "upstream.list",
   "provider.connect",
   "console.org.switch",
   "opencode.status",
@@ -651,6 +654,24 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
         slashName: "tier",
         run: () => {
           dialog.replace(() => <DialogServiceTier />)
+        },
+      },
+      {
+        name: "upstream.cycle",
+        title: "Upstream provider cycle",
+        category: "Agent",
+        run: () => {
+          local.model.upstream.cycle()
+        },
+      },
+      {
+        name: "upstream.list",
+        title: "Pin upstream provider",
+        category: "Agent",
+        hidden: local.model.upstream.list().length === 0,
+        slashName: "provider",
+        run: () => {
+          dialog.replace(() => <DialogUpstream />)
         },
       },
       {

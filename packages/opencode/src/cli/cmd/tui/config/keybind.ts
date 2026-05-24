@@ -129,6 +129,8 @@ export const Definitions = {
   subagent_background: keybind("ctrl+b", "Move in-flight subagent to background"),
   service_tier_cycle: keybind("none", "Cycle model service tiers"),
   service_tier_list: keybind("none", "List model service tiers"),
+  upstream_cycle: keybind("none", "Cycle pinned upstream provider"),
+  upstream_list: keybind("none", "Pin upstream provider"),
 
   messages_page_up: keybind("pageup,ctrl+alt+b", "Scroll messages up by one page"),
   messages_page_down: keybind("pagedown,ctrl+alt+f", "Scroll messages down by one page"),
@@ -328,6 +330,8 @@ export const CommandMap = {
   subagent_background: "subagent.background",
   service_tier_cycle: "service_tier.cycle",
   service_tier_list: "service_tier.list",
+  upstream_cycle: "upstream.cycle",
+  upstream_list: "upstream.list",
   messages_page_up: "session.page.up",
   messages_page_down: "session.page.down",
   messages_line_up: "session.line.up",

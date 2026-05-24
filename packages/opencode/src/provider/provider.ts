@@ -691,6 +691,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
                   release_date: "",
                   variants: {},
                   serviceTiers: {},
+                  upstreams: [],
                 }
               }
             }
@@ -933,6 +934,7 @@ export const Model = Schema.Struct({
   release_date: Schema.String,
   variants: optionalOmitUndefined(Schema.Record(Schema.String, Schema.Record(Schema.String, Schema.Any))),
   serviceTiers: optionalOmitUndefined(Schema.Record(Schema.String, Schema.Record(Schema.String, Schema.Any))),
+  upstreams: optionalOmitUndefined(Schema.Array(Schema.String)),
 }).annotate({ identifier: "Model" })
 export type Model = Types.DeepMutable<Schema.Schema.Type<typeof Model>>
 
@@ -1116,12 +1118,14 @@ function fromModelsDevModel(provider: ModelsDev.Provider, model: ModelsDev.Model
     release_date: model.release_date ?? "",
     variants: {},
     serviceTiers: {},
+    upstreams: [],
   }
 
   return {
     ...base,
     variants: mapValues(ProviderTransform.variants(base), (v) => v),
     serviceTiers: mapValues(ProviderTransform.serviceTiers(base), (v) => v),
+    upstreams: ProviderTransform.availableUpstreams(base),
   }
 }
 
@@ -1370,6 +1374,7 @@ export const layer = Layer.effect(
               release_date: model.release_date ?? existingModel?.release_date ?? "",
               variants: {},
               serviceTiers: {},
+              upstreams: [],
             }
             const merged = mergeDeep(ProviderTransform.variants(parsedModel), model.variants ?? {})
             parsedModel.variants = mapValues(
@@ -1384,6 +1389,10 @@ export const layer = Layer.effect(
               pickBy(mergedTiers, (v) => !v.disabled),
               (v) => omit(v, ["disabled"]),
             )
+            parsedModel.upstreams =
+              model.upstreams && model.upstreams.length > 0
+                ? [...model.upstreams]
+                : ProviderTransform.availableUpstreams(parsedModel)
             parsed.models[modelID] = parsedModel
           }
           database[providerID] = parsed
@@ -1534,6 +1543,14 @@ export const layer = Layer.effect(
                 pickBy(merged, (v) => !v.disabled),
                 (v) => omit(v, ["disabled"]),
               )
+            }
+
+            if (!model.upstreams || model.upstreams.length === 0) {
+              model.upstreams = ProviderTransform.availableUpstreams(model)
+            }
+            const configUpstreams = configProvider?.models?.[modelID]?.upstreams
+            if (configUpstreams && configUpstreams.length > 0) {
+              model.upstreams = [...configUpstreams]
             }
           }
 

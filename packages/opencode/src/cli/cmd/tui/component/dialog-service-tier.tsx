@@ -2,6 +2,7 @@ import { createMemo } from "solid-js"
 import { useLocal } from "@tui/context/local"
 import { DialogSelect } from "@tui/ui/dialog-select"
 import { useDialog } from "@tui/ui/dialog"
+import { DialogUpstream } from "./dialog-upstream"
 
 const TIER_DESCRIPTIONS: Record<string, string> = {
   fast: "Anthropic fast mode — up to 2.5x output TPS on Opus 4.6/4.7. ~6x standard price. Beta.",
@@ -16,6 +17,17 @@ export function DialogServiceTier() {
   const local = useLocal()
   const dialog = useDialog()
 
+  function next() {
+    const ups = local.model.upstream.list()
+    const cur = local.model.upstream.selected()
+    const needsPick = !(cur === "default" || (cur && ups.includes(cur)))
+    if (ups.length > 0 && needsPick) {
+      dialog.replace(() => <DialogUpstream />)
+      return
+    }
+    dialog.clear()
+  }
+
   const options = createMemo(() => {
     return [
       {
@@ -23,8 +35,8 @@ export function DialogServiceTier() {
         title: "Default",
         description: "Standard tier. No routing or priority overrides.",
         onSelect: () => {
-          dialog.clear()
           local.model.serviceTier.set(undefined)
+          next()
         },
       },
       ...local.model.serviceTier.list().map((tier) => ({
@@ -32,8 +44,8 @@ export function DialogServiceTier() {
         title: tier,
         description: TIER_DESCRIPTIONS[tier],
         onSelect: () => {
-          dialog.clear()
           local.model.serviceTier.set(tier)
+          next()
         },
       })),
     ]
