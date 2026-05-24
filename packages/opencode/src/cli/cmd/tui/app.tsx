@@ -33,6 +33,7 @@ import { StartupLoading } from "@tui/component/startup-loading"
 import { SyncProvider, useSync } from "@tui/context/sync"
 import { SyncProviderV2 } from "@tui/context/sync-v2"
 import { LocalProvider, useLocal } from "@tui/context/local"
+import { StreamingMetricsProvider } from "@tui/context/streaming-metrics"
 import { DialogModel } from "@tui/component/dialog-model"
 import { useConnected } from "@tui/component/use-connected"
 import { DialogMcp } from "@tui/component/dialog-mcp"
@@ -78,6 +79,7 @@ import {
 
 import type { EventSource } from "./context/sdk"
 import { DialogVariant } from "./component/dialog-variant"
+import { DialogServiceTier } from "./component/dialog-service-tier"
 
 const appBindingCommands = [
   "command.palette.show",
@@ -103,6 +105,8 @@ const appBindingCommands = [
   "agent.cycle.reverse",
   "variant.cycle",
   "variant.list",
+  "service_tier.cycle",
+  "service_tier.list",
   "provider.connect",
   "console.org.switch",
   "opencode.status",
@@ -232,6 +236,7 @@ export function tui(input: {
                               <SyncProviderV2>
                                 <ThemeProvider mode={mode}>
                                   <LocalProvider>
+                                    <StreamingMetricsProvider>
                                     <PromptStashProvider>
                                       <DialogProvider>
                                         <FrecencyProvider>
@@ -245,6 +250,7 @@ export function tui(input: {
                                         </FrecencyProvider>
                                       </DialogProvider>
                                     </PromptStashProvider>
+                                    </StreamingMetricsProvider>
                                   </LocalProvider>
                                 </ThemeProvider>
                               </SyncProviderV2>
@@ -603,6 +609,24 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
         slashName: "variants",
         run: () => {
           dialog.replace(() => <DialogVariant />)
+        },
+      },
+      {
+        name: "service_tier.cycle",
+        title: "Service tier cycle",
+        category: "Agent",
+        run: () => {
+          local.model.serviceTier.cycle()
+        },
+      },
+      {
+        name: "service_tier.list",
+        title: "Switch service tier",
+        category: "Agent",
+        hidden: local.model.serviceTier.list().length === 0,
+        slashName: "tier",
+        run: () => {
+          dialog.replace(() => <DialogServiceTier />)
         },
       },
       {

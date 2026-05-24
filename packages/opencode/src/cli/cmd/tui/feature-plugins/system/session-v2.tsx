@@ -311,6 +311,17 @@ function AssistantMessage(props: {
     return `${props.message.model.providerID}/${props.message.model.id}${variant}`
   })
   const final = createMemo(() => props.message.finish && !["tool-calls", "unknown"].includes(props.message.finish))
+  // Output tokens per second. Uses the same `duration` denominator as the
+  // displayed elapsed time, so the number reconciles with "Xs" next to it.
+  // Hidden when we don't have output tokens or a finished duration yet
+  // (streaming mid-flight) — otherwise we'd show a noisy TPS that climbs.
+  const tps = createMemo(() => {
+    const ms = duration()
+    const out = props.message.tokens?.output ?? 0
+    if (!ms || out === 0 || !props.message.time.completed) return undefined
+    return Math.round(out / (ms / 1000))
+  })
+  const resolved = createMemo(() => (props.message as { provider_resolved?: string }).provider_resolved)
   return (
     <>
       <For each={props.message.content}>
@@ -356,8 +367,16 @@ function AssistantMessage(props: {
             <span style={{ fg: local.agent.color(props.message.agent) }}>▣ </span>
             <span style={{ fg: theme.text }}>{Locale.titlecase(props.message.agent)}</span>
             <span style={{ fg: theme.textMuted }}> · {model()}</span>
+            <Show when={resolved()}>
+              <span style={{ fg: theme.textMuted }}> · via </span>
+              <span style={{ fg: theme.success }}>{resolved()}</span>
+            </Show>
             <Show when={duration()}>
               <span style={{ fg: theme.textMuted }}> · {Locale.duration(duration())}</span>
+            </Show>
+            <Show when={tps() !== undefined}>
+              <span style={{ fg: theme.textMuted }}> · </span>
+              <span style={{ fg: theme.success }}>{tps()} tok/s</span>
             </Show>
           </text>
         </box>

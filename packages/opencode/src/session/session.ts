@@ -426,18 +426,31 @@ export const getUsage = (input: { model: Provider.Model; usage: Usage; metadata?
     (input.model.cost?.experimentalOver200K && contextTokens > 200_000
       ? input.model.cost.experimentalOver200K
       : input.model.cost)
+
+  // When Vercel AI Gateway served the request, prefer its reported cost. The
+  // gateway emits `providerMetadata.gateway.cost` as a decimal string equal to
+  // what was debited from AI Gateway Credits — already reflecting the tier
+  // modifier (fast/priority/flex), the actually-served upstream when sorting,
+  // and any gateway markup. The local model.cost-based calculation cannot
+  // know any of those, so trust the gateway number whenever it shows up.
+  // Falls back to the local computation for direct-provider calls.
+  const gatewayCostRaw = (input.metadata as Record<string, any> | undefined)?.gateway?.cost
+  const gatewayCost = gatewayCostRaw !== undefined ? Number(gatewayCostRaw) : NaN
+
   return {
-    cost: safe(
-      new Decimal(0)
-        .add(new Decimal(tokens.input).mul(costInfo?.input ?? 0).div(1_000_000))
-        .add(new Decimal(tokens.output).mul(costInfo?.output ?? 0).div(1_000_000))
-        .add(new Decimal(tokens.cache.read).mul(costInfo?.cache?.read ?? 0).div(1_000_000))
-        .add(new Decimal(tokens.cache.write).mul(costInfo?.cache?.write ?? 0).div(1_000_000))
-        // TODO: update models.dev to have better pricing model, for now:
-        // charge reasoning tokens at the same rate as output tokens
-        .add(new Decimal(tokens.reasoning).mul(costInfo?.output ?? 0).div(1_000_000))
-        .toNumber(),
-    ),
+    cost: Number.isFinite(gatewayCost)
+      ? safe(gatewayCost)
+      : safe(
+          new Decimal(0)
+            .add(new Decimal(tokens.input).mul(costInfo?.input ?? 0).div(1_000_000))
+            .add(new Decimal(tokens.output).mul(costInfo?.output ?? 0).div(1_000_000))
+            .add(new Decimal(tokens.cache.read).mul(costInfo?.cache?.read ?? 0).div(1_000_000))
+            .add(new Decimal(tokens.cache.write).mul(costInfo?.cache?.write ?? 0).div(1_000_000))
+            // TODO: update models.dev to have better pricing model, for now:
+            // charge reasoning tokens at the same rate as output tokens
+            .add(new Decimal(tokens.reasoning).mul(costInfo?.output ?? 0).div(1_000_000))
+            .toNumber(),
+        ),
     tokens,
   }
 }

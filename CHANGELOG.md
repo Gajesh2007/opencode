@@ -2,6 +2,51 @@
 
 This file tracks customizations made to this personal fork of opencode on top of upstream `dev`. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased] — 2026-05-24
+
+### Added — `/tier` slash command, cycle action, footer indicator
+
+Mirroring the existing `/variants` flow exactly. Pickable from the prompt with `/tier`, hidden when the active model exposes no tiers. New keybinding `service_tier_cycle` (unbound by default — `ctrl+t` is already variant cycle) cycles through the available tiers in place. The active tier renders in the bottom-line footer in `theme.success` (green) right after the variant chip, with the same fade-in animation.
+
+Files: `cli/cmd/tui/app.tsx` (command + name list + import), `cli/cmd/tui/config/keybind.ts` (two new keybinds + command mapping), `cli/cmd/tui/component/prompt/index.tsx` (`showServiceTier` memo + `serviceTierMetaAlpha` + footer chip).
+
+### Added — assistant message footer shows resolved Gateway provider + TPS
+
+Each completed assistant turn now ends with `▣ Agent · model · via <provider> · <duration> · <N> tok/s`:
+
+- `via <provider>` — captured from `providerMetadata.gateway.routing.resolvedProvider` (with fallback to `finalProvider`) on each `step-finish` event in the processor. Persisted as `provider_resolved` on the `Assistant` message. Only renders when present, so direct-provider calls stay clean.
+- `<N> tok/s` — `tokens.output / duration_ms`. Uses provider-reported token count (exact, no chars/token guesswork). Only renders after `time.completed` is set and at least one output token was produced.
+
+Files: `session/message-v2.ts` (`provider_resolved` field on Assistant), `session/processor.ts` (capture in step-finish), `cli/cmd/tui/feature-plugins/system/session-v2.tsx` (memo + render), SDK regenerated.
+
+### Added — live streaming TPS in prompt footer
+
+While the model is generating, the prompt footer shows `~<N> tok/s live` (green) that updates every 100ms. Disappears the instant the message completes (the final realized TPS still sits on the message itself).
+
+- Source: streamed `text`-field characters from `message.part.delta` events, divided by `CHARS_PER_TOKEN_APPROX = 4` and elapsed time since the first delta (not request-send — that would bake in TTFT and skew the rate down).
+- Filters `field === "text"` so tool-call argument JSON streaming doesn't inflate the count.
+- 100ms wall-clock ticker only fires when a stream is active; idle UI pays nothing.
+
+Two TPS numbers, intentionally:
+
+| | Live | Final |
+|---|---|---|
+| Source | streamed chars ÷ 4 ÷ elapsed | reported output tokens ÷ duration |
+| Where | prompt footer (transient) | message footer (persisted) |
+| Precision | ~5–10% off (chars/token varies) | exact |
+
+Tune `CHARS_PER_TOKEN_APPROX` in `cli/cmd/tui/context/streaming-metrics.tsx` if your typical workload skews (code ≈ 3.0, prose ≈ 4.5).
+
+Files: `cli/cmd/tui/context/streaming-metrics.tsx` (new), `cli/cmd/tui/app.tsx` (provider wiring), `cli/cmd/tui/component/prompt/index.tsx` (footer chip).
+
+### Fixed — cost reflects Vercel AI Gateway's actual debit when routed through it
+
+Previously, `Session.getUsage` computed cost purely from token counts × `model.cost.input/output` (sourced from models.dev). For any Gateway route that involves a tier modifier or sort-based upstream change, that local math diverges from what Vercel actually debits from AI Gateway credits — a request with `/tier fast` on Opus 4.6/4.7 was reported at 1/6 of its real cost.
+
+`Session.getUsage` now prefers `providerMetadata.gateway.cost` (decimal string, the authoritative debit amount) when present and falls back to the local computation for direct-provider calls. Same downstream display path; just the right number now.
+
+File: `session/session.ts`.
+
 ## [Unreleased] — 2026-05-23
 
 ### Added — service tier selector (model picker → tier picker)

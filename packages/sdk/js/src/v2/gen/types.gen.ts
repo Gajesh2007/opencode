@@ -468,6 +468,7 @@ export type AssistantMessage = {
   structured?: unknown
   variant?: string
   finish?: string
+  provider_resolved?: string
 }
 
 export type Message = UserMessage | AssistantMessage

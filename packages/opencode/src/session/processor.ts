@@ -576,6 +576,15 @@ export const layer = Layer.effect(
             ctx.assistantMessage.finish = value.reason
             ctx.assistantMessage.cost += usage.cost
             ctx.assistantMessage.tokens = usage.tokens
+            // Capture the Vercel AI Gateway upstream that actually served this
+            // step, if present. Keys come from providerMetadata.gateway.routing.
+            // Field names vary across gateway versions (resolvedProvider vs
+            // finalProvider) so check both. Non-gateway calls leave this unset.
+            const gatewayRouting = (value.providerMetadata as Record<string, any> | undefined)?.gateway?.routing
+            const resolved =
+              (gatewayRouting?.resolvedProvider as string | undefined) ??
+              (gatewayRouting?.finalProvider as string | undefined)
+            if (resolved) ctx.assistantMessage.provider_resolved = resolved
             yield* session.updatePart({
               id: PartID.ascending(),
               reason: value.reason,

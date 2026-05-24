@@ -15,6 +15,7 @@ import path from "path"
 import { fileURLToPath } from "url"
 import { Filesystem } from "@/util/filesystem"
 import { useLocal } from "@tui/context/local"
+import { useStreamingMetrics } from "@tui/context/streaming-metrics"
 import { tint, useTheme } from "@tui/context/theme"
 import { EmptyBorder, SplitBorder } from "@tui/component/border"
 import { Spinner } from "@tui/component/spinner"
@@ -138,6 +139,7 @@ export function Prompt(props: PromptProps) {
 
   const leader = useLeaderActive()
   const local = useLocal()
+  const streamingMetrics = useStreamingMetrics()
   const args = useArgs()
   const sdk = useSDK()
   const editor = useEditorContext()
@@ -1398,10 +1400,21 @@ export function Prompt(props: PromptProps) {
     return !!current
   })
 
+  const showServiceTier = createMemo(() => {
+    const tiers = local.model.serviceTier.list()
+    if (tiers.length === 0) return false
+    const current = local.model.serviceTier.current()
+    return !!current
+  })
+
   const agentMetaAlpha = createFadeIn(() => !!local.agent.current(), animationsEnabled)
   const modelMetaAlpha = createFadeIn(() => !!local.agent.current() && store.mode === "normal", animationsEnabled)
   const variantMetaAlpha = createFadeIn(
     () => !!local.agent.current() && store.mode === "normal" && showVariant(),
+    animationsEnabled,
+  )
+  const serviceTierMetaAlpha = createFadeIn(
+    () => !!local.agent.current() && store.mode === "normal" && showServiceTier(),
     animationsEnabled,
   )
   const borderHighlight = createMemo(() => tint(theme.border, highlight(), agentMetaAlpha()))
@@ -1579,6 +1592,23 @@ export function Prompt(props: PromptProps) {
                               <span style={{ fg: fadeColor(theme.warning, variantMetaAlpha()), bold: true }}>
                                 {local.model.variant.current()}
                               </span>
+                            </text>
+                          </Show>
+                          <Show when={showServiceTier()}>
+                            <text fg={fadeColor(theme.textMuted, serviceTierMetaAlpha())}>·</text>
+                            <text>
+                              <span style={{ fg: fadeColor(theme.success, serviceTierMetaAlpha()), bold: true }}>
+                                {local.model.serviceTier.current()}
+                              </span>
+                            </text>
+                          </Show>
+                          <Show when={streamingMetrics.active() && streamingMetrics.tps() > 0}>
+                            <text fg={theme.textMuted}>·</text>
+                            <text>
+                              <span style={{ fg: theme.success, bold: true }}>
+                                ~{streamingMetrics.tps()} tok/s
+                              </span>
+                              <span style={{ fg: theme.textMuted }}> live</span>
                             </text>
                           </Show>
                         </box>

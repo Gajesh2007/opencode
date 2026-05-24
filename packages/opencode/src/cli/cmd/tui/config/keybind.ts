@@ -126,6 +126,8 @@ export const Definitions = {
   agent_cycle_reverse: keybind("shift+tab", "Previous agent"),
   variant_cycle: keybind("ctrl+t", "Cycle model variants"),
   variant_list: keybind("none", "List model variants"),
+  service_tier_cycle: keybind("none", "Cycle model service tiers"),
+  service_tier_list: keybind("none", "List model service tiers"),
 
   messages_page_up: keybind("pageup,ctrl+alt+b", "Scroll messages up by one page"),
   messages_page_down: keybind("pagedown,ctrl+alt+f", "Scroll messages down by one page"),
@@ -322,6 +324,8 @@ export const CommandMap = {
   agent_cycle_reverse: "agent.cycle.reverse",
   variant_cycle: "variant.cycle",
   variant_list: "variant.list",
+  service_tier_cycle: "service_tier.cycle",
+  service_tier_list: "service_tier.list",
   messages_page_up: "session.page.up",
   messages_page_down: "session.page.down",
   messages_line_up: "session.line.up",
