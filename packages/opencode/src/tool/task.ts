@@ -255,6 +255,19 @@ export const TaskTool = Tool.define(
       const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(Effect.orDie)
       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
 
+      // Inherit the user-selected mode (service tier, variant, upstream pin) from the
+      // user message that triggered this turn so subagents run with the same tier as
+      // the parent. The agent's own `variant` still wins when set — it's an explicit
+      // configuration of the agent's identity, not a runtime user choice.
+      const parentUser = yield* MessageV2.get({
+        sessionID: ctx.sessionID,
+        messageID: msg.info.parentID,
+      }).pipe(Effect.orDie)
+      const parentUserModel = parentUser.info.role === "user" ? parentUser.info.model : undefined
+      const inheritedServiceTier = parentUserModel?.serviceTier
+      const inheritedUpstream = parentUserModel?.upstream
+      const inheritedVariant = next.variant ?? parentUserModel?.variant
+
       const model = next.model ?? {
         modelID: msg.info.modelID,
         providerID: msg.info.providerID,
@@ -289,6 +302,9 @@ export const TaskTool = Tool.define(
             providerID: model.providerID,
           },
           agent: next.name,
+          variant: inheritedVariant,
+          serviceTier: inheritedServiceTier,
+          upstream: inheritedUpstream,
           tools: {
             ...(next.permission.some((rule) => rule.permission === "todowrite") ? {} : { todowrite: false }),
             ...(next.permission.some((rule) => rule.permission === id) ? {} : { task: false }),
@@ -336,10 +352,16 @@ export const TaskTool = Tool.define(
         text: string,
       ) {
         const currentParent = yield* sessions.get(ctx.sessionID)
+        // Carry the parent's original mode forward on the synthetic completion
+        // message so the resumed parent loop runs at the same service tier the
+        // user picked (e.g. fast mode), not a regressed default.
         const message = yield* ops.prompt({
           sessionID: ctx.sessionID,
           noReply: true,
           agent: currentParent.agent ?? ctx.agent,
+          variant: parentUserModel?.variant,
+          serviceTier: inheritedServiceTier,
+          upstream: inheritedUpstream,
           parts: [
             {
               type: "text",

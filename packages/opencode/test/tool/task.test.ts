@@ -54,15 +54,17 @@ function defer<T>() {
   return { promise, resolve }
 }
 
-const seed = Effect.fn("TaskToolTest.seed")(function* (title = "Pinned") {
+const seed = Effect.fn("TaskToolTest.seed")(function* (
+  opts: { title?: string; userModel?: MessageV2.User["model"] } = {},
+) {
   const session = yield* Session.Service
-  const chat = yield* session.create({ title })
+  const chat = yield* session.create({ title: opts.title ?? "Pinned" })
   const user = yield* session.updateMessage({
     id: MessageID.ascending(),
     role: "user",
     sessionID: chat.id,
     agent: "build",
-    model: ref,
+    model: opts.userModel ?? ref,
     time: { created: Date.now() },
   })
   const assistant: MessageV2.Assistant = {
@@ -80,7 +82,7 @@ const seed = Effect.fn("TaskToolTest.seed")(function* (title = "Pinned") {
     time: { created: Date.now() },
   }
   yield* session.updateMessage(assistant)
-  return { chat, assistant }
+  return { chat, user, assistant }
 })
 
 function stubOps(opts?: { onPrompt?: (input: SessionPrompt.PromptInput) => void; text?: string }): TaskPromptOps {
@@ -442,6 +444,97 @@ describe("tool.task", () => {
         },
         experimental: {
           primary_tools: ["bash", "read"],
+        },
+      },
+    },
+  )
+
+  it.instance("execute propagates parent service tier, upstream, and variant to the subagent prompt", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed({
+        userModel: {
+          ...ref,
+          serviceTier: "fast",
+          upstream: "anthropic",
+          variant: "thinking",
+        },
+      })
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      let seen: SessionPrompt.PromptInput | undefined
+      const promptOps = stubOps({ onPrompt: (input) => (seen = input) })
+
+      yield* def.execute(
+        {
+          description: "inspect bug",
+          prompt: "look into the cache key path",
+          subagent_type: "general",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(seen?.serviceTier).toBe("fast")
+      expect(seen?.upstream).toBe("anthropic")
+      expect(seen?.variant).toBe("thinking")
+    }),
+  )
+
+  it.instance(
+    "execute lets the subagent agent's pinned variant win over the inherited parent variant",
+    () =>
+      Effect.gen(function* () {
+        const { chat, assistant } = yield* seed({
+          userModel: {
+            ...ref,
+            serviceTier: "fast",
+            variant: "parent-variant",
+          },
+        })
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let seen: SessionPrompt.PromptInput | undefined
+        const promptOps = stubOps({ onPrompt: (input) => (seen = input) })
+
+        yield* def.execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "pinned",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        // Subagent agent has its own `variant` config — it should win even
+        // when the parent's user message has a different variant. The tier
+        // (no agent override exists) still inherits.
+        expect(seen?.variant).toBe("agent-variant")
+        expect(seen?.serviceTier).toBe("fast")
+      }),
+    {
+      config: {
+        agent: {
+          pinned: {
+            mode: "subagent",
+            variant: "agent-variant",
+          },
         },
       },
     },
