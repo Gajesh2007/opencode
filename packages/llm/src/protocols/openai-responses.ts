@@ -127,7 +127,16 @@ const OpenAIResponsesCoreFields = {
   tool_choice: Schema.optional(OpenAIResponsesToolChoice),
   store: Schema.optional(Schema.Boolean),
   prompt_cache_key: Schema.optional(Schema.String),
+  prompt_cache_retention: Schema.optional(Schema.Literals(["in-memory", "24h"])),
+  service_tier: Schema.optional(Schema.Literals(["auto", "default", "flex", "scale", "priority"])),
   include: optionalArray(OpenAIOptions.OpenAIResponseIncludable),
+  // Continuation pointer for the OpenAI Responses API. The server replays
+  // the cached conversation prefix from that response id instead of
+  // retokenizing the full history. The session layer captures this id
+  // from the prior turn's `providerMetadata.openai.responseId` finish
+  // event and threads it back here. Required for the WebSocket-mode
+  // connection-scoped cache to actually fire.
+  previous_response_id: Schema.optional(Schema.String),
   reasoning: Schema.optional(
     Schema.Struct({
       effort: Schema.optional(OpenAIOptions.OpenAIReasoningEffort),
@@ -323,13 +332,26 @@ const lowerToolResultOutput = Effect.fn("OpenAIResponses.lowerToolResultOutput")
   return yield* Effect.forEach(part.result.value, lowerToolResultContentItem)
 })
 
+const continuationMessages = (request: LLMRequest) => {
+  const previousResponseId = OpenAIOptions.previousResponseId(request)
+  if (!previousResponseId) return { messages: request.messages, incremental: false }
+  const lastAssistant = request.messages.findLastIndex((message) => message.role === "assistant")
+  if (lastAssistant === -1) return { messages: request.messages, incremental: false }
+  const tail = request.messages.slice(lastAssistant + 1)
+  if (tail.length === 0) return { messages: request.messages, incremental: false }
+  return { messages: tail, incremental: true }
+}
+
 const lowerMessages = Effect.fn("OpenAIResponses.lowerMessages")(function* (request: LLMRequest) {
+  const continuation = continuationMessages(request)
   const system: OpenAIResponsesInputItem[] =
-    request.system.length === 0 ? [] : [{ role: "system", content: ProviderShared.joinText(request.system) }]
+    continuation.incremental || request.system.length === 0
+      ? []
+      : [{ role: "system", content: ProviderShared.joinText(request.system) }]
   const input: OpenAIResponsesInputItem[] = [...system]
   const store = OpenAIOptions.store(request)
 
-  for (const message of request.messages) {
+  for (const message of continuation.messages) {
     if (message.role === "user") {
       input.push({ role: "user", content: yield* Effect.forEach(message.content, lowerUserContent) })
       continue
@@ -408,6 +430,8 @@ const lowerMessages = Effect.fn("OpenAIResponses.lowerMessages")(function* (requ
 const lowerOptions = Effect.fn("OpenAIResponses.lowerOptions")(function* (request: LLMRequest) {
   const store = OpenAIOptions.store(request)
   const promptCacheKey = OpenAIOptions.promptCacheKey(request)
+  const promptCacheRetention = OpenAIOptions.promptCacheRetention(request)
+  const serviceTier = OpenAIOptions.serviceTier(request)
   const effort = OpenAIOptions.reasoningEffort(request)
   if (effort && !OpenAIOptions.isReasoningEffort(effort))
     return yield* invalid(`OpenAI Responses does not support reasoning effort ${effort}`)
@@ -415,11 +439,15 @@ const lowerOptions = Effect.fn("OpenAIResponses.lowerOptions")(function* (reques
   const include = OpenAIOptions.include(request)
   const verbosity = OpenAIOptions.textVerbosity(request)
   const instructions = OpenAIOptions.instructions(request)
+  const previousResponseId = OpenAIOptions.previousResponseId(request)
   return {
     ...(instructions ? { instructions } : {}),
     ...(store !== undefined ? { store } : {}),
     ...(promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
+    ...(promptCacheRetention ? { prompt_cache_retention: promptCacheRetention } : {}),
+    ...(serviceTier ? { service_tier: serviceTier } : {}),
     ...(include ? { include } : {}),
+    ...(previousResponseId ? { previous_response_id: previousResponseId } : {}),
     ...(effort || summary ? { reasoning: { effort, summary } } : {}),
     ...(verbosity ? { text: { verbosity } } : {}),
   }
@@ -427,10 +455,11 @@ const lowerOptions = Effect.fn("OpenAIResponses.lowerOptions")(function* (reques
 
 const fromRequest = Effect.fn("OpenAIResponses.fromRequest")(function* (request: LLMRequest) {
   const generation = request.generation
+  const continuation = continuationMessages(request)
   return {
     model: request.model.id,
     input: yield* lowerMessages(request),
-    tools: request.tools.length === 0 ? undefined : request.tools.map(lowerTool),
+    tools: continuation.incremental || request.tools.length === 0 ? undefined : request.tools.map(lowerTool),
     tool_choice: request.toolChoice ? yield* lowerToolChoice(request.toolChoice) : undefined,
     stream: true as const,
     max_output_tokens: generation?.maxTokens,

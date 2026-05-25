@@ -8,6 +8,8 @@ export interface OpenAIOptionsInput {
   readonly [key: string]: unknown
   readonly store?: boolean
   readonly promptCacheKey?: string
+  readonly promptCacheRetention?: "in-memory" | "24h"
+  readonly serviceTier?: "auto" | "default" | "flex" | "scale" | "priority"
   readonly reasoningEffort?: ReasoningEffort
   readonly reasoningSummary?: "auto"
   // OpenAI Responses `include` wire field. Mirrors the official SDK's
@@ -15,6 +17,15 @@ export interface OpenAIOptionsInput {
   // native-SDK callers share one shape and no translation is required.
   readonly include?: ReadonlyArray<OpenAIResponseIncludable>
   readonly textVerbosity?: TextVerbosity
+  // Continuation pointer for the OpenAI Responses API. When set, the server
+  // skips re-tokenizing the prior conversation and reuses the cached
+  // state for that response id. Required for the article's connection-
+  // scoped speedup and the only safe way to chain turns under WebSocket
+  // mode (`response.create` + previous_response_id is OpenAI's documented
+  // continuation pattern, see developers.openai.com/api/docs/guides/
+  // websocket-mode). Works equally over plain HTTP — the server still
+  // caches some state per response id.
+  readonly previousResponseId?: string
 }
 
 export type OpenAIProviderOptionsInput = ProviderOptions & {
@@ -29,10 +40,13 @@ const openAIProviderOptions = (options: OpenAIOptionsInput | undefined): Provide
     definedEntries({
       store: options?.store,
       promptCacheKey: options?.promptCacheKey,
+      promptCacheRetention: options?.promptCacheRetention,
+      serviceTier: options?.serviceTier,
       reasoningEffort: options?.reasoningEffort,
       reasoningSummary: options?.reasoningSummary,
       include: options?.include,
       textVerbosity: options?.textVerbosity,
+      previousResponseId: options?.previousResponseId,
     }),
   )
   if (Object.keys(openai).length === 0) return undefined

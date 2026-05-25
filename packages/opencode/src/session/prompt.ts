@@ -16,6 +16,8 @@ import { SystemPrompt } from "./system"
 import { Instruction } from "./instruction"
 import { Plugin } from "../plugin"
 import MAX_STEPS from "../session/prompt/max-steps.txt"
+import GOAL_CONTINUATION from "../session/prompt/goal-continuation.txt"
+import GOAL_BUDGET_LIMIT from "../session/prompt/goal-budget-limit.txt"
 import { ToolRegistry } from "@/tool/registry"
 import { MCP } from "../mcp"
 import { LSP } from "@/lsp/lsp"
@@ -61,6 +63,8 @@ import { referencePromptMetadata, referenceTextPart } from "./prompt/reference"
 import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
 import { LLMEvent } from "@opencode-ai/llm"
+import { Goal } from "./goal"
+import { Steering } from "./steering"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -123,6 +127,8 @@ export const layer = Layer.effect(
     const references = yield* Reference.Service
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
+    const goals = yield* Goal.Service
+    const steering = yield* Steering.Service
     const ops = Effect.fn("SessionPrompt.ops")(function* () {
       return {
         cancel: (sessionID: SessionID) => cancel(sessionID),
@@ -1426,9 +1432,20 @@ export const layer = Layer.effect(
               instruction.system().pipe(Effect.orDie),
               MessageV2.toModelMessagesEffect(msgs, model),
             ])
-            const system = [...env, ...instructions, ...(skills ? [skills] : [])]
+            const activeGoal = yield* goals.get(sessionID)
+            const goalContext = activeGoal && activeGoal.status === "active" ? formatGoalReminder(activeGoal) : undefined
+            const system = [...env, ...instructions, ...(skills ? [skills] : []), ...(goalContext ? [goalContext] : [])]
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
+            // OpenAI Responses continuation: thread the most recent assistant
+            // message's captured `provider_response_id` back as
+            // `previousResponseId` so the OpenAI server can replay cached
+            // state instead of retokenizing. Skipped on the first call in a
+            // fresh session (no prior assistant). Non-OpenAI-Responses routes
+            // silently ignore the field. See
+            // https://developers.openai.com/api/docs/guides/websocket-mode.
+            const previousResponseId =
+              lastAssistant && lastAssistant.provider_response_id ? lastAssistant.provider_response_id : undefined
             const result = yield* handle.process({
               user: lastUser,
               agent,
@@ -1440,6 +1457,7 @@ export const layer = Layer.effect(
               tools,
               model,
               toolChoice: format.type === "json_schema" ? "required" : undefined,
+              previousResponseId,
             })
 
             if (structured !== undefined) {
@@ -1476,7 +1494,104 @@ export const layer = Layer.effect(
             Effect.ensuring(instruction.clear(handle.message.id)),
             Effect.onInterrupt(() => finalizeInterruptedAssistant),
           )
-          if (outcome === "break") break
+          if (outcome === "break") {
+            // Goal auto-continuation: if a goal is active and the turn finished
+            // normally (not an error), check whether we should auto-continue.
+            const activeGoal = yield* goals.get(sessionID)
+            if (activeGoal && activeGoal.status === "active" && !handle.message.error) {
+              // Account tokens and cost from the completed turn.
+              const turnTokens = handle.message.tokens.input + handle.message.tokens.output
+              const turnCost = handle.message.cost
+              const updated = yield* goals.addUsage({ sessionID, tokens: turnTokens, cost: turnCost })
+              if (!updated) break
+
+              const overTokenBudget = updated.tokenBudget && updated.tokensUsed >= updated.tokenBudget
+              const overCostBudget = updated.costBudget && updated.costUsed >= updated.costBudget
+              if (overTokenBudget || overCostBudget) {
+                // Budget exceeded — inject budget-limit prompt, let model wrap up, then stop.
+                yield* goals.setBudgetLimited(sessionID)
+                yield* sessions.updateMessage(
+                  yield* sessions.updateMessage({
+                    id: MessageID.ascending(),
+                    role: "user",
+                    sessionID,
+                    agent: lastUser.agent,
+                    model: lastUser.model,
+                    time: { created: Date.now() },
+                  }),
+                )
+                yield* sessions.updatePart({
+                  id: PartID.ascending(),
+                  messageID: MessageID.ascending(),
+                  sessionID,
+                  type: "text",
+                  text: renderGoalPrompt(GOAL_BUDGET_LIMIT, updated),
+                  synthetic: true,
+                })
+                // Don't continue the loop — the budget-limit message will be
+                // picked up if the user resumes manually.
+                break
+              }
+
+              // Goal still active and within budget — ask the steering agent
+              // to read the conversation state and produce a continuation
+              // nudge, or fall back to the template-based prompt.
+              yield* goals.resetBlockedTurns(sessionID)
+
+              let continuationText: string
+              const steerResult = yield* steering
+                .steer({
+                  sessionID,
+                  goal: updated,
+                  providerID: lastUser.model.providerID,
+                  modelID: lastUser.model.modelID,
+                })
+                .pipe(Effect.catch(() => Effect.succeed(undefined)))
+
+              if (steerResult?.type === "complete") {
+                yield* goals.update({ sessionID, status: "completed" })
+                break
+              }
+              if (steerResult?.type === "blocked") {
+                const turns = yield* goals.incrementBlockedTurns(sessionID)
+                if (turns >= 3) {
+                  yield* goals.update({ sessionID, status: "blocked" })
+                  break
+                }
+              }
+
+              continuationText = steerResult?.message && steerResult.message.length > 0
+                ? [
+                    "<goal_context>",
+                    `<steering_direction>${steerResult.message}</steering_direction>`,
+                    "",
+                    renderGoalPrompt(GOAL_CONTINUATION, updated),
+                    "</goal_context>",
+                  ].join("\n")
+                : renderGoalPrompt(GOAL_CONTINUATION, updated)
+
+              const contMsg = yield* sessions.updateMessage({
+                id: MessageID.ascending(),
+                role: "user",
+                sessionID,
+                agent: lastUser.agent,
+                model: lastUser.model,
+                time: { created: Date.now() },
+              })
+              yield* sessions.updatePart({
+                id: PartID.ascending(),
+                messageID: contMsg.id,
+                sessionID,
+                type: "text",
+                text: continuationText,
+                synthetic: true,
+              })
+              // Continue the loop — the next iteration will pick up the new
+              // synthetic user message and start a fresh turn.
+              continue
+            }
+            break
+          }
           continue
         }
 
@@ -1636,8 +1751,7 @@ export const defaultLayer = Layer.suspend(() =>
     Layer.provide(SessionProcessor.defaultLayer),
     Layer.provide(Command.defaultLayer),
     Layer.provide(Permission.defaultLayer),
-    Layer.provide(MCP.defaultLayer),
-    Layer.provide(LSP.defaultLayer),
+    Layer.provide(Layer.mergeAll(MCP.defaultLayer, LSP.defaultLayer)),
     Layer.provide(ToolRegistry.defaultLayer),
     Layer.provide(Truncate.defaultLayer),
     Layer.provide(Provider.defaultLayer),
@@ -1645,9 +1759,7 @@ export const defaultLayer = Layer.suspend(() =>
     Layer.provide(Instruction.defaultLayer),
     Layer.provide(AppFileSystem.defaultLayer),
     Layer.provide(Plugin.defaultLayer),
-    Layer.provide(Session.defaultLayer),
-    Layer.provide(SessionRevert.defaultLayer),
-    Layer.provide(SessionSummary.defaultLayer),
+    Layer.provide(Layer.mergeAll(Session.defaultLayer, SessionRevert.defaultLayer, SessionSummary.defaultLayer, Goal.defaultLayer, Steering.defaultLayer)),
     Layer.provide(Image.defaultLayer),
     Layer.provide(
       Layer.mergeAll(
@@ -1770,5 +1882,41 @@ const bashRegex = /!`([^`]+)`/g
 const argsRegex = /(?:\[Image\s+\d+\]|"[^"]*"|'[^']*'|[^\s"']+)/gi
 const placeholderRegex = /\$(\d+)/g
 const quoteTrimRegex = /^["']|["']$/g
+
+function formatGoalReminder(goal: Goal.Info): string {
+  const budget = goal.costBudget
+    ? `Cost: $${goal.costUsed.toFixed(4)} / $${goal.costBudget.toFixed(2)} budget`
+    : goal.tokenBudget
+      ? `Tokens used: ${goal.tokensUsed} / ${goal.tokenBudget}`
+      : `Cost: $${goal.costUsed.toFixed(4)}`
+  return [
+    "<active_goal>",
+    `Objective: ${goal.objective}`,
+    `Status: ${goal.status}`,
+    budget,
+    "",
+    "Keep this objective in mind as you work. Call the goal tool with action 'update' and status 'completed' when the objective is fully achieved.",
+    "</active_goal>",
+  ].join("\n")
+}
+
+function renderGoalPrompt(template: string, goal: Goal.Info): string {
+  const budgetStr = goal.costBudget
+    ? `$${goal.costBudget.toFixed(2)}`
+    : goal.tokenBudget
+      ? `${goal.tokenBudget} tokens`
+      : "unlimited"
+  const usedStr = goal.costBudget
+    ? `$${goal.costUsed.toFixed(4)}`
+    : `${goal.tokensUsed} tokens`
+  return [
+    "<goal_context>",
+    template
+      .replace("${objective}", goal.objective)
+      .replace("${tokensUsed}", usedStr)
+      .replace("${tokenBudget}", budgetStr),
+    "</goal_context>",
+  ].join("\n")
+}
 
 export * as SessionPrompt from "./prompt"

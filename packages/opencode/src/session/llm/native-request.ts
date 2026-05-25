@@ -32,6 +32,16 @@ export type RequestInput = {
   readonly maxOutputTokens?: number
   readonly providerOptions?: LLMRequest["providerOptions"]
   readonly headers?: Record<string, string>
+  /**
+   * Transport opt-in. `"websocket"` selects OpenAI's WebSocket Responses
+   * route (`wss://api.openai.com/v1/responses`). The route uses the same
+   * `response.create` body shape as HTTP and works with the same
+   * `previous_response_id` continuation pointer, so connection-scoped
+   * state reuse plus saved TCP/TLS handshakes per turn give the speedup
+   * described in OpenAI's WebSocket-mode docs. Only applies to
+   * `@ai-sdk/openai`; ignored for every other npm package.
+   */
+  readonly transport?: "websocket"
 }
 
 const providerMetadata = (value: unknown): ProviderMetadata | undefined => {
@@ -153,6 +163,7 @@ const requireBaseURL = (model: Provider.Model, url: string | undefined) => {
 export const model = (input: Provider.Model | RequestInput, headers?: Record<string, string>) => {
   const model = "model" in input ? input.model : input
   const url = baseURL(input)
+  const transport = "model" in input ? input.transport : undefined
   const options = {
     ...("model" in input && input.apiKey ? { apiKey: input.apiKey } : {}),
     ...(url ? { baseURL: url } : {}),
@@ -162,7 +173,14 @@ export const model = (input: Provider.Model | RequestInput, headers?: Record<str
       output: model.limit.output,
     },
   }
-  if (model.api.npm === "@ai-sdk/openai") return OpenAI.configure(options).responses(model.api.id)
+  if (model.api.npm === "@ai-sdk/openai") {
+    const openai = OpenAI.configure(options)
+    // WebSocket Responses route. Same protocol + body shape as the HTTP
+    // route, so the rest of the request lowering is identical — the
+    // route just opens a `wss://` connection and frames `response.create`
+    // as a single JSON message. Caller opts in via RequestInput.transport.
+    return transport === "websocket" ? openai.responsesWebSocket(model.api.id) : openai.responses(model.api.id)
+  }
   if (model.api.npm === "@ai-sdk/azure")
     return Azure.configure({ ...options, baseURL: requireBaseURL(model, url) }).responses(model.api.id)
   if (model.api.npm === "@ai-sdk/anthropic") return Anthropic.configure(options).model(model.api.id)

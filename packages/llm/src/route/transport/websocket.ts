@@ -135,10 +135,15 @@ export const open = (input: WebSocketRequest) =>
 
 export const layer: Layer.Layer<Service> = Layer.succeed(Service, Service.of({ open }))
 
-export const fromWebSocket = (
+// Attach a fresh per-request session (queue + listeners + send + cleanup) to an
+// already-open WebSocket. The returned `cleanup` removes only the listeners and
+// shuts down the per-call queue — it does NOT close the underlying socket.
+// `fromWebSocket` composes `attach` with a socket-close step; the pool reuses
+// `attach` without the close so the socket can serve another request.
+const attach = (
   ws: globalThis.WebSocket,
   input: WebSocketRequest,
-): Effect.Effect<WebSocketConnection, LLMError> =>
+): Effect.Effect<WebSocketConnection & { readonly cleanup: Effect.Effect<void> }, LLMError> =>
   Effect.gen(function* () {
     yield* waitOpen(ws, input)
     const messages = yield* Queue.bounded<string | Uint8Array, LLMError | Cause.Done<void>>(128)
@@ -192,6 +197,7 @@ export const fromWebSocket = (
             }),
         }),
       messages: Stream.fromQueue(messages),
+      cleanup,
       close: cleanup.pipe(
         Effect.andThen(
           Effect.sync(() => {
@@ -202,6 +208,161 @@ export const fromWebSocket = (
       ),
     }
   })
+
+export const fromWebSocket = (
+  ws: globalThis.WebSocket,
+  input: WebSocketRequest,
+): Effect.Effect<WebSocketConnection, LLMError> =>
+  attach(ws, input).pipe(
+    Effect.map((session) => ({
+      sendText: session.sendText,
+      messages: session.messages,
+      close: session.close,
+    })),
+  )
+
+// =============================================================================
+// Pooled executor — shared, long-lived WebSocket connections for OpenAI
+// Responses WebSocket mode (and any future protocol that benefits from a
+// connection-scoped server cache).
+// =============================================================================
+//
+// Why a pool?  Without it every `LLMClient.stream(...)` call performs a fresh
+// TLS+WebSocket handshake to OpenAI, which voids the entire latency win of
+// WebSocket mode versus HTTP. With pooling, every step in an agent loop after
+// the first reuses the same underlying socket: TLS state is hot, the
+// connection-scoped server cache (the article's biggest optimization) keeps
+// `previous_response_id` references resolvable, and TTFT collapses.
+//
+// Design constraints from OpenAI's WebSocket Mode spec:
+// - One in-flight `response.create` per connection. We serialize implicitly by
+//   acquiring a busy flag on `open()` and releasing it on `close()`; if a
+//   second concurrent call arrives we fall back to opening a new socket so
+//   nothing blocks. The single-loop opencode session naturally serializes,
+//   so this is the common case.
+// - 60-minute hard connection limit. We track `openedAt` and refuse to reuse a
+//   socket past that age.
+// - Connection-local cache evicts on error; we keep the pool entry on
+//   normal close but drop it on unexpected close or send error.
+
+export interface PoolOptions {
+  /** How long an idle socket stays warm before the sweeper closes it. */
+  readonly idleTtlMillis?: number
+  /** Hard upper bound on a socket's lifetime (OpenAI: 60 minutes). */
+  readonly maxAgeMillis?: number
+}
+
+interface PoolEntry {
+  readonly ws: globalThis.WebSocket
+  readonly key: string
+  readonly openedAt: number
+  busy: boolean
+  idleTimer?: ReturnType<typeof setTimeout>
+}
+
+const DEFAULT_IDLE_TTL_MS = 30_000
+const DEFAULT_MAX_AGE_MS = 55 * 60 * 1000 // a few minutes under OpenAI's 60-min hard limit
+
+const keyFor = (input: WebSocketRequest) => {
+  const auth = (input.headers as unknown as Record<string, string>).authorization ?? ""
+  return `${input.url}\u0000${auth}`
+}
+
+const isHealthy = (entry: PoolEntry, maxAge: number) =>
+  !entry.busy &&
+  entry.ws.readyState === globalThis.WebSocket.OPEN &&
+  Date.now() - entry.openedAt < maxAge
+
+export const pool = (options: PoolOptions = {}): Interface => {
+  const idleTtl = options.idleTtlMillis ?? DEFAULT_IDLE_TTL_MS
+  const maxAge = options.maxAgeMillis ?? DEFAULT_MAX_AGE_MS
+  const entries = new Map<string, PoolEntry>()
+
+  const evict = (entry: PoolEntry) => {
+    if (entry.idleTimer) clearTimeout(entry.idleTimer)
+    entries.delete(entry.key)
+    if (
+      entry.ws.readyState !== globalThis.WebSocket.CLOSED &&
+      entry.ws.readyState !== globalThis.WebSocket.CLOSING
+    ) {
+      try {
+        entry.ws.close(1000)
+      } catch {
+        // ignore — socket might already be tearing down
+      }
+    }
+  }
+
+  const armIdle = (entry: PoolEntry) => {
+    if (entry.idleTimer) clearTimeout(entry.idleTimer)
+    entry.idleTimer = setTimeout(() => {
+      // If the entry is still parked when the idle timer fires, close it. If a
+      // request grabbed it in the meantime, `busy` would be true and we leave
+      // it alone — the next release will re-arm.
+      if (entry.busy) return
+      evict(entry)
+    }, idleTtl)
+  }
+
+  const acquire = (input: WebSocketRequest) =>
+    Effect.gen(function* () {
+      const key = keyFor(input)
+      const existing = entries.get(key)
+      if (existing && isHealthy(existing, maxAge)) {
+        if (existing.idleTimer) clearTimeout(existing.idleTimer)
+        existing.busy = true
+        return existing
+      }
+      if (existing) evict(existing)
+
+      const ws = yield* Effect.try({
+        try: () =>
+          new (globalThis.WebSocket as unknown as WebSocketConstructorWithHeaders)(input.url, {
+            headers: input.headers,
+          }),
+        catch: (error) =>
+          transportError("open", error instanceof Error ? error.message : "Failed to construct WebSocket", {
+            url: input.url,
+            kind: "open",
+          }),
+      })
+      const entry: PoolEntry = { ws, key, openedAt: Date.now(), busy: true }
+      entries.set(key, entry)
+      return entry
+    })
+
+  const open = (input: WebSocketRequest): Effect.Effect<WebSocketConnection, LLMError> =>
+    Effect.gen(function* () {
+      const entry = yield* acquire(input)
+      const session = yield* attach(entry.ws, input).pipe(
+        Effect.tapCause(() => Effect.sync(() => evict(entry))),
+      )
+      const release = Effect.sync(() => {
+        entry.busy = false
+        // Re-check health: if the socket died while we were using it, evict
+        // instead of returning it to the pool.
+        if (
+          entry.ws.readyState !== globalThis.WebSocket.OPEN ||
+          Date.now() - entry.openedAt >= maxAge
+        ) {
+          evict(entry)
+          return
+        }
+        armIdle(entry)
+      })
+      return {
+        sendText: (message) =>
+          session.sendText(message).pipe(Effect.tapCause(() => Effect.sync(() => evict(entry)))),
+        messages: session.messages,
+        close: session.cleanup.pipe(Effect.andThen(release)),
+      }
+    })
+
+  return { open }
+}
+
+export const poolLayer = (options: PoolOptions = {}): Layer.Layer<Service> =>
+  Layer.sync(Service, () => Service.of(pool(options)))
 
 export const messageText = (message: string | Uint8Array, decoder: TextDecoder) =>
   typeof message === "string" ? message : decoder.decode(message)
@@ -272,6 +433,8 @@ export const WebSocketExecutor = {
   open,
   fromWebSocket,
   messageText,
+  pool,
+  poolLayer,
 } as const
 
 export const WebSocketTransport = {

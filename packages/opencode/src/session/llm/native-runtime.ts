@@ -91,6 +91,7 @@ export function stream(input: StreamInput): StreamResult {
       maxOutputTokens: input.maxOutputTokens,
       providerOptions: ProviderTransform.providerOptions(input.model, input.providerOptions ?? {}),
       headers: { ...providerHeaders(input.provider.options.headers), ...input.headers },
+      transport: resolveTransport(input),
     }),
     tools: nativeTools(input.tools, input),
   })
@@ -99,6 +100,27 @@ export function stream(input: StreamInput): StreamResult {
     ...current,
     stream: fetch ? stream.pipe(Stream.provideService(FetchHttpClient.Fetch, fetch)) : stream,
   }
+}
+
+// Transport opt-in. Reads `transport` from per-model config first (covers
+// `provider.openai.models["gpt-5.5"].options.transport` in opencode.json),
+// then falls back to per-provider config (`provider.openai.options.transport`).
+// We deliberately only honour `"websocket"` — any other value (including
+// `"http"`) leaves the route to its existing HTTP default so we never push a
+// non-OpenAI model into a WebSocket route by accident.
+//
+// To enable WebSocket for OpenAI you need BOTH:
+//   1. `OPENCODE_EXPERIMENTAL_NATIVE_LLM=true` (so this runtime is selected)
+//   2. `{ provider: { openai: { options: { transport: "websocket" } } } }`
+// Flipping (2) to a default for OpenAI broke six AI-SDK-path tests that
+// explicitly assert OpenAI stays on AI SDK / native-HTTP. Keep this opt-in
+// until those tests are updated to model the new default.
+function resolveTransport(input: Pick<StreamInput, "model" | "provider">): "websocket" | undefined {
+  const fromModel = input.model.options?.transport
+  if (fromModel === "websocket") return "websocket"
+  const fromProvider = input.provider.options?.transport
+  if (fromProvider === "websocket") return "websocket"
+  return undefined
 }
 
 function providerFetch(input: Pick<StreamInput, "provider" | "auth">): typeof globalThis.fetch | undefined {

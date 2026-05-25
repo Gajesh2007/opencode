@@ -31,6 +31,7 @@ type PrepareInput = {
   readonly plugin: Plugin.Interface
   readonly flags: RuntimeFlags.Info
   readonly isWorkflow: boolean
+  readonly previousResponseId?: string
 }
 
 export type Prepared = {
@@ -117,12 +118,30 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
         sessionID: input.sessionID,
         providerOptions: input.provider.options,
       })
+  // OpenAI Responses-API continuation. This is intentionally opt-in for now:
+  // the provider returns `previous_response_not_found` if the server-side
+  // response state cannot be resolved (for example, stale socket cache,
+  // Gateway pooled credentials, or cross-account routing). Until we add a
+  // robust retry-with-full-history fallback, keep the response-id capture on
+  // but only send it when the user explicitly enables it via:
+  //   provider.openai.options.responsesContinuation = true
+  // or per-model:
+  //   provider.openai.models["gpt-5.5"].options.responsesContinuation = true
+  const responsesContinuation =
+    input.model.options?.responsesContinuation === true || input.provider.options?.responsesContinuation === true
+  const previousResponseOptions =
+    !input.small && responsesContinuation && input.previousResponseId
+      ? { openai: { previousResponseId: input.previousResponseId } }
+      : {}
   const options = mergeOptions(
     mergeOptions(
-      mergeOptions(mergeOptions(mergeOptions(base, input.model.options), input.agent.options), variant),
-      tierOptions,
+      mergeOptions(
+        mergeOptions(mergeOptions(mergeOptions(base, input.model.options), input.agent.options), variant),
+        tierOptions,
+      ),
+      upstreamOptions,
     ),
-    upstreamOptions,
+    previousResponseOptions,
   )
   if (isOpenaiOauth) options.instructions = system.join("\n")
 

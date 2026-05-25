@@ -494,6 +494,17 @@ export const Assistant = Schema.Struct({
    * Undefined for direct-provider calls and for older messages.
    */
   provider_resolved: Schema.optional(Schema.String),
+  /**
+   * OpenAI Responses-API `response.id` captured from the final step's
+   * `providerMetadata.openai.responseId`. When set, the next request in the
+   * same session passes this back as `previous_response_id`, letting the
+   * server skip re-tokenizing the prior conversation prefix. Required for
+   * the connection-scoped speedup described in OpenAI's WebSocket-mode
+   * docs (https://developers.openai.com/api/docs/guides/websocket-mode);
+   * works on plain HTTP too with a smaller benefit. Undefined when the
+   * provider/route doesn't surface a response id.
+   */
+  provider_response_id: Schema.optional(Schema.String),
 }).annotate({ identifier: "AssistantMessage" })
 export type Assistant = Omit<Types.DeepMutable<Schema.Schema.Type<typeof Assistant>>, "error"> & {
   error?: AssistantError
