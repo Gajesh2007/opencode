@@ -128,6 +128,28 @@ export const SessionMessageTable = sqliteTable(
   ],
 )
 
+export const GoalTable = sqliteTable(
+  "goal",
+  {
+    session_id: text()
+      .$type<SessionID>()
+      .notNull()
+      .references(() => SessionTable.id, { onDelete: "cascade" }),
+    objective: text().notNull(),
+    status: text()
+      .$type<"active" | "completed" | "blocked" | "budget_limited" | "abandoned">()
+      .notNull()
+      .default("active"),
+    token_budget: integer(),
+    tokens_used: integer().notNull().default(0),
+    cost_budget: real(),
+    cost_used: real().notNull().default(0),
+    blocked_turns: integer().notNull().default(0),
+    ...Timestamps,
+  },
+  (table) => [index("goal_session_idx").on(table.session_id)],
+)
+
 export const PermissionTable = sqliteTable("permission", {
   project_id: text()
     .primaryKey()

@@ -43,6 +43,8 @@ import { SessionRunState } from "@/session/run-state"
 import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
+import { Goal } from "@/session/goal"
+import { Steering } from "@/session/steering"
 import { SessionShare } from "@/share/session"
 import { ShareNext } from "@/share/share-next"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -227,6 +229,8 @@ export function createRoutes(
       EventV2Bridge.defaultLayer,
       Skill.defaultLayer,
       Todo.defaultLayer,
+      Goal.defaultLayer,
+      Steering.defaultLayer,
       ToolRegistry.defaultLayer,
       Vcs.defaultLayer,
       Workspace.defaultLayer,

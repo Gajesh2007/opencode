@@ -21,6 +21,8 @@ import { Image } from "../../src/image/image"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { Question } from "../../src/question"
 import { Todo } from "../../src/session/todo"
+import { Goal } from "../../src/session/goal"
+import { Steering } from "../../src/session/steering"
 import { Session } from "@/session/session"
 import { SessionMessageTable } from "../../src/session/session.sql"
 import { LLM } from "../../src/session/llm"
@@ -226,7 +228,7 @@ function makePrompt(input?: { processor?: "blocking" }) {
     Layer.provideMerge(registry),
     Layer.provideMerge(trunc),
     Layer.provide(Instruction.defaultLayer),
-    Layer.provide(SystemPrompt.defaultLayer),
+    Layer.provide(Layer.mergeAll(SystemPrompt.defaultLayer, Goal.defaultLayer, Steering.defaultLayer)),
     Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
     Layer.provideMerge(deps),
     Layer.provide(summary),

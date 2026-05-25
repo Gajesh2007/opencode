@@ -30,6 +30,7 @@ import * as Log from "@opencode-ai/core/util/log"
 import { LspTool } from "./lsp"
 import * as Truncate from "./truncate"
 import { ApplyPatchTool } from "./apply_patch"
+import { GoalTool } from "./goal"
 import { Glob } from "@opencode-ai/core/util/glob"
 import path from "path"
 import { pathToFileURL } from "url"
@@ -43,6 +44,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { EffectBridge } from "@/effect/bridge"
 import { Question } from "../question"
 import { Todo } from "../session/todo"
+import { Goal } from "../session/goal"
 import { LSP } from "@/lsp/lsp"
 import { Instruction } from "../session/instruction"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
@@ -88,6 +90,7 @@ export const layer: Layer.Layer<
   | Plugin.Service
   | Question.Service
   | Todo.Service
+  | Goal.Service
   | Agent.Service
   | Skill.Service
   | Session.Service
@@ -123,6 +126,7 @@ export const layer: Layer.Layer<
     const read = yield* ReadTool
     const question = yield* QuestionTool
     const todo = yield* TodoWriteTool
+    const goaltool = yield* GoalTool
     const lsptool = yield* LspTool
     const plan = yield* PlanExitTool
     const webfetch = yield* WebFetchTool
@@ -238,6 +242,7 @@ export const layer: Layer.Layer<
           task_status: Tool.init(taskStatus),
           fetch: Tool.init(webfetch),
           todo: Tool.init(todo),
+          goal: Tool.init(goaltool),
           search: Tool.init(websearch),
           repo_clone: Tool.init(repoClone),
           repo_overview: Tool.init(repoOverview),
@@ -263,6 +268,7 @@ export const layer: Layer.Layer<
             tool.task_status,
             tool.fetch,
             tool.todo,
+            tool.goal,
             tool.search,
             ...(flags.experimentalScout ? [tool.repo_clone, tool.repo_overview] : []),
             tool.skill,
@@ -380,8 +386,7 @@ export const defaultLayer = Layer.suspend(() =>
     .pipe(
       Layer.provide(Config.defaultLayer),
       Layer.provide(Plugin.defaultLayer),
-      Layer.provide(Question.defaultLayer),
-      Layer.provide(Todo.defaultLayer),
+      Layer.provide(Layer.mergeAll(Question.defaultLayer, Todo.defaultLayer, Goal.defaultLayer)),
       Layer.provide(Skill.defaultLayer),
       Layer.provide(Agent.defaultLayer),
       Layer.provide(Session.defaultLayer),
@@ -394,9 +399,7 @@ export const defaultLayer = Layer.suspend(() =>
       Layer.provide(AppFileSystem.defaultLayer),
       Layer.provide(Bus.layer),
       Layer.provide(FetchHttpClient.layer),
-      Layer.provide(Format.defaultLayer),
-      Layer.provide(CrossSpawnSpawner.defaultLayer),
-      Layer.provide(Ripgrep.defaultLayer),
+      Layer.provide(Layer.mergeAll(Format.defaultLayer, CrossSpawnSpawner.defaultLayer, Ripgrep.defaultLayer)),
       Layer.provide(Truncate.defaultLayer),
     )
     .pipe(Layer.provide(RuntimeFlags.defaultLayer)),

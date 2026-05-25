@@ -1,0 +1,15 @@
+Create, update, or get the active goal for a long-running autonomous task.
+
+Goals drive an automatic continuation loop: when a goal is active and the current turn finishes, the system automatically starts a new turn so you keep working toward the objective without waiting for user input.
+
+## Actions
+- `create` — Set a new goal. Requires `objective` (the task description). Optionally set `cost_budget` in dollars (e.g. 5.00 for $5) or `token_budget` to cap usage.
+- `update` — Change goal status. Only `completed` and `blocked` are allowed. Use `completed` only after verifying every requirement is satisfied. Use `blocked` only after the same blocker has persisted for 3+ consecutive continuation turns.
+- `get` — Retrieve the current goal and its token usage.
+
+## Rules
+- One active goal per session. Creating a new goal replaces the old one.
+- The goal objective is the user's original request — do not narrow or redefine it.
+- Do not call update unless the goal is genuinely complete or blocked.
+- Do not mark a goal complete merely because the budget is nearly exhausted.
+- The system handles budget enforcement automatically — you do not need to check it.

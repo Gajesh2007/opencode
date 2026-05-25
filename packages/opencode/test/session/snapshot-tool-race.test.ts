@@ -46,6 +46,8 @@ import { Image } from "../../src/image/image"
 import { Skill } from "../../src/skill"
 import { SystemPrompt } from "../../src/session/system"
 import { Todo } from "../../src/session/todo"
+import { Goal } from "../../src/session/goal"
+import { Steering } from "../../src/session/steering"
 import { SessionCompaction } from "../../src/session/compaction"
 import { Instruction } from "../../src/session/instruction"
 import { SessionProcessor } from "../../src/session/processor"
@@ -175,7 +177,7 @@ function makeHttp() {
       Layer.provideMerge(registry),
       Layer.provideMerge(trunc),
       Layer.provide(Instruction.defaultLayer),
-      Layer.provide(SystemPrompt.defaultLayer),
+      Layer.provide(Layer.mergeAll(SystemPrompt.defaultLayer, Goal.defaultLayer, Steering.defaultLayer)),
       Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
       Layer.provideMerge(deps),
     ),

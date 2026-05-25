@@ -1,0 +1,13 @@
+The active goal has reached its token budget.
+
+<objective>
+${objective}
+</objective>
+
+Budget:
+- Tokens used: ${tokensUsed}
+- Token budget: ${tokenBudget}
+
+The system has marked the goal as budget_limited, so do not start new substantive work for this goal. Wrap up this turn soon: summarize useful progress, identify remaining work or blockers, and leave the user with a clear next step.
+
+Do not call the goal tool to update status unless the goal is actually complete.
