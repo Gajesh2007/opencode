@@ -112,6 +112,10 @@ export const Info = Schema.Struct({
         setCacheKey: Schema.optional(Schema.Boolean).annotate({
           description: "Enable promptCacheKey for this provider (default false)",
         }),
+        responsesContinuation: Schema.optional(Schema.Boolean).annotate({
+          description:
+            "Enable OpenAI Responses previous_response_id continuation. Experimental; defaults to false until fallback handling is hardened.",
+        }),
         timeout: Schema.optional(
           Schema.Union([PositiveInt, Schema.Literal(false)]).annotate({
             description:

@@ -1552,6 +1552,21 @@ export const layer = Layer.effect(
             if (configUpstreams && configUpstreams.length > 0) {
               model.upstreams = [...configUpstreams]
             }
+
+            // Allow users to override model context / input / output limits via
+            // opencode.json without redefining the entire model entry. Useful
+            // when a provider plugin pins a tier-specific cap (e.g. the Codex
+            // OAuth plugin caps gpt-5.5 at the ChatGPT Pro tier of 272k input)
+            // but the user's account has a higher allowance (Enterprise, BYOK,
+            // direct API key with the model's full 922k input window, etc.).
+            const configLimit = configProvider?.models?.[modelID]?.limit
+            if (configLimit) {
+              model.limit = {
+                context: configLimit.context ?? model.limit.context,
+                input: configLimit.input ?? model.limit.input,
+                output: configLimit.output ?? model.limit.output,
+              }
+            }
           }
 
           if (Object.keys(provider.models).length === 0) {
