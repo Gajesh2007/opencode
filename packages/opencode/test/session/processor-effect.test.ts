@@ -431,6 +431,83 @@ it.live("session.processor effect tests capture reasoning from http mock", () =>
   ),
 )
 
+it.live(
+  "session.processor effect tests coalesce small text deltas into batched PartDelta events",
+  () =>
+    provideTmpdirServer(
+      ({ dir, llm }) =>
+        Effect.gen(function* () {
+          const { processors, session, provider } = yield* boot()
+          const bus = yield* Bus.Service
+
+          // 10 small deltas, each 2 chars (20 chars total — well below the
+          // 64-byte coalescing threshold). Without coalescing, the per-delta
+          // path would publish 10 separate PartDelta events; with coalescing
+          // we expect at most 1-2 (every delta accumulates into one bucket
+          // that flushes at cleanup, plus the part-updated PartUpdated event
+          // emitted on text-end is not counted here).
+          let chain = reply()
+          for (let i = 0; i < 10; i++) chain = chain.text("ab")
+          yield* llm.push(chain.stop())
+
+          const chat = yield* session.create({})
+          const parent = yield* user(chat.id, "stream")
+          const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+          const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+          const handle = yield* processors.create({
+            assistantMessage: msg,
+            sessionID: chat.id,
+            model: mdl,
+          })
+
+          const partDeltaEvents: { partID: string; delta: string }[] = []
+          yield* bus.subscribeCallback(MessageV2.Event.PartDelta, (event) => {
+            partDeltaEvents.push({
+              partID: event.properties.partID,
+              delta: event.properties.delta,
+            })
+          })
+
+          const value = yield* handle.process({
+            user: {
+              id: parent.id,
+              sessionID: chat.id,
+              role: "user",
+              time: parent.time,
+              agent: parent.agent,
+              model: { providerID: ref.providerID, modelID: ref.modelID },
+            } satisfies MessageV2.User,
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [{ role: "user", content: "stream" }],
+            tools: {},
+          })
+
+          const parts = MessageV2.parts(msg.id)
+          const text = parts.find((part): part is MessageV2.TextPart => part.type === "text")
+
+          // Correctness: streamed text is fully reconstructed.
+          expect(value).toBe("continue")
+          expect(text?.text).toBe("ab".repeat(10))
+
+          // Coalescing: all 10 small deltas fit in one bucket and flush at
+          // cleanup. Allow up to 2 PartDelta events for safety (a split would
+          // only happen if cleanup ran before the final text-delta queued —
+          // not the case here, but the threshold is conservative).
+          expect(partDeltaEvents.length).toBeLessThanOrEqual(2)
+
+          // The accumulated delta text matches the part's text exactly.
+          const sameTarget = partDeltaEvents.every((e) => e.partID === text?.id)
+          expect(sameTarget).toBe(true)
+          const concatenated = partDeltaEvents.map((e) => e.delta).join("")
+          expect(concatenated).toBe("ab".repeat(10))
+        }),
+      { config: (url) => providerCfg(url) },
+    ),
+)
+
 it.live("session.processor effect tests reset reasoning state across retries", () =>
   provideTmpdirServer(
     ({ dir, llm }) =>

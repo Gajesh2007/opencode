@@ -43,6 +43,17 @@ export type StreamInput = {
   tools: Record<string, Tool>
   retries?: number
   toolChoice?: "auto" | "required" | "none"
+  /**
+   * OpenAI Responses-API continuation pointer captured from the prior
+   * step/turn's `providerMetadata.openai.responseId`. When set, lowered to
+   * `previous_response_id` in the OpenAI Responses request body so the
+   * server reuses the cached prefix instead of retokenizing. Ignored by
+   * non-OpenAI-Responses routes. The session prompt loop is the source of
+   * truth: it threads the most recent assistant's `provider_response_id`
+   * back here on each step (in-turn continuation) and on each new turn
+   * (cross-turn continuation).
+   */
+  previousResponseId?: string
 }
 
 export type StreamRequest = StreamInput & {
@@ -360,7 +371,7 @@ const live: Layer.Layer<
               e instanceof Error ? e : new Error(String(e)),
             ).pipe(
               Stream.mapEffect((event) => LLMAISDK.toLLMEvents(state, event)),
-              Stream.flatMap((events) => Stream.fromIterable(events)),
+              Stream.flattenIterable,
             )
           }),
         ),
@@ -379,7 +390,14 @@ export const defaultLayer = Layer.suspend(() =>
     Layer.provide(Provider.defaultLayer),
     Layer.provide(Plugin.defaultLayer),
     Layer.provide(
-      LLMClient.layer.pipe(Layer.provide(Layer.mergeAll(RequestExecutor.defaultLayer, WebSocketExecutor.layer))),
+      // Use the pooled WebSocket executor so OpenAI's WebSocket Responses mode
+      // can actually deliver its latency win. Without pooling, every
+      // LLMClient.stream() call would do a fresh TLS+WS handshake and the
+      // connection-scoped server cache (the article's biggest optimization)
+      // would be cold on every request. See
+      // packages/llm/src/route/transport/websocket.ts for the pool's lifetime
+      // rules (60-minute hard limit, 30s idle TTL).
+      LLMClient.layer.pipe(Layer.provide(Layer.mergeAll(RequestExecutor.defaultLayer, WebSocketExecutor.poolLayer()))),
     ),
     Layer.provide(RuntimeFlags.defaultLayer),
   ),

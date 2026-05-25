@@ -12,7 +12,7 @@ import { LLM } from "./llm"
 import { MessageV2 } from "./message-v2"
 import { isOverflow } from "./overflow"
 import { PartID } from "./schema"
-import type { SessionID } from "./schema"
+import type { MessageID, SessionID } from "./schema"
 import { SessionRetry } from "./retry"
 import { SessionStatus } from "./status"
 import { SessionSummary } from "./summary"
@@ -121,6 +121,59 @@ export const layer = Layer.effect(
       }
       let aborted = false
       const slog = log.clone().tag("session.id", input.sessionID).tag("messageID", input.assistantMessage.id)
+
+      // Coalesce per-token PartDelta events. Providers (especially OpenAI) often
+      // emit deltas one or two tokens at a time, and every emission costs one
+      // bus publish + one structured-clone hop across the TUI worker boundary
+      // plus all wildcard PubSub fanout. The TUI's own SDK consumer already
+      // batches stored mutations at ~60Hz (`tui/context/sdk.tsx`), so smaller
+      // batches don't translate into smoother rendering — they just inflate
+      // bus traffic. We flush a pending bucket whenever:
+      //   1. its accumulated length crosses DELTA_FLUSH_THRESHOLD (so fast
+      //      streams stay perceptually live), or
+      //   2. any non-delta event arrives (so ordering relative to text-end /
+      //      tool-call / finish is preserved), or
+      //   3. processor cleanup runs (so nothing is left in-flight at end of
+      //      stream / interrupt).
+      // Each part has its own bucket keyed by partID so a text part and a
+      // reasoning part streaming concurrently don't share state.
+      type PendingDelta = {
+        sessionID: SessionID
+        messageID: MessageID
+        partID: PartID
+        field: "text"
+        delta: string
+      }
+      const pendingDeltas = new Map<string, PendingDelta>()
+      const DELTA_FLUSH_THRESHOLD = 64
+
+      const flushDelta = Effect.fnUntraced(function* (partID: string) {
+        const pending = pendingDeltas.get(partID)
+        if (!pending) return
+        pendingDeltas.delete(partID)
+        yield* session.updatePartDelta(pending)
+      })
+
+      const flushAllDeltas = Effect.fnUntraced(function* () {
+        if (pendingDeltas.size === 0) return
+        const batches = Array.from(pendingDeltas.values())
+        pendingDeltas.clear()
+        for (const batch of batches) yield* session.updatePartDelta(batch)
+      })
+
+      const queueDelta = Effect.fnUntraced(function* (input: PendingDelta) {
+        const existing = pendingDeltas.get(input.partID)
+        if (existing) {
+          existing.delta += input.delta
+          if (existing.delta.length >= DELTA_FLUSH_THRESHOLD) yield* flushDelta(input.partID)
+          return
+        }
+        if (input.delta.length >= DELTA_FLUSH_THRESHOLD) {
+          yield* session.updatePartDelta(input)
+          return
+        }
+        pendingDeltas.set(input.partID, { ...input })
+      })
 
       const parse = (e: unknown) =>
         MessageV2.fromError(e, {
@@ -303,6 +356,12 @@ export const layer = Layer.effect(
       const toolInput = (value: unknown): Record<string, any> => (isRecord(value) ? value : { value })
 
       const handleEvent = Effect.fnUntraced(function* (value: StreamEvent) {
+        // Flush pending coalesced deltas before any non-delta event so the
+        // subscriber sees the final batched text strictly before downstream
+        // events (text-end / tool-call / finish) that may depend on it.
+        if (value.type !== "text-delta" && value.type !== "reasoning-delta" && pendingDeltas.size > 0) {
+          yield* flushAllDeltas()
+        }
         switch (value.type) {
           case "reasoning-start":
             if (value.id in ctx.reasoningMap) return
@@ -331,7 +390,7 @@ export const layer = Layer.effect(
             if (!(value.id in ctx.reasoningMap)) return
             ctx.reasoningMap[value.id].text += value.text
             if (value.providerMetadata) ctx.reasoningMap[value.id].metadata = value.providerMetadata
-            yield* session.updatePartDelta({
+            yield* queueDelta({
               sessionID: ctx.reasoningMap[value.id].sessionID,
               messageID: ctx.reasoningMap[value.id].messageID,
               partID: ctx.reasoningMap[value.id].id,
@@ -585,6 +644,13 @@ export const layer = Layer.effect(
               (gatewayRouting?.resolvedProvider as string | undefined) ??
               (gatewayRouting?.finalProvider as string | undefined)
             if (resolved) ctx.assistantMessage.provider_resolved = resolved
+            // Capture the OpenAI Responses `response.id` so the next turn in
+            // this session can pass it back as `previous_response_id` and
+            // benefit from server-side state reuse. The protocol surfaces this
+            // in providerMetadata.openai.responseId on the terminal step.
+            const openaiMeta = (value.providerMetadata as Record<string, any> | undefined)?.openai
+            const responseId = typeof openaiMeta?.responseId === "string" ? openaiMeta.responseId : undefined
+            if (responseId) ctx.assistantMessage.provider_response_id = responseId
             yield* session.updatePart({
               id: PartID.ascending(),
               reason: value.reason,
@@ -651,7 +717,7 @@ export const layer = Layer.effect(
             if (!ctx.currentText) return
             ctx.currentText.text += value.text
             if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
-            yield* session.updatePartDelta({
+            yield* queueDelta({
               sessionID: ctx.currentText.sessionID,
               messageID: ctx.currentText.messageID,
               partID: ctx.currentText.id,
@@ -698,6 +764,9 @@ export const layer = Layer.effect(
       })
 
       const cleanup = Effect.fn("SessionProcessor.cleanup")(function* () {
+        // Drain any coalesced PartDelta buckets first so subscribers see the
+        // final tokens before the text-end / part-updated events written below.
+        yield* flushAllDeltas()
         if (ctx.snapshot) {
           const patch = yield* snapshot.patch(ctx.snapshot)
           if (patch.files.length) {

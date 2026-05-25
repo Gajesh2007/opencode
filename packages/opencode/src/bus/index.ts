@@ -101,7 +101,10 @@ export const layer = Layer.effect(
       return Effect.gen(function* () {
         const s = yield* InstanceState.get(state)
         const payload: Payload = { id: options?.id ?? createID(), type: def.type, properties }
-        log.info("publishing", { type: def.type })
+        // Per-token events (message.part.delta) fire thousands of times per response.
+        // Logging each one at INFO serializes + writes to a file stream on the hot
+        // path. Keep the log for everything else where it still aids debugging.
+        if (def.type !== "message.part.delta") log.info("publishing", { type: def.type })
 
         const ps = s.typed.get(def.type)
         if (ps) yield* PubSub.publish(ps, payload)
