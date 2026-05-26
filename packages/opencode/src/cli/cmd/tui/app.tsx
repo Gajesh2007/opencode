@@ -81,6 +81,7 @@ import type { EventSource } from "./context/sdk"
 import { DialogVariant } from "./component/dialog-variant"
 import { DialogServiceTier } from "./component/dialog-service-tier"
 import { DialogUpstream } from "./component/dialog-upstream"
+import { DialogSubagentModel } from "./component/dialog-subagent-model"
 
 const appBindingCommands = [
   "command.palette.show",
@@ -577,6 +578,15 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
         slashName: "agents",
         run: () => {
           dialog.replace(() => <DialogAgent />)
+        },
+      },
+      {
+        name: "subagent.model",
+        title: "Configure subagent model",
+        category: "Agent",
+        slashName: "subagent",
+        run: () => {
+          dialog.replace(() => <DialogSubagentModel />)
         },
       },
       {

@@ -606,6 +606,65 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       }
     })
 
+    const subagentModel = iife(() => {
+      const [store, setStore] = createStore<{
+        overrides: Record<
+          string,
+          { providerID: string; modelID: string; variant?: string; serviceTier?: string }
+        >
+      }>({
+        overrides: {},
+      })
+
+      function postSubagentModel(body: {
+        agent: string
+        providerID?: string
+        modelID?: string
+        variant?: string
+        serviceTier?: string
+      }) {
+        const headers: Record<string, string> = { "Content-Type": "application/json" }
+        if (sdk.headers) Object.assign(headers, sdk.headers)
+        if (sdk.directory) headers["x-opencode-directory"] = encodeURIComponent(sdk.directory)
+        return sdk.fetch(sdk.url + "/agent/subagent-model", {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+        }).catch(() => {})
+      }
+
+      return {
+        get(agentName: string) {
+          return store.overrides[agentName]
+        },
+        list() {
+          return store.overrides
+        },
+        async set(
+          agentName: string,
+          model: { providerID: string; modelID: string; variant?: string; serviceTier?: string },
+        ) {
+          setStore("overrides", agentName, model)
+          await postSubagentModel({
+            agent: agentName,
+            providerID: model.providerID,
+            modelID: model.modelID,
+            variant: model.variant,
+            serviceTier: model.serviceTier,
+          })
+        },
+        async clear(agentName: string) {
+          const next = { ...store.overrides }
+          delete next[agentName]
+          setStore("overrides", next)
+          await postSubagentModel({ agent: agentName })
+        },
+        hasOverrides() {
+          return Object.keys(store.overrides).length > 0
+        },
+      }
+    })
+
     const mcp = {
       isEnabled(name: string) {
         const status = sync.data.mcp[name]
@@ -639,6 +698,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       agent,
       mcp,
       session,
+      subagentModel,
     }
     return result
   },

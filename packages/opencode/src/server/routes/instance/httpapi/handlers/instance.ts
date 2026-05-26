@@ -4,12 +4,13 @@ import * as InstanceState from "@/effect/instance-state"
 import { Format } from "@/format"
 import { Global } from "@opencode-ai/core/global"
 import { LSP } from "@/lsp/lsp"
+import { ModelID, ProviderID } from "@/provider/schema"
 import { Vcs } from "@/project/vcs"
 import { Skill } from "@/skill"
 import { Effect } from "effect"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import { InstanceHttpApi } from "../api"
-import { ApiVcsApplyError } from "../groups/instance"
+import { ApiVcsApplyError, type SubagentModelPayload } from "../groups/instance"
 import { markInstanceForDisposal } from "../lifecycle"
 
 export const instanceHandlers = HttpApiBuilder.group(InstanceHttpApi, "instance", (handlers) =>
@@ -93,6 +94,26 @@ export const instanceHandlers = HttpApiBuilder.group(InstanceHttpApi, "instance"
       return yield* format.status()
     })
 
+    const setSubagentModel = Effect.fn("InstanceHttpApi.setSubagentModel")(function* (ctx: {
+      payload: typeof SubagentModelPayload.Type
+    }) {
+      const model =
+        ctx.payload.providerID && ctx.payload.modelID
+          ? {
+              providerID: ProviderID.make(ctx.payload.providerID),
+              modelID: ModelID.make(ctx.payload.modelID),
+              variant: ctx.payload.variant,
+              serviceTier: ctx.payload.serviceTier,
+            }
+          : undefined
+      yield* agent.setSubagentModel(ctx.payload.agent, model)
+      return true
+    })
+
+    const listSubagentModels = Effect.fn("InstanceHttpApi.listSubagentModels")(function* () {
+      return yield* agent.listSubagentModels()
+    })
+
     return handlers
       .handle("dispose", dispose)
       .handle("path", getPath)
@@ -103,6 +124,8 @@ export const instanceHandlers = HttpApiBuilder.group(InstanceHttpApi, "instance"
       .handle("vcsApply", applyVcs)
       .handle("command", getCommand)
       .handle("agent", getAgent)
+      .handle("setSubagentModel", setSubagentModel)
+      .handle("listSubagentModels", listSubagentModels)
       .handle("skill", getSkill)
       .handle("lsp", getLsp)
       .handle("formatter", getFormatter)

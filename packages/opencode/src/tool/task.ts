@@ -264,7 +264,7 @@ export const TaskTool = Tool.define(
         messageID: msg.info.parentID,
       }).pipe(Effect.orDie)
       const parentUserModel = parentUser.info.role === "user" ? parentUser.info.model : undefined
-      const inheritedServiceTier = parentUserModel?.serviceTier
+      const inheritedServiceTier = next.serviceTier ?? parentUserModel?.serviceTier
       const inheritedUpstream = parentUserModel?.upstream
       const inheritedVariant = next.variant ?? parentUserModel?.variant
 

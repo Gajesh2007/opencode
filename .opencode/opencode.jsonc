@@ -7,4 +7,14 @@
     "github-triage": false,
     "github-pr-search": false,
   },
+  "agent": {
+    "refactor": {
+      "mode": "subagent",
+      "description": "Refactor and clean code writer. Use when code needs restructuring, readability improvements, dead code removal, or architectural cleanup."
+    },
+    "verifier": {
+      "mode": "subagent",
+      "description": "Code verifier and correctness critic. Use when code needs independent verification, contract checking, edge case analysis, or adversarial review."
+    }
+  },
 }

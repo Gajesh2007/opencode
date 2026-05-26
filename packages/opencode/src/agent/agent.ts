@@ -44,6 +44,7 @@ export const Info = Schema.Struct({
     }),
   ),
   variant: Schema.optional(Schema.String),
+  serviceTier: Schema.optional(Schema.String),
   prompt: Schema.optional(Schema.String),
   options: Schema.Record(Schema.String, Schema.Unknown),
   steps: Schema.optional(Schema.Finite),
@@ -61,6 +62,13 @@ export interface Interface {
   readonly list: () => Effect.Effect<Info[]>
   readonly defaultInfo: () => Effect.Effect<Info>
   readonly defaultAgent: () => Effect.Effect<string>
+  readonly setSubagentModel: (
+    agent: string,
+    model: { providerID: ProviderID; modelID: ModelID; variant?: string; serviceTier?: string } | undefined,
+  ) => Effect.Effect<void>
+  readonly listSubagentModels: () => Effect.Effect<
+    Record<string, { providerID: ProviderID; modelID: ModelID; variant?: string; serviceTier?: string }>
+  >
   readonly generate: (input: {
     description: string
     model?: { providerID: ProviderID; modelID: ModelID }
@@ -74,7 +82,7 @@ export interface Interface {
   >
 }
 
-type State = Omit<Interface, "generate">
+type State = Omit<Interface, "generate" | "setSubagentModel" | "listSubagentModels">
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Agent") {}
 
@@ -89,6 +97,11 @@ export const layer = Layer.effect(
     const skill = yield* Skill.Service
     const provider = yield* Provider.Service
     const flags = yield* RuntimeFlags.Service
+
+    const subagentModelOverrides = new Map<
+      string,
+      { providerID: ProviderID; modelID: ModelID; variant?: string; serviceTier?: string }
+    >()
 
     const state = yield* InstanceState.make<State>(
       Effect.fn("Agent.state")(function* (ctx) {
@@ -389,18 +402,49 @@ export const layer = Layer.effect(
       }),
     )
 
+    function applyOverride(
+      info: Info,
+      override: { providerID: ProviderID; modelID: ModelID; variant?: string; serviceTier?: string },
+    ): Info {
+      return {
+        ...info,
+        model: { providerID: override.providerID, modelID: override.modelID },
+        ...(override.variant !== undefined ? { variant: override.variant } : {}),
+        ...(override.serviceTier !== undefined ? { serviceTier: override.serviceTier } : {}),
+      }
+    }
+
     return Service.of({
       get: Effect.fn("Agent.get")(function* (agent: string) {
-        return yield* InstanceState.useEffect(state, (s) => s.get(agent))
+        const info = yield* InstanceState.useEffect(state, (s) => s.get(agent))
+        if (!info) return info
+        const override = subagentModelOverrides.get(agent)
+        if (override && info.mode !== "primary") return applyOverride(info, override)
+        return info
       }),
       list: Effect.fn("Agent.list")(function* () {
-        return yield* InstanceState.useEffect(state, (s) => s.list())
+        const items = yield* InstanceState.useEffect(state, (s) => s.list())
+        return items.map((info) => {
+          const override = subagentModelOverrides.get(info.name)
+          if (override && info.mode !== "primary") return applyOverride(info, override)
+          return info
+        })
       }),
       defaultInfo: Effect.fn("Agent.defaultInfo")(function* () {
         return yield* InstanceState.useEffect(state, (s) => s.defaultInfo())
       }),
       defaultAgent: Effect.fn("Agent.defaultAgent")(function* () {
         return yield* InstanceState.useEffect(state, (s) => s.defaultAgent())
+      }),
+      setSubagentModel: Effect.fn("Agent.setSubagentModel")(function* (
+        agent: string,
+        model: { providerID: ProviderID; modelID: ModelID; variant?: string; serviceTier?: string } | undefined,
+      ) {
+        if (model) subagentModelOverrides.set(agent, model)
+        else subagentModelOverrides.delete(agent)
+      }),
+      listSubagentModels: Effect.fn("Agent.listSubagentModels")(function* () {
+        return Object.fromEntries(subagentModelOverrides)
       }),
       generate: Effect.fn("Agent.generate")(function* (input: {
         description: string

@@ -2,6 +2,7 @@ import { Agent } from "@/agent/agent"
 import { Command } from "@/command"
 import { Format } from "@/format"
 import { LSP } from "@/lsp/lsp"
+import { ModelID, ProviderID } from "@/provider/schema"
 import { Vcs } from "@/project/vcs"
 import { Skill } from "@/skill"
 import { Schema } from "effect"
@@ -14,6 +15,23 @@ import {
   WorkspaceRoutingQueryFields,
 } from "../middleware/workspace-routing"
 import { described } from "./metadata"
+
+export const SubagentModelPayload = Schema.Struct({
+  agent: Schema.String,
+  providerID: Schema.optional(ProviderID),
+  modelID: Schema.optional(ModelID),
+  variant: Schema.optional(Schema.String),
+  serviceTier: Schema.optional(Schema.String),
+})
+
+const SubagentModelEntry = Schema.Struct({
+  providerID: ProviderID,
+  modelID: ModelID,
+  variant: Schema.optional(Schema.String),
+  serviceTier: Schema.optional(Schema.String),
+})
+
+export const SubagentModelsResponse = Schema.Record(Schema.String, SubagentModelEntry)
 
 const PathInfo = Schema.Struct({
   home: Schema.String,
@@ -50,6 +68,8 @@ export const InstancePaths = {
   vcsApply: "/vcs/apply",
   command: "/command",
   agent: "/agent",
+  agentSubagentModel: "/agent/subagent-model",
+  agentSubagentModels: "/agent/subagent-models",
   skill: "/skill",
   lsp: "/lsp",
   formatter: "/formatter",
@@ -154,6 +174,28 @@ export const InstanceApi = HttpApi.make("instance")
             identifier: "app.agents",
             summary: "List agents",
             description: "Get a list of all available AI agents in the OpenCode system.",
+          }),
+        ),
+        HttpApiEndpoint.post("setSubagentModel", InstancePaths.agentSubagentModel, {
+          query: WorkspaceRoutingQuery,
+          payload: SubagentModelPayload,
+          success: described(Schema.Boolean, "Model override set"),
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "agent.setSubagentModel",
+            summary: "Set subagent model",
+            description:
+              "Set or clear a runtime model override for a subagent. Omit providerID/modelID to clear.",
+          }),
+        ),
+        HttpApiEndpoint.get("listSubagentModels", InstancePaths.agentSubagentModels, {
+          query: WorkspaceRoutingQuery,
+          success: described(SubagentModelsResponse, "Current subagent model overrides"),
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "agent.listSubagentModels",
+            summary: "List subagent model overrides",
+            description: "Get all current runtime subagent model overrides.",
           }),
         ),
         HttpApiEndpoint.get("skill", InstancePaths.skill, {
