@@ -18,15 +18,51 @@ const Color = Schema.Union([
   Schema.Literals(["primary", "secondary", "accent", "success", "warning", "error", "info"]),
 ])
 
+const WorkflowPass = Schema.Struct({
+  name: Schema.String.annotate({ description: "Name of this lens/pass, e.g. 'security'" }),
+  agent: Schema.String.annotate({ description: "The subagent_type to run for this pass" }),
+  prompt: Schema.optional(Schema.String).annotate({
+    description: "Instruction template for this pass. May use {unit_id} and {unit_context} placeholders.",
+  }),
+})
+
+const WorkflowDef = Schema.Struct({
+  passes: Schema.mutable(Schema.Array(WorkflowPass)).annotate({
+    description: "The lenses applied to every unit when this agent runs its workflow.",
+  }),
+  synthesis: Schema.optional(
+    Schema.Struct({ agent: Schema.String, prompt: Schema.optional(Schema.String) }),
+  ).annotate({ description: "Optional subagent that reduces all results into one report." }),
+  format: Schema.optional(Schema.Literals(["text", "findings"])).annotate({
+    description: "'findings' parses+dedupes+ranks JSON findings per cell before synthesis; 'text' keeps raw text.",
+  }),
+  instructions: Schema.optional(Schema.String).annotate({
+    description: "Extra guidance appended to the agent's workflow directive (e.g. how to derive units).",
+  }),
+})
+
 const AgentSchema = Schema.StructWithRest(
   Schema.Struct({
     model: Schema.optional(ConfigModelID),
+    workflow: Schema.optional(WorkflowDef).annotate({
+      description:
+        "Declares a fan-out workflow this agent runs: it calls the `workflow` tool once with these passes/synthesis. The `workflow` permission is granted automatically.",
+    }),
     variant: Schema.optional(Schema.String).annotate({
       description: "Default model variant for this agent (applies only when using the agent's configured model).",
+    }),
+    effort: Schema.optional(Schema.Literals(["low", "medium", "high", "xhigh", "max"])).annotate({
+      description: "Reasoning effort ladder; sets the model variant when no explicit variant is given.",
     }),
     temperature: Schema.optional(Schema.Finite),
     top_p: Schema.optional(Schema.Finite),
     prompt: Schema.optional(Schema.String),
+    skills: Schema.optional(Schema.mutable(Schema.Array(Schema.String))).annotate({
+      description: "Skill names whose content is preloaded into this agent's context at startup.",
+    }),
+    initialPrompt: Schema.optional(Schema.String).annotate({
+      description: "Prompt auto-submitted as the first turn when this agent starts a fresh primary session.",
+    }),
     tools: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)).annotate({
       description: "@deprecated Use 'permission' field instead",
     }),
@@ -52,8 +88,12 @@ const AgentSchema = Schema.StructWithRest(
 const KNOWN_KEYS = new Set([
   "name",
   "model",
+  "workflow",
   "variant",
+  "effort",
   "prompt",
+  "skills",
+  "initialPrompt",
   "description",
   "temperature",
   "top_p",

@@ -1,0 +1,9 @@
+Split this work into independent items and open one pull request per item.
+
+Scope: $ARGUMENTS
+
+---
+
+Decompose the request into items that touch disjoint files and can land as separate PRs. For each item, fan out a worktree-isolated `general` subagent (`task` with `worktree: true`, `background: true`) that makes only its change, commits, pushes its branch, and opens a PR with `gh pr create`. Run the items concurrently, then return the list of PR URLs (or branch/compare URLs if `gh` is unavailable).
+
+If the items are not independent (shared files / must land together), say so and stop instead of creating conflicting PRs. Your full operating contract is in the `batch` orchestrator system prompt.

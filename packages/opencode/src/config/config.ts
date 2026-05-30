@@ -301,6 +301,10 @@ export const Info = Schema.Struct({
       mcp_timeout: Schema.optional(PositiveInt).annotate({
         description: "Timeout in milliseconds for model context protocol (MCP) requests",
       }),
+      subagent_concurrency: Schema.optional(PositiveInt).annotate({
+        description:
+          "Maximum number of subagent sessions (task tool + workflow engine) allowed to run concurrently. Defaults to 200. Also settable via OPENCODE_SUBAGENT_CONCURRENCY.",
+      }),
     }),
   ),
 }).annotate({ identifier: "Config" })

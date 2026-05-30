@@ -7,6 +7,9 @@ import { SessionID, MessageID } from "../session/schema"
 import { MessageV2 } from "../session/message-v2"
 import { Agent } from "../agent/agent"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
+import { SubagentLimit } from "../agent/subagent-limit"
+import { Team } from "../agent/team"
+import { Plugin } from "@/plugin"
 import type { SessionPrompt } from "../session/prompt"
 import { SessionStatus } from "@/session/status"
 import { Config } from "@/config/config"
@@ -41,13 +44,26 @@ const EXTRA_DESCRIPTION = [
     "with your in-progress work — research/refactor/build agents are good candidates.",
     "The worktree directory is reported in the task output; you can leave it alone or",
     "clean it up later. Combine with background=true for fully parallel side-tasks.",
+    "",
+    "Fork mode: pass fork=true (and omit subagent_type) to spawn a fork that inherits",
+    "your FULL conversation context so far, instead of the fresh/empty context a normal",
+    "subagent gets. Use a fork when the work needs everything you already know and a",
+    "self-contained prompt would be hard to write. The fork runs like any subagent —",
+    "only its final message returns — and a fork cannot fork again.",
   ].join(" "),
 ].join("\n")
 
 export const Parameters = Schema.Struct({
   description: Schema.String.annotate({ description: "A short (3-5 words) description of the task" }),
   prompt: Schema.String.annotate({ description: "The task for the agent to perform" }),
-  subagent_type: Schema.String.annotate({ description: "The type of specialized agent to use for this task" }),
+  subagent_type: Schema.optional(Schema.String).annotate({
+    description:
+      "The type of specialized agent to use for this task. Omit it together with fork=true to fork yourself (inherit your own agent + full context).",
+  }),
+  fork: Schema.optional(Schema.Boolean).annotate({
+    description:
+      "When true, spawn a fork that inherits this session's full conversation context instead of starting fresh. Omit subagent_type to fork your own agent. A fork cannot fork again.",
+  }),
   task_id: Schema.optional(Schema.String).annotate({
     description:
       "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
@@ -59,6 +75,14 @@ export const Parameters = Schema.Struct({
   worktree: Schema.optional(Schema.Boolean).annotate({
     description:
       "When true, run the subagent inside a fresh git worktree branched off the current HEAD so its file edits don't conflict with the main session's work. Only valid for git-tracked projects.",
+  }),
+  team: Schema.optional(Schema.String).annotate({
+    description:
+      "Spawn this subagent as a member of the named team, sharing a task list and mailbox with other teammates so they can coordinate via send_message/inbox/team_tasks.",
+  }),
+  name: Schema.optional(Schema.String).annotate({
+    description:
+      "Name for this teammate within the team, so others can address it with send_message. Defaults to the subagent type. Only meaningful with `team`.",
   }),
 })
 
@@ -183,6 +207,9 @@ export const TaskTool = Tool.define(
     const sessions = yield* Session.Service
     const scope = yield* Scope.Scope
     const status = yield* SessionStatus.Service
+    const limit = yield* SubagentLimit.Service
+    const team = yield* Team.Service
+    const plugin = yield* Plugin.Service
 
     const run = Effect.fn("TaskTool.execute")(function* (
       params: Schema.Schema.Type<typeof Parameters>,
@@ -191,23 +218,6 @@ export const TaskTool = Tool.define(
       const cfg = yield* config.get()
       const runInBackground = params.background === true
       const useWorktree = params.worktree === true
-
-      if (!ctx.extra?.bypassAgentCheck) {
-        yield* ctx.ask({
-          permission: id,
-          patterns: [params.subagent_type],
-          always: ["*"],
-          metadata: {
-            description: params.description,
-            subagent_type: params.subagent_type,
-          },
-        })
-      }
-
-      const next = yield* agent.get(params.subagent_type)
-      if (!next) {
-        return yield* Effect.fail(new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`))
-      }
 
       const taskID = params.task_id
       const session = taskID
@@ -218,39 +228,94 @@ export const TaskTool = Tool.define(
         ? yield* agent.get(parent.agent).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
         : undefined
 
+      // A fork inherits the parent session's full conversation context instead of
+      // starting fresh. Only fork a brand-new run, never when resuming a task_id.
+      // Depth bound: parent.parentID is set only for child sessions, so a fork (or
+      // any subagent) can never fork again, even if task were re-enabled for it.
+      const isFork = params.fork === true && !session && !parent.parentID
+      // Forks default to the parent's own agent identity (fork "yourself"); an
+      // explicit subagent_type still wins when provided.
+      const subagentType = params.subagent_type ?? (isFork ? (parent.agent ?? ctx.agent) : undefined)
+      if (!subagentType) {
+        return yield* Effect.fail(new Error("subagent_type is required unless fork=true"))
+      }
+
+      if (!ctx.extra?.bypassAgentCheck) {
+        yield* ctx.ask({
+          permission: id,
+          patterns: [subagentType],
+          always: ["*"],
+          metadata: {
+            description: params.description,
+            subagent_type: subagentType,
+            ...(isFork ? { fork: true } : {}),
+          },
+        })
+      }
+
+      const next = yield* agent.get(subagentType)
+      if (!next) {
+        return yield* Effect.fail(new Error(`Unknown agent type: ${subagentType} is not a valid agent type`))
+      }
+
       // If the LLM asked for a worktree, create it before the subagent session
       // so the new session can be scoped to the isolated directory. Resuming
       // a task_id skips worktree creation — the existing session keeps its
       // own directory. Inline git invocation (instead of taking a hard
       // dependency on the Worktree service) so the tool registry's layer
       // surface stays narrow and tests don't need a worktree-capable instance.
+      // Worktree isolation gives the subagent a fresh branch for its edits. It's
+      // about file isolation, not context, so it does not combine with fork.
       const worktreeInfo =
-        useWorktree && !session
+        useWorktree && !session && !isFork
           ? yield* Effect.try({
               try: () => createSubagentWorktree(parent.directory, params.description),
               catch: (e) => new Error(`Failed to create worktree: ${e instanceof Error ? e.message : String(e)}`),
             })
           : undefined
 
+      const subagentPermission = [
+        ...deriveSubagentSessionPermission({
+          parentSessionPermission: parent.permission ?? [],
+          parentAgent,
+          subagent: next,
+        }),
+        ...(cfg.experimental?.primary_tools?.map((item) => ({
+          pattern: "*",
+          action: "allow" as const,
+          permission: item,
+        })) ?? []),
+      ]
+
       const nextSession =
         session ??
-        (yield* sessions.create({
-          parentID: ctx.sessionID,
-          title: params.description + ` (@${next.name} subagent)`,
-          ...(worktreeInfo ? { directory: worktreeInfo.directory } : {}),
-          permission: [
-            ...deriveSubagentSessionPermission({
-              parentSessionPermission: parent.permission ?? [],
-              parentAgent,
-              subagent: next,
-            }),
-            ...(cfg.experimental?.primary_tools?.map((item) => ({
-              pattern: "*",
-              action: "allow" as const,
-              permission: item,
-            })) ?? []),
-          ],
-        }))
+        (isFork
+          ? // Fork clones the parent's messages up to (not including) the current
+            // in-progress turn, so the fork sees the full prior conversation
+            // without the dangling tool call that is spawning it.
+            yield* sessions.fork({
+              sessionID: ctx.sessionID,
+              messageID: ctx.messageID,
+              parentID: ctx.sessionID,
+              agent: next.name,
+              permission: subagentPermission,
+              title: params.description + ` (@${next.name} fork)`,
+            })
+          : yield* sessions.create({
+              parentID: ctx.sessionID,
+              title: params.description + ` (@${next.name} subagent)`,
+              ...(worktreeInfo ? { directory: worktreeInfo.directory } : {}),
+              permission: subagentPermission,
+            }))
+
+      // Register team membership so the teammate and the lead can coordinate via the
+      // send_message / inbox / team_tasks tools, which resolve identity by session id.
+      const memberName = params.name ?? next.name
+      if (params.team) {
+        const leadName = (yield* team.whoami(ctx.sessionID))?.name ?? "lead"
+        yield* team.register({ team: params.team, name: leadName, sessionID: ctx.sessionID })
+        yield* team.register({ team: params.team, name: memberName, sessionID: nextSession.id })
+      }
 
       const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(Effect.orDie)
       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
@@ -293,7 +358,20 @@ export const TaskTool = Tool.define(
       const runCancel = yield* EffectBridge.make()
 
       const runTask = Effect.fn("TaskTool.runTask")(function* () {
-        const parts = yield* ops.resolvePromptParts(params.prompt)
+        const teamPreamble = params.team
+          ? `[Team "${params.team}"] You are teammate "${memberName}". Coordinate with teammates using the send_message, inbox, and team_tasks tools; check your inbox when you begin and before you finish.\n\n`
+          : ""
+        yield* plugin.trigger(
+          "subagent.start",
+          {
+            sessionID: ctx.sessionID,
+            agentSessionID: nextSession.id,
+            agent: next.name,
+            description: params.description,
+          },
+          {},
+        )
+        const parts = yield* ops.resolvePromptParts(teamPreamble + params.prompt)
         const result = yield* ops.prompt({
           messageID: MessageID.ascending(),
           sessionID: nextSession.id,
@@ -308,11 +386,18 @@ export const TaskTool = Tool.define(
           tools: {
             ...(next.permission.some((rule) => rule.permission === "todowrite") ? {} : { todowrite: false }),
             ...(next.permission.some((rule) => rule.permission === id) ? {} : { task: false }),
+            ...(next.permission.some((rule) => rule.permission === "workflow") ? {} : { workflow: false }),
             ...Object.fromEntries((cfg.experimental?.primary_tools ?? []).map((item) => [item, false])),
           },
           parts,
         })
-        return result.parts.findLast((item) => item.type === "text")?.text ?? ""
+        const text = result.parts.findLast((item) => item.type === "text")?.text ?? ""
+        yield* plugin.trigger(
+          "subagent.stop",
+          { sessionID: ctx.sessionID, agentSessionID: nextSession.id, agent: next.name, status: "completed" },
+          { output: text },
+        )
+        return text
       })
 
       const resumeWhenIdle: (input: { userID: MessageID; state: "completed" | "error" }) => Effect.Effect<void> =
@@ -400,7 +485,10 @@ export const TaskTool = Tool.define(
         type: id,
         title: params.description,
         metadata,
-        run: runTask(),
+        // Gate the actual subagent work behind the shared concurrency semaphore
+        // so massive fan-outs (the workflow engine, or many parallel task calls)
+        // drain through a bounded window instead of stampeding the provider.
+        run: limit.withPermit(runTask()),
       })
 
       const injectOnComplete = Effect.fn("TaskTool.injectOnComplete")(function* () {

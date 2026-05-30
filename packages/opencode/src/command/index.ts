@@ -9,6 +9,7 @@ import { MCP } from "../mcp"
 import { Skill } from "../skill"
 import PROMPT_INITIALIZE from "./template/initialize.txt"
 import PROMPT_REVIEW from "./template/review.txt"
+import PROMPT_BATCH from "./template/batch.txt"
 
 type State = {
   commands: Record<string, Info>
@@ -53,6 +54,7 @@ export function hints(template: string) {
 export const Default = {
   INIT: "init",
   REVIEW: "review",
+  BATCH: "batch",
 } as const
 
 export interface Interface {
@@ -87,11 +89,23 @@ export const layer = Layer.effect(
         name: Default.REVIEW,
         description: "review changes [commit|branch|pr], defaults to uncommitted",
         source: "command",
+        agent: Default.REVIEW,
         get template() {
           return PROMPT_REVIEW.replace("${path}", ctx.worktree)
         },
         subtask: true,
         hints: hints(PROMPT_REVIEW),
+      }
+      commands[Default.BATCH] = {
+        name: Default.BATCH,
+        description: "split work into worktree-isolated subagents that each open a PR",
+        source: "command",
+        agent: Default.BATCH,
+        get template() {
+          return PROMPT_BATCH.replace("${path}", ctx.worktree)
+        },
+        subtask: true,
+        hints: hints(PROMPT_BATCH),
       }
 
       for (const [name, command] of Object.entries(cfg.command ?? {})) {

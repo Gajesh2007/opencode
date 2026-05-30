@@ -1,0 +1,18 @@
+Run a general fan-out / orchestrator-worker workflow: spawn many subagents in parallel over a grid of UNITS x PASSES, then reduce their results with a single synthesis subagent.
+
+This is the engine for "do the same kind of work across many things, from several angles, concurrently". You describe the work; the engine fans out one subagent per (unit, pass) cell, runs them with bounded global concurrency, collects each subagent's final result, and (optionally) runs one synthesizer subagent that merges everything into a single report.
+
+Flagship use case: reviewing changed files. units = one per file, passes = [security, logic, style] reviewer agents, synthesis = a synthesizer agent. The engine spawns file-count x 3 reviewers concurrently and returns one ranked report. It is GENERAL though — use it for any units x lenses job (audit modules for test coverage, summarize many documents along several dimensions, triage many errors, etc).
+
+Parameters:
+- description: short label for the run.
+- units: array of { id, context? }. One work item per unit (e.g. a file path as `id`). `context` is optional extra text passed to each pass for that unit.
+- passes: array of { name, agent, prompt }. Each pass is a lens applied to EVERY unit. `agent` is the subagent_type to run; `prompt` is the instruction template and may contain the placeholders {unit_id} and {unit_context}, which are substituted per unit.
+- synthesis (optional): { agent, prompt }. A single reduce-step subagent that receives all collected results and produces the final report. Omit it to get the raw aggregated results back.
+- format (optional): "text" (default) or "findings". Use "findings" when each pass subagent returns a JSON array of findings (the review use case). In "findings" mode the engine parses, de-duplicates, and ranks the findings deterministically before synthesis, so it scales to thousands of cells without overflowing the synthesizer's context.
+- concurrency (optional): max cells in flight for THIS run. Normally omit it — a global cap already bounds total concurrent subagents.
+
+Notes:
+- The engine runs units x passes subagents. That can be a large, token-intensive, long-running job; call it once for the whole batch rather than looping yourself.
+- Each subagent runs in a fresh, isolated session and returns only its final message. Spawned subagents cannot themselves fan out again.
+- Make each pass prompt self-contained (objective, what to output, boundaries) since the subagent does not see this conversation.

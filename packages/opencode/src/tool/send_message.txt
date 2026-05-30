@@ -1,0 +1,3 @@
+Send a message to a teammate in your agent team.
+
+Use this to coordinate with other agents working alongside you: hand off a finding, ask a question, or report progress. Messages are queued in the recipient's inbox; they read them with the `inbox` tool. Address teammates by their name (see your team roster). Only available when you are part of a team.

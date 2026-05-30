@@ -233,6 +233,139 @@ it.instance(
 )
 
 it.instance(
+  "declarative workflow agent gets the fan-out directive and workflow permission",
+  () =>
+    Effect.gen(function* () {
+      const agent = yield* load((svc) => svc.get("triage"))
+      expect(agent).toBeDefined()
+      // base prompt is preserved...
+      expect(agent?.prompt).toContain("You are a triage lead.")
+      // ...and the rendered workflow directive is appended, referencing its passes + format
+      expect(agent?.prompt).toContain("## Your workflow")
+      expect(agent?.prompt).toContain("triage-fast")
+      expect(agent?.prompt).toContain("triage-deep")
+      expect(agent?.prompt).toContain('format: "findings"')
+      // the workflow tool is granted automatically so it works even when spawned nested
+      expect(evalPerm(agent, "workflow")).toBe("allow")
+    }),
+  {
+    config: {
+      agent: {
+        triage: {
+          prompt: "You are a triage lead.",
+          workflow: {
+            passes: [
+              { name: "fast", agent: "triage-fast", prompt: "Triage {unit_id} quickly." },
+              { name: "deep", agent: "triage-deep" },
+            ],
+            synthesis: { agent: "triage-synth" },
+            format: "findings",
+          },
+        },
+      },
+    },
+  },
+)
+
+it.instance(
+  "agent effort sets the model variant when no explicit variant is given",
+  () =>
+    Effect.gen(function* () {
+      const agent = yield* load((svc) => svc.get("effort_agent"))
+      expect(agent).toBeDefined()
+      expect(agent?.variant).toBe("high")
+    }),
+  {
+    config: {
+      agent: {
+        effort_agent: {
+          effort: "high",
+        },
+      },
+    },
+  },
+)
+
+it.instance(
+  "explicit variant wins over effort",
+  () =>
+    Effect.gen(function* () {
+      const agent = yield* load((svc) => svc.get("variant_agent"))
+      expect(agent).toBeDefined()
+      expect(agent?.variant).toBe("max")
+    }),
+  {
+    config: {
+      agent: {
+        variant_agent: {
+          variant: "max",
+          effort: "low",
+        },
+      },
+    },
+  },
+)
+
+it.instance(
+  "agent initialPrompt is carried onto the agent info",
+  () =>
+    Effect.gen(function* () {
+      const agent = yield* load((svc) => svc.get("initial_agent"))
+      expect(agent).toBeDefined()
+      expect(agent?.initialPrompt).toBe("go")
+    }),
+  {
+    config: {
+      agent: {
+        initial_agent: {
+          initialPrompt: "go",
+        },
+      },
+    },
+  },
+)
+
+it.instance(
+  "agent skills preload injects skill content into the prompt",
+  () =>
+    Effect.gen(function* () {
+      const agent = yield* load((svc) => svc.get("skilled_agent"))
+      expect(agent).toBeDefined()
+      // the built-in skill is always resolvable, so its content is wrapped + appended
+      expect(agent?.prompt).toContain('<skill_content name="customize-opencode">')
+    }),
+  {
+    config: {
+      agent: {
+        skilled_agent: {
+          skills: ["customize-opencode"],
+        },
+      },
+    },
+  },
+)
+
+it.instance(
+  "agent skills preload skips unresolved skills and leaves the prompt unchanged",
+  () =>
+    Effect.gen(function* () {
+      const agent = yield* load((svc) => svc.get("unresolved_skill_agent"))
+      expect(agent).toBeDefined()
+      expect(agent?.prompt).toBe("base prompt")
+    }),
+  {
+    config: {
+      agent: {
+        unresolved_skill_agent: {
+          prompt: "base prompt",
+          skills: ["nonexistent"],
+        },
+      },
+    },
+  },
+)
+
+it.instance(
   "agent disable removes agent from list",
   () =>
     Effect.gen(function* () {
@@ -729,4 +862,17 @@ it.instance(
       },
     },
   },
+)
+
+it.instance("batch agent is a built-in that can spawn worktree subagents and edit files", () =>
+  Effect.gen(function* () {
+    const batch = yield* load((svc) => svc.get("batch"))
+    expect(batch).toBeDefined()
+    expect(batch?.native).toBe(true)
+    expect(batch?.mode).toBe("subagent")
+    // task: allow is what lets it fan out worktree subagents (subagents deny it by default)
+    expect(evalPerm(batch, "task")).toBe("allow")
+    expect(evalPerm(batch, "edit")).toBe("allow")
+    expect(evalPerm(batch, "bash")).toBe("allow")
+  }),
 )

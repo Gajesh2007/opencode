@@ -264,7 +264,11 @@ export interface Hooks {
   ) => Promise<void>
   "tool.execute.before"?: (
     input: { tool: string; sessionID: string; callID: string },
-    output: { args: any },
+    /**
+     * `args` may be mutated to rewrite the tool input before it runs. Set
+     * `status` to "deny" (optionally with a `reason`) to block the call entirely.
+     */
+    output: { args: any; status?: "deny"; reason?: string },
   ) => Promise<void>
   "shell.env"?: (
     input: { cwd: string; sessionID?: string; callID?: string },
@@ -330,4 +334,19 @@ export interface Hooks {
    * Modify tool definitions (description and parameters) sent to LLM
    */
   "tool.definition"?: (input: { toolID: string }, output: { description: string; parameters: any }) => Promise<void>
+  /**
+   * Fired when a subagent (task tool, fork, workflow cell, or teammate) starts,
+   * just before its first turn runs.
+   */
+  "subagent.start"?: (
+    input: { sessionID: string; agentSessionID: string; agent: string; description: string },
+    output: {},
+  ) => Promise<void>
+  /**
+   * Fired when a subagent finishes (success or error), with its final output.
+   */
+  "subagent.stop"?: (
+    input: { sessionID: string; agentSessionID: string; agent: string; status: "completed" | "error" },
+    output: { output: string },
+  ) => Promise<void>
 }

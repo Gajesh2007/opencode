@@ -85,12 +85,19 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
         return run.promise(
           Effect.gen(function* () {
             const ctx = context(args, options)
+            // PreToolUse hook: plugins may rewrite `pre.args` or set `pre.status="deny"`.
+            const pre: { args: Record<string, unknown>; status?: "deny"; reason?: string } = { args }
             yield* plugin.trigger(
               "tool.execute.before",
               { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID },
-              { args },
+              pre,
             )
-            const result = yield* item.execute(args, ctx)
+            if (pre.status === "deny") {
+              return yield* Effect.die(
+                new Error(`${item.id} was blocked by a tool.execute.before hook${pre.reason ? `: ${pre.reason}` : ""}`),
+              )
+            }
+            const result = yield* item.execute(pre.args, ctx)
             const output = {
               ...result,
               attachments: result.attachments?.map((attachment) => ({
@@ -126,14 +133,20 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       run.promise(
         Effect.gen(function* () {
           const ctx = context(args, opts)
+          const pre: { args: Record<string, unknown>; status?: "deny"; reason?: string } = { args }
           yield* plugin.trigger(
             "tool.execute.before",
             { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId },
-            { args },
+            pre,
           )
+          if (pre.status === "deny") {
+            return yield* Effect.die(
+              new Error(`${key} was blocked by a tool.execute.before hook${pre.reason ? `: ${pre.reason}` : ""}`),
+            )
+          }
           const result: Awaited<ReturnType<NonNullable<typeof execute>>> = yield* Effect.gen(function* () {
             yield* ctx.ask({ permission: key, metadata: {}, patterns: ["*"], always: ["*"] })
-            return yield* Effect.promise(() => execute(args, opts))
+            return yield* Effect.promise(() => execute(pre.args, opts))
           }).pipe(
             Effect.withSpan("Tool.execute", {
               attributes: {

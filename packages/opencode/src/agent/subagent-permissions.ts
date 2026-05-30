@@ -11,8 +11,10 @@ import type { Agent } from "./agent"
  *    silently bypass it. (#26514)
  * 2. The parent **session's** deny rules and external_directory rules —
  *    same forwarding the original code already did.
- * 3. Default `todowrite` and `task` denies if the subagent's own ruleset
- *    doesn't already permit them.
+ * 3. Default `todowrite`, `task`, and `workflow` denies if the subagent's own
+ *    ruleset doesn't already permit them. Denying `task`/`workflow` is what
+ *    keeps subagent fan-out depth bounded — a spawned reviewer can't itself
+ *    spawn another wave unless its definition explicitly opts in.
  */
 export function deriveSubagentSessionPermission(input: {
   parentSessionPermission: Permission.Ruleset
@@ -20,6 +22,7 @@ export function deriveSubagentSessionPermission(input: {
   subagent: Agent.Info
 }): Permission.Ruleset {
   const canTask = input.subagent.permission.some((rule) => rule.permission === "task")
+  const canWorkflow = input.subagent.permission.some((rule) => rule.permission === "workflow")
   const canTodo = input.subagent.permission.some((rule) => rule.permission === "todowrite")
   const parentAgentDenies =
     input.parentAgent?.permission.filter((rule) => rule.action === "deny" && rule.permission === "edit") ?? []
@@ -30,5 +33,6 @@ export function deriveSubagentSessionPermission(input: {
     ),
     ...(canTodo ? [] : [{ permission: "todowrite" as const, pattern: "*" as const, action: "deny" as const }]),
     ...(canTask ? [] : [{ permission: "task" as const, pattern: "*" as const, action: "deny" as const }]),
+    ...(canWorkflow ? [] : [{ permission: "workflow" as const, pattern: "*" as const, action: "deny" as const }]),
   ]
 }

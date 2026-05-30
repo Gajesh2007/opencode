@@ -2,7 +2,61 @@
 
 This file tracks customizations made to this personal fork of opencode on top of upstream `dev`. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased] — 2026-05-24
+## [Unreleased] — 2026-05-29
+
+### Added — Multi-agent suite: fan-out workflow engine, forks, teams, lifecycle hooks, richer agents, batch
+
+A Claude-Code-parity set of agent/subagent capabilities, all built into the agent
+system (`packages/opencode`). Subagent fan-out is now bounded by a shared
+concurrency cap (default **200**, up from effectively unbounded).
+
+**Concurrency rail** — a `SubagentLimit` service: one shared semaphore gating all
+subagent work (the `task` tool _and_ the workflow engine), so massive fan-outs
+drain through a bounded window instead of stampeding the provider. Configurable
+via `experimental.subagent_concurrency` (config) or `OPENCODE_SUBAGENT_CONCURRENCY`
+(env), default 200. _`src/agent/subagent-limit.ts`._
+
+**Workflow engine (`workflow` tool)** — a general orchestrator-worker / fan-out
+primitive: spawn one subagent per UNIT × PASS, run them concurrently (bounded),
+then reduce with a single synthesis subagent. In `findings` mode it parses each
+cell's JSON, de-duplicates + ranks deterministically (cross-lens agreement
+boosting), so it scales to thousands of files without overflowing the
+synthesizer. _`src/tool/workflow.ts`, `src/workflow/finding.ts`._
+
+**Code review fan-out (`/review`)** — the flagship workflow: a `review`
+orchestrator agent fans out `review-security` / `review-logic` / `review-style`
+reviewers over every changed file, then `review-synthesizer` returns one ranked
+report. Verified end-to-end against a live model. _`src/agent/prompt/review-*.txt`._
+
+**Forks** — `task({ fork: true })` spawns a subagent that inherits the parent
+session's full conversation (via `Session.fork`, cut off before the in-progress
+turn) instead of starting fresh. Bounded: a fork/subagent can never fork again.
+
+**Agent teams & mailbox** — a `Team` service (roster + shared task list +
+mailbox); `send_message` / `inbox` / `team_tasks` tools; and `task({ team, name })`
+which registers a lead plus named teammates so concurrent subagents coordinate.
+_`src/agent/team.ts`, `src/tool/{send_message,inbox,team_tasks}.ts`._
+
+**Lifecycle hooks** — `subagent.start` / `subagent.stop` plugin events fire
+around every subagent run; `tool.execute.before` gained deny + argument-rewrite
+(PreToolUse gating); `tool.execute.after` (PostToolUse) already existed.
+_`packages/plugin/src/index.ts`, `src/session/tools.ts`, `src/tool/task.ts`._
+
+**Richer agent frontmatter** — `effort` (low|medium|high|xhigh|max → model
+variant), `skills` (preload skill content into the agent's system prompt),
+`initialPrompt` (carried on the agent), and a declarative `workflow` block (turns
+an agent into a fan-out orchestrator). _`src/config/agent.ts`, `src/agent/agent.ts`._
+
+**Batch (`/batch`)** — a built-in `batch` orchestrator agent + command: split a
+change into independent items and fan out worktree-isolated subagents that each
+open a pull request (reuses `task({ worktree, background })` + `gh`).
+
+**New files**: `src/agent/subagent-limit.ts`, `src/agent/team.ts`,
+`src/workflow/finding.ts`, `src/tool/workflow.ts(.txt)`,
+`src/tool/send_message.ts(.txt)`, `src/tool/inbox.ts(.txt)`,
+`src/tool/team_tasks.ts(.txt)`, `src/agent/prompt/review-*.txt`,
+`src/agent/prompt/batch-orchestrator.txt`, `src/command/template/batch.txt`, and
+tests under `test/workflow/`, `test/tool/hooks.test.ts`, `test/agent/team.test.ts`.
 
 ### Added — `/provider` slash command: pin requests to a specific upstream
 

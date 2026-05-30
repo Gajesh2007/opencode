@@ -471,7 +471,15 @@ export interface Interface {
     permission?: Permission.Ruleset
     workspaceID?: WorkspaceID
   }) => Effect.Effect<Info>
-  readonly fork: (input: { sessionID: SessionID; messageID?: MessageID }) => Effect.Effect<Info, NotFound>
+  readonly fork: (input: {
+    sessionID: SessionID
+    messageID?: MessageID
+    parentID?: SessionID
+    permission?: Permission.Ruleset
+    agent?: string
+    title?: string
+    directory?: string
+  }) => Effect.Effect<Info, NotFound>
   readonly touch: (sessionID: SessionID) => Effect.Effect<void>
   readonly get: (id: SessionID) => Effect.Effect<Info, NotFound>
   readonly setTitle: (input: { sessionID: SessionID; title: string }) => Effect.Effect<void>
@@ -700,15 +708,26 @@ export const layer: Layer.Layer<
       })
     })
 
-    const fork = Effect.fn("Session.fork")(function* (input: { sessionID: SessionID; messageID?: MessageID }) {
+    const fork = Effect.fn("Session.fork")(function* (input: {
+      sessionID: SessionID
+      messageID?: MessageID
+      parentID?: SessionID
+      permission?: Permission.Ruleset
+      agent?: string
+      title?: string
+      directory?: string
+    }) {
       const ctx = yield* InstanceState.context
       const original = yield* get(input.sessionID)
-      const title = getForkedTitle(original.title)
+      const directory = input.directory ?? ctx.directory
       const session = yield* createNext({
-        directory: ctx.directory,
-        path: sessionPath(ctx.worktree, ctx.directory),
+        directory,
+        path: sessionPath(input.directory ?? ctx.worktree, directory),
         workspaceID: original.workspaceID,
-        title,
+        title: input.title ?? getForkedTitle(original.title),
+        ...(input.parentID ? { parentID: input.parentID } : {}),
+        ...(input.agent ? { agent: input.agent } : {}),
+        ...(input.permission ? { permission: input.permission } : {}),
       })
       const msgs = yield* messages({ sessionID: input.sessionID })
       const idMap = new Map<string, MessageID>()

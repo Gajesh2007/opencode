@@ -14,6 +14,12 @@ import PROMPT_SCOUT from "./prompt/scout.txt"
 import PROMPT_STEER from "./prompt/steer.txt"
 import PROMPT_SUMMARY from "./prompt/summary.txt"
 import PROMPT_TITLE from "./prompt/title.txt"
+import PROMPT_REVIEW_SECURITY from "./prompt/review-security.txt"
+import PROMPT_REVIEW_LOGIC from "./prompt/review-logic.txt"
+import PROMPT_REVIEW_STYLE from "./prompt/review-style.txt"
+import PROMPT_REVIEW_SYNTHESIZER from "./prompt/review-synthesizer.txt"
+import PROMPT_REVIEW_ORCHESTRATOR from "./prompt/review-orchestrator.txt"
+import PROMPT_BATCH_ORCHESTRATOR from "./prompt/batch-orchestrator.txt"
 import { Permission } from "@/permission"
 import { mergeDeep, pipe, sortBy, values } from "remeda"
 import { Global } from "@opencode-ai/core/global"
@@ -46,6 +52,7 @@ export const Info = Schema.Struct({
   variant: Schema.optional(Schema.String),
   serviceTier: Schema.optional(Schema.String),
   prompt: Schema.optional(Schema.String),
+  initialPrompt: Schema.optional(Schema.String),
   options: Schema.Record(Schema.String, Schema.Unknown),
   steps: Schema.optional(Schema.Finite),
 }).annotate({ identifier: "Agent" })
@@ -216,6 +223,135 @@ export const layer = Layer.effect(
             mode: "subagent",
             native: true,
           },
+          review: {
+            name: "review",
+            description:
+              "Concurrent multi-lens code review orchestrator. Use to review changed files for security, logic, and style in parallel via the workflow engine, then synthesize one ranked report.",
+            prompt: PROMPT_REVIEW_ORCHESTRATOR,
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                "*": "deny",
+                read: "allow",
+                grep: "allow",
+                glob: "allow",
+                list: "allow",
+                bash: "allow",
+                webfetch: "allow",
+                workflow: "allow",
+                external_directory: readonlyExternalDirectory,
+              }),
+              user,
+            ),
+            options: {},
+            mode: "subagent",
+            native: true,
+          },
+          batch: {
+            name: "batch",
+            description:
+              "Splits a large change into independent work items and runs each as a worktree-isolated subagent that opens its own pull request. Use for codemods/migrations across many packages or files.",
+            prompt: PROMPT_BATCH_ORCHESTRATOR,
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                "*": "deny",
+                read: "allow",
+                grep: "allow",
+                glob: "allow",
+                list: "allow",
+                bash: "allow",
+                edit: "allow",
+                write: "allow",
+                webfetch: "allow",
+                task: "allow",
+                external_directory: readonlyExternalDirectory,
+              }),
+              user,
+            ),
+            options: {},
+            mode: "subagent",
+            native: true,
+          },
+          "review-security": {
+            name: "review-security",
+            description: "Security-lens code reviewer (read-only). Spawned by the review workflow.",
+            prompt: PROMPT_REVIEW_SECURITY,
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                "*": "deny",
+                read: "allow",
+                grep: "allow",
+                glob: "allow",
+                list: "allow",
+                external_directory: readonlyExternalDirectory,
+              }),
+              user,
+            ),
+            options: {},
+            mode: "subagent",
+            native: true,
+            hidden: true,
+          },
+          "review-logic": {
+            name: "review-logic",
+            description: "Logic/correctness-lens code reviewer (read-only). Spawned by the review workflow.",
+            prompt: PROMPT_REVIEW_LOGIC,
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                "*": "deny",
+                read: "allow",
+                grep: "allow",
+                glob: "allow",
+                list: "allow",
+                external_directory: readonlyExternalDirectory,
+              }),
+              user,
+            ),
+            options: {},
+            mode: "subagent",
+            native: true,
+            hidden: true,
+          },
+          "review-style": {
+            name: "review-style",
+            description: "Style/maintainability-lens code reviewer (read-only). Spawned by the review workflow.",
+            prompt: PROMPT_REVIEW_STYLE,
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                "*": "deny",
+                read: "allow",
+                grep: "allow",
+                glob: "allow",
+                list: "allow",
+                external_directory: readonlyExternalDirectory,
+              }),
+              user,
+            ),
+            options: {},
+            mode: "subagent",
+            native: true,
+            hidden: true,
+          },
+          "review-synthesizer": {
+            name: "review-synthesizer",
+            description: "Merges code-review findings into one ranked report. Spawned by the review workflow.",
+            prompt: PROMPT_REVIEW_SYNTHESIZER,
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                "*": "deny",
+              }),
+              user,
+            ),
+            options: {},
+            mode: "subagent",
+            native: true,
+            hidden: true,
+          },
           ...(flags.experimentalScout
             ? {
                 scout: {
@@ -329,8 +465,10 @@ export const layer = Layer.effect(
               native: false,
             }
           if (value.model) item.model = Provider.parseModel(value.model)
-          item.variant = value.variant ?? item.variant
+          // An explicit `variant` always wins; otherwise the `effort` ladder selects it.
+          item.variant = value.variant ?? value.effort ?? item.variant
           item.prompt = value.prompt ?? item.prompt
+          item.initialPrompt = value.initialPrompt ?? item.initialPrompt
           item.description = value.description ?? item.description
           item.temperature = value.temperature ?? item.temperature
           item.topP = value.top_p ?? item.topP
@@ -341,6 +479,24 @@ export const layer = Layer.effect(
           item.steps = value.steps ?? item.steps
           item.options = mergeDeep(item.options, value.options ?? {})
           item.permission = Permission.merge(item.permission, Permission.fromConfig(value.permission ?? {}))
+          if (value.workflow) {
+            // A declared workflow turns this agent into a fan-out orchestrator:
+            // append the directive to its prompt and grant the `workflow` tool so
+            // it works even when spawned as a subagent (which denies it by default).
+            item.prompt = [item.prompt, renderWorkflowDirective(value.workflow)].filter(Boolean).join("\n\n")
+            item.permission = Permission.merge(item.permission, Permission.fromConfig({ workflow: "allow" }))
+          }
+          if (value.skills?.length) {
+            // Preload the named skills' full content into the agent's system prompt
+            // at startup. Names that don't resolve are skipped silently.
+            const blocks: string[] = []
+            for (const name of value.skills) {
+              const info = yield* skill.get(name)
+              if (!info) continue
+              blocks.push(`<skill_content name="${name}">\n${info.content.trim()}\n</skill_content>`)
+            }
+            item.prompt = [item.prompt, ...blocks].filter(Boolean).join("\n\n")
+          }
         }
 
         // Ensure Truncate.GLOB is allowed unless explicitly configured
@@ -527,5 +683,36 @@ export const defaultLayer = layer.pipe(
   Layer.provide(Skill.defaultLayer),
   Layer.provide(RuntimeFlags.defaultLayer),
 )
+
+function renderWorkflowDirective(workflow: {
+  passes: { name: string; agent: string; prompt?: string }[]
+  synthesis?: { agent: string; prompt?: string }
+  format?: "text" | "findings"
+  instructions?: string
+}): string {
+  const passes = workflow.passes
+    .map((pass) => {
+      const prompt = pass.prompt ?? `Process \`{unit_id}\` for the ${pass.name} pass. {unit_context}`
+      return `  - { name: ${JSON.stringify(pass.name)}, agent: ${JSON.stringify(pass.agent)}, prompt: ${JSON.stringify(prompt)} }`
+    })
+    .join("\n")
+  const lines = [
+    "## Your workflow",
+    "You run a fan-out workflow. When invoked, determine the list of work units to process (for example, the changed files), then call the `workflow` tool EXACTLY ONCE. Do not process the units yourself — the engine fans out every unit across each pass concurrently and synthesizes the results.",
+    "",
+    "Call `workflow` with these arguments:",
+    "- units: one entry per work unit, as { id, context? }",
+    "- passes:",
+    passes,
+  ]
+  if (workflow.synthesis) {
+    const prompt = workflow.synthesis.prompt ?? "Synthesize all results into one report."
+    lines.push(`- synthesis: { agent: ${JSON.stringify(workflow.synthesis.agent)}, prompt: ${JSON.stringify(prompt)} }`)
+  }
+  lines.push(`- format: ${JSON.stringify(workflow.format ?? "text")}`)
+  if (workflow.instructions) lines.push("", workflow.instructions)
+  lines.push("", "Make a single `workflow` call for the whole batch; do not loop unit-by-unit.")
+  return lines.join("\n")
+}
 
 export * as Agent from "./agent"

@@ -1,0 +1,8 @@
+Read and update your team's shared task list.
+
+A single backlog visible to every teammate, so a team can divide work without stepping on each other. Actions:
+- action="list": show all shared tasks and their status/assignee.
+- action="create": add a task (requires title; optional assignee, notes).
+- action="update": change a task's status/assignee/notes (requires id).
+
+Statuses: pending, in_progress, done, blocked. Only available when you are part of a team.

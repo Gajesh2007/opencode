@@ -1,9 +1,12 @@
 import { afterEach, describe, expect } from "bun:test"
-import { Effect, Exit, Fiber, Layer } from "effect"
+import { Effect, Exit, Fiber, Layer, Option } from "effect"
 import { Agent } from "../../src/agent/agent"
+import { SubagentLimit } from "@/agent/subagent-limit"
+import { Team } from "@/agent/team"
 import { BackgroundJob } from "@/background/job"
 import { Bus } from "@/bus"
 import { Config } from "@/config/config"
+import { Plugin } from "@/plugin"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Session } from "@/session/session"
 import { MessageV2 } from "../../src/session/message-v2"
@@ -34,11 +37,14 @@ const layer = (flags: Partial<RuntimeFlags.Info> = {}) =>
     BackgroundJob.defaultLayer,
     Bus.defaultLayer,
     Config.defaultLayer,
+    Plugin.defaultLayer,
     CrossSpawnSpawner.defaultLayer,
     Session.defaultLayer,
     SessionRunState.defaultLayer,
     SessionStatus.defaultLayer,
     Truncate.defaultLayer,
+    SubagentLimit.defaultLayer,
+    Team.defaultLayer,
     ToolRegistry.defaultLayer,
     RuntimeFlags.layer(flags),
   )
@@ -416,6 +422,11 @@ describe("tool.task", () => {
             action: "deny",
           },
           {
+            permission: "workflow",
+            pattern: "*",
+            action: "deny",
+          },
+          {
             permission: "bash",
             pattern: "*",
             action: "allow",
@@ -428,6 +439,7 @@ describe("tool.task", () => {
         ])
         expect(seen?.tools).toEqual({
           todowrite: false,
+          workflow: false,
           bash: false,
           read: false,
         })
@@ -447,6 +459,75 @@ describe("tool.task", () => {
         },
       },
     },
+  )
+
+  it.instance("fork=true inherits the parent session context into a bounded child", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed({ title: "Parent" })
+      const def = yield* (yield* TaskTool).init()
+      let seen: SessionPrompt.PromptInput | undefined
+      const promptOps = stubOps({ text: "forked", onPrompt: (input) => (seen = input) })
+
+      const result = yield* def.execute(
+        { description: "dig deeper", prompt: "continue the investigation", fork: true },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      // a NEW forked session, distinct from the parent and linked as its child
+      const forkedID = SessionID.make(result.metadata.sessionId as string)
+      expect(forkedID).not.toBe(chat.id)
+      const forked = yield* sessions.get(forkedID)
+      expect(forked.parentID).toBe(chat.id)
+
+      // the fork ran on the forked session, which inherited the parent's prior messages
+      expect(seen?.sessionID).toBe(forkedID)
+      const inherited = yield* sessions.findMessage(forkedID, (m) => m.info.role === "user")
+      expect(Option.isSome(inherited)).toBe(true)
+
+      // a fork cannot fork again: task is denied on the forked session
+      expect(forked.permission?.some((r) => r.permission === "task" && r.action === "deny")).toBe(true)
+
+      expect(result.output).toContain("forked")
+    }),
+  )
+
+  it.instance("team spawn registers the lead and the named member in the shared roster", () =>
+    Effect.gen(function* () {
+      const teamSvc = yield* Team.Service
+      const { chat, assistant } = yield* seed()
+      const def = yield* (yield* TaskTool).init()
+      const promptOps = stubOps({ text: "ok" })
+
+      const result = yield* def.execute(
+        { description: "scan files", prompt: "scan the repo", subagent_type: "general", team: "alpha", name: "scanner" },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      const childID = SessionID.make(result.metadata.sessionId as string)
+      expect((yield* teamSvc.whoami(childID))?.name).toBe("scanner")
+      expect((yield* teamSvc.whoami(chat.id))?.name).toBe("lead")
+      const roster = yield* teamSvc.roster("alpha")
+      expect(roster.map((m) => m.name).sort()).toEqual(["lead", "scanner"])
+    }),
   )
 
   it.instance("execute propagates parent service tier, upstream, and variant to the subagent prompt", () =>

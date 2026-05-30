@@ -331,23 +331,38 @@ exports[`tool parameters JSON Schema (wire shape) task 1`] = `
       "description": "A short (3-5 words) description of the task",
       "type": "string",
     },
+    "fork": {
+      "description": "When true, spawn a fork that inherits this session's full conversation context instead of starting fresh. Omit subagent_type to fork your own agent. A fork cannot fork again.",
+      "type": "boolean",
+    },
+    "name": {
+      "description": "Name for this teammate within the team, so others can address it with send_message. Defaults to the subagent type. Only meaningful with \`team\`.",
+      "type": "string",
+    },
     "prompt": {
       "description": "The task for the agent to perform",
       "type": "string",
     },
     "subagent_type": {
-      "description": "The type of specialized agent to use for this task",
+      "description": "The type of specialized agent to use for this task. Omit it together with fork=true to fork yourself (inherit your own agent + full context).",
       "type": "string",
     },
     "task_id": {
       "description": "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
       "type": "string",
     },
+    "team": {
+      "description": "Spawn this subagent as a member of the named team, sharing a task list and mailbox with other teammates so they can coordinate via send_message/inbox/team_tasks.",
+      "type": "string",
+    },
+    "worktree": {
+      "description": "When true, run the subagent inside a fresh git worktree branched off the current HEAD so its file edits don't conflict with the main session's work. Only valid for git-tracked projects.",
+      "type": "boolean",
+    },
   },
   "required": [
     "description",
     "prompt",
-    "subagent_type",
   ],
   "type": "object",
 }
