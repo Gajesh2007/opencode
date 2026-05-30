@@ -40,7 +40,9 @@ import { DialogMcp } from "@tui/component/dialog-mcp"
 import { DialogStatus } from "@tui/component/dialog-status"
 import { DialogThemeList } from "@tui/component/dialog-theme-list"
 import { DialogHelp } from "./ui/dialog-help"
-import { DialogAgent } from "@tui/component/dialog-agent"
+import { DialogAgents } from "@tui/component/dialog-agents"
+import { DialogTasks } from "@tui/component/dialog-tasks"
+import { DialogWorkflows } from "@tui/component/dialog-workflows"
 import { DialogSessionList } from "@tui/component/dialog-session-list"
 import { DialogConsoleOrg } from "@tui/component/dialog-console-org"
 import { ThemeProvider, useTheme } from "@tui/context/theme"
@@ -573,11 +575,29 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
       },
       {
         name: "agent.list",
-        title: "Switch agent",
+        title: "Agents",
         category: "Agent",
         slashName: "agents",
         run: () => {
-          dialog.replace(() => <DialogAgent />)
+          dialog.replace(() => <DialogAgents />)
+        },
+      },
+      {
+        name: "tasks.list",
+        title: "List tasks",
+        category: "Agent",
+        slashName: "tasks",
+        run: () => {
+          dialog.replace(() => <DialogTasks />)
+        },
+      },
+      {
+        name: "workflows.list",
+        title: "List workflows",
+        category: "Agent",
+        slashName: "workflows",
+        run: () => {
+          dialog.replace(() => <DialogWorkflows />)
         },
       },
       {

@@ -2087,6 +2087,14 @@ function Task(props: ToolProps<typeof TaskTool>) {
     return assistant - first
   })
 
+  const tokens = createMemo(() => {
+    const last = messages().findLast(
+      (x): x is AssistantMessage => x.role === "assistant" && x.tokens.output > 0,
+    )
+    if (!last) return 0
+    return last.tokens.input + last.tokens.output + last.tokens.reasoning + last.tokens.cache.read + last.tokens.cache.write
+  })
+
   const content = createMemo(() => {
     if (!props.input.description) return ""
     const description =
@@ -2103,11 +2111,10 @@ function Task(props: ToolProps<typeof TaskTool>) {
     }
 
     if (props.part.state.status === "completed") {
-      content.push(
-        props.metadata.background === true
-          ? `└ ${tools().length} toolcalls`
-          : `└ ${tools().length} toolcalls · ${Locale.duration(duration())}`,
-      )
+      const parts = [`${tools().length} toolcalls`]
+      if (props.metadata.background !== true) parts.push(Locale.duration(duration()))
+      if (tokens() > 0) parts.push(`${Locale.number(tokens())} tokens`)
+      content.push(`└ ${parts.join(" · ")}`)
     }
 
     return content.join("\n")

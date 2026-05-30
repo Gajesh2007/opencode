@@ -45,6 +45,7 @@ export interface DialogSelectProps<T> {
   }[]
   bindings?: readonly Binding<Renderable, KeyEvent>[]
   current?: T
+  header?: JSX.Element
 }
 
 export interface DialogSelectOption<T = any> {
@@ -359,6 +360,9 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
             esc
           </text>
         </box>
+        <Show when={props.header}>
+          <box paddingTop={1}>{props.header}</box>
+        </Show>
         <Show when={props.renderFilter !== false}>
           <box paddingTop={1}>
             <input
