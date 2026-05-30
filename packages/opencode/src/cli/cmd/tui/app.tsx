@@ -44,6 +44,8 @@ import { DialogAgents } from "@tui/component/dialog-agents"
 import { DialogTasks } from "@tui/component/dialog-tasks"
 import { DialogWorkflows } from "@tui/component/dialog-workflows"
 import { DialogTeams } from "@tui/component/dialog-teams"
+import { DialogPrompt } from "@tui/ui/dialog-prompt"
+import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
 import { DialogSessionList } from "@tui/component/dialog-session-list"
 import { DialogConsoleOrg } from "@tui/component/dialog-console-org"
 import { ThemeProvider, useTheme } from "@tui/context/theme"
@@ -111,6 +113,7 @@ const appBindingCommands = [
   "variant.cycle",
   "variant.list",
   "subagent.background",
+  "subagent.steer",
   "service_tier.cycle",
   "service_tier.list",
   "upstream.cycle",
@@ -675,6 +678,46 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
             message: "Subagent moved to background — you'll get the result when it finishes",
             variant: "info",
             duration: 4000,
+          })
+        },
+      },
+      {
+        name: "subagent.steer",
+        title: "Steer subagent",
+        category: "Agent",
+        run: () => {
+          const sessionID = route.data.type === "session" ? route.data.sessionID : undefined
+          const session = sessionID ? sync.session.get(sessionID) : undefined
+          if (!sessionID || !session?.parentID) {
+            toast.show({ message: "Open a subagent session to steer it", variant: "warning", duration: 3000 })
+            return
+          }
+          // Carry the subagent's own agent + model so the steering message does not
+          // switch the subagent's identity (runLoop resolves agent/model from the
+          // latest user message).
+          const messages = sync.data.message[sessionID] ?? []
+          const lastUser = messages.findLast((m): m is UserMessage => m.role === "user")
+          const lastAssistant = messages.findLast((m): m is AssistantMessage => m.role === "assistant")
+          const agent = lastUser?.agent ?? lastAssistant?.agent
+          const model = lastUser?.model
+            ? { providerID: lastUser.model.providerID, modelID: lastUser.model.modelID }
+            : lastAssistant
+              ? { providerID: lastAssistant.providerID, modelID: lastAssistant.modelID }
+              : undefined
+          void DialogPrompt.show(dialog, "Steer subagent", {
+            placeholder: "Send a message to steer this subagent…",
+          }).then((value) => {
+            const text = value?.trim()
+            if (!text) return
+            void sdk.client.session
+              .prompt({
+                sessionID,
+                ...(agent ? { agent } : {}),
+                ...(model ? { model } : {}),
+                parts: [{ type: "text", text }],
+              })
+              .catch(() => {})
+            toast.show({ message: "Steering message sent to subagent", variant: "info", duration: 3000 })
           })
         },
       },

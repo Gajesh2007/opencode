@@ -59,7 +59,8 @@ export function SubagentFooter() {
   const parentShortcut = useCommandShortcut("session.parent")
   const previousShortcut = useCommandShortcut("session.child.previous")
   const nextShortcut = useCommandShortcut("session.child.next")
-  const [hover, setHover] = createSignal<"parent" | "prev" | "next" | null>(null)
+  const steerShortcut = useCommandShortcut("subagent.steer")
+  const [hover, setHover] = createSignal<"parent" | "prev" | "next" | "steer" | null>(null)
   useTerminalDimensions()
 
   return (
@@ -94,6 +95,18 @@ export function SubagentFooter() {
             </Show>
           </box>
           <box flexDirection="row" gap={2}>
+            <Show when={steerShortcut()}>
+              <box
+                onMouseOver={() => setHover("steer")}
+                onMouseOut={() => setHover(null)}
+                onMouseUp={() => keymap.dispatchCommand("subagent.steer")}
+                backgroundColor={hover() === "steer" ? theme.backgroundElement : theme.backgroundPanel}
+              >
+                <text fg={theme.text}>
+                  Steer <span style={{ fg: theme.textMuted }}>{steerShortcut()}</span>
+                </text>
+              </box>
+            </Show>
             <box
               onMouseOver={() => setHover("parent")}
               onMouseOut={() => setHover(null)}
