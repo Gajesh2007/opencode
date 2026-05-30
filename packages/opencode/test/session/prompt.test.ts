@@ -9,6 +9,7 @@ import { Agent as AgentSvc } from "../../src/agent/agent"
 import { BackgroundJob } from "@/background/job"
 import { SubagentLimit } from "@/agent/subagent-limit"
 import { Team } from "@/agent/team"
+import { Memory } from "@/memory/memory"
 import { Bus } from "../../src/bus"
 import { Command } from "../../src/command"
 import { Config } from "@/config/config"
@@ -199,8 +200,7 @@ function makePrompt(input?: { processor?: "blocking" }) {
     Layer.provide(Reference.defaultLayer),
     Layer.provide(Ripgrep.defaultLayer),
     Layer.provide(Format.defaultLayer),
-    Layer.provide(SubagentLimit.defaultLayer),
-    Layer.provide(Team.defaultLayer),
+    Layer.provide(Layer.mergeAll(SubagentLimit.defaultLayer, Team.defaultLayer, Memory.defaultLayer)),
     Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
     Layer.provideMerge(todo),
     Layer.provideMerge(question),
@@ -232,7 +232,7 @@ function makePrompt(input?: { processor?: "blocking" }) {
     Layer.provideMerge(registry),
     Layer.provideMerge(trunc),
     Layer.provide(Instruction.defaultLayer),
-    Layer.provide(Layer.mergeAll(SystemPrompt.defaultLayer, Goal.defaultLayer, Steering.defaultLayer)),
+    Layer.provide(Layer.mergeAll(SystemPrompt.defaultLayer, Goal.defaultLayer, Steering.defaultLayer, Memory.defaultLayer)),
     Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
     Layer.provideMerge(deps),
     Layer.provide(summary),

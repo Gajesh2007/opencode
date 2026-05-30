@@ -4,6 +4,28 @@ This file tracks customizations made to this personal fork of opencode on top of
 
 ## [Unreleased] — 2026-05-29
 
+### Added — Agent memory + per-agent MCP scoping
+
+Completes the richer-agent-frontmatter set (Claude-Code parity).
+
+**Agent memory** — an agent declares `memory: "user" | "project" | "local"` and
+gets a persistent markdown store that is read fresh into its context every turn
+and is writable via a new `memory` tool, so durable facts survive across
+sessions. Scopes: `user` → `~/.config/opencode/memory/<agent>.md`, `project` →
+`<dir>/.opencode/memory/<agent>.md`, `local` → `<dir>/.opencode/memory/<agent>.local.md`.
+Reads always hit disk (never the cached agent definition). Injected at the
+system-prompt assembly point in `session/prompt.ts` (alongside skills/goal), so
+subagents get their own memory too. _New: `src/memory/memory.ts`,
+`src/tool/memory.ts(.txt)`._
+
+**Per-agent `mcpServers`** — an agent declares `mcpServers: string[]` to scope
+which MCP servers' tools it can see; omitted ⇒ all MCP tools (unchanged). MCP
+tool keys are `sanitize(server)_sanitize(tool)`, so the filter lives in
+`session/tools.ts` and naturally scopes spawned subagents (their agent def
+carries the field). `sanitize` is now exported from `src/mcp/index.ts`.
+
+Both fields are added to the agent config schema + runtime `Agent.Info`.
+
 ### Added — Multi-agent suite: fan-out workflow engine, forks, teams, lifecycle hooks, richer agents, batch
 
 A Claude-Code-parity set of agent/subagent capabilities, all built into the agent

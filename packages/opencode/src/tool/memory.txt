@@ -1,0 +1,10 @@
+Read and update your persistent memory.
+
+Your memory is a markdown store that survives across sessions and is loaded into your context at the start of every turn. Use it to remember durable facts, conventions, decisions, and preferences you should not have to rediscover.
+
+Actions:
+- action="view": show your current memory.
+- action="append": add a new entry (requires content). Use this for new durable facts.
+- action="replace": overwrite the whole memory (requires content). Use sparingly, to reorganize.
+
+Only available when your agent has a memory scope configured. Keep entries concise and high-signal — memory is injected into every turn.

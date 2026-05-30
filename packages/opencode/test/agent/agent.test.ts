@@ -864,6 +864,26 @@ it.instance(
   },
 )
 
+it.instance(
+  "carries memory scope and mcpServers from config",
+  () =>
+    Effect.gen(function* () {
+      const a = yield* load((svc) => svc.get("scoped"))
+      expect(a?.memory).toBe("project")
+      expect(a?.mcpServers).toEqual(["github", "linear"])
+    }),
+  {
+    config: {
+      agent: {
+        scoped: {
+          memory: "project",
+          mcpServers: ["github", "linear"],
+        },
+      },
+    },
+  },
+)
+
 it.instance("batch agent is a built-in that can spawn worktree subagents and edit files", () =>
   Effect.gen(function* () {
     const batch = yield* load((svc) => svc.get("batch"))

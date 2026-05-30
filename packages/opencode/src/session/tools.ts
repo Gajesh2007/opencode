@@ -122,7 +122,11 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     })
   }
 
+  // Per-agent MCP scoping: when an agent declares `mcpServers`, it only sees tools
+  // from those servers. MCP tool keys are `sanitize(server)_sanitize(tool)`.
+  const allowedServers = input.agent.mcpServers
   for (const [key, item] of Object.entries(yield* mcp.tools())) {
+    if (allowedServers?.length && !allowedServers.some((server) => key.startsWith(MCP.sanitize(server) + "_"))) continue
     const execute = item.execute
     if (!execute) continue
 

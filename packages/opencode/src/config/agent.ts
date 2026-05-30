@@ -63,6 +63,14 @@ const AgentSchema = Schema.StructWithRest(
     initialPrompt: Schema.optional(Schema.String).annotate({
       description: "Prompt auto-submitted as the first turn when this agent starts a fresh primary session.",
     }),
+    mcpServers: Schema.optional(Schema.mutable(Schema.Array(Schema.String))).annotate({
+      description:
+        "MCP server names this agent may use. If set, the agent only sees tools from these servers; if omitted, it sees all configured MCP tools.",
+    }),
+    memory: Schema.optional(Schema.Literals(["user", "project", "local"])).annotate({
+      description:
+        "Persistent markdown memory store for this agent (user=global, project=checked-in, local=gitignored). Loaded into context each turn and writable via the memory tool.",
+    }),
     tools: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)).annotate({
       description: "@deprecated Use 'permission' field instead",
     }),
@@ -94,6 +102,8 @@ const KNOWN_KEYS = new Set([
   "prompt",
   "skills",
   "initialPrompt",
+  "mcpServers",
+  "memory",
   "description",
   "temperature",
   "top_p",

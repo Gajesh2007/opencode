@@ -53,6 +53,8 @@ export const Info = Schema.Struct({
   serviceTier: Schema.optional(Schema.String),
   prompt: Schema.optional(Schema.String),
   initialPrompt: Schema.optional(Schema.String),
+  mcpServers: Schema.optional(Schema.mutable(Schema.Array(Schema.String))),
+  memory: Schema.optional(Schema.Literals(["user", "project", "local"])),
   options: Schema.Record(Schema.String, Schema.Unknown),
   steps: Schema.optional(Schema.Finite),
 }).annotate({ identifier: "Agent" })
@@ -469,6 +471,8 @@ export const layer = Layer.effect(
           item.variant = value.variant ?? value.effort ?? item.variant
           item.prompt = value.prompt ?? item.prompt
           item.initialPrompt = value.initialPrompt ?? item.initialPrompt
+          item.mcpServers = value.mcpServers ?? item.mcpServers
+          item.memory = value.memory ?? item.memory
           item.description = value.description ?? item.description
           item.temperature = value.temperature ?? item.temperature
           item.topP = value.top_p ?? item.topP

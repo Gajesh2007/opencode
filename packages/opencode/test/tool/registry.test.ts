@@ -18,6 +18,7 @@ import { Skill } from "@/skill"
 import { Agent } from "@/agent/agent"
 import { SubagentLimit } from "@/agent/subagent-limit"
 import { Team } from "@/agent/team"
+import { Memory } from "@/memory/memory"
 import { BackgroundJob } from "@/background/job"
 import { Session } from "@/session/session"
 import { SessionStatus } from "@/session/status"
@@ -70,7 +71,7 @@ const registryLayer = (opts: RegistryLayerOptions = {}) =>
       Layer.provide(node),
       Layer.provide(Ripgrep.defaultLayer),
       Layer.provide(Truncate.defaultLayer),
-      Layer.provide(Layer.mergeAll(SubagentLimit.defaultLayer, Team.defaultLayer)),
+      Layer.provide(Layer.mergeAll(SubagentLimit.defaultLayer, Team.defaultLayer, Memory.defaultLayer)),
     )
     .pipe(Layer.provide(RuntimeFlags.layer(opts.flags ?? {})))
 

@@ -64,6 +64,7 @@ import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
 import { LLMEvent } from "@opencode-ai/llm"
 import { Goal } from "./goal"
+import { Memory } from "@/memory/memory"
 import { Steering } from "./steering"
 
 // @ts-ignore
@@ -129,6 +130,7 @@ export const layer = Layer.effect(
     const flags = yield* RuntimeFlags.Service
     const goals = yield* Goal.Service
     const steering = yield* Steering.Service
+    const memory = yield* Memory.Service
     const ops = Effect.fn("SessionPrompt.ops")(function* () {
       return {
         cancel: (sessionID: SessionID) => cancel(sessionID),
@@ -1426,15 +1428,25 @@ export const layer = Layer.effect(
 
             yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
-            const [skills, env, instructions, modelMsgs] = yield* Effect.all([
+            const [skills, env, instructions, modelMsgs, agentMemory] = yield* Effect.all([
               sys.skills(agent),
               sys.environment(model),
               instruction.system().pipe(Effect.orDie),
               MessageV2.toModelMessagesEffect(msgs, model),
+              agent.memory ? memory.read({ name: agent.name, scope: agent.memory }) : Effect.succeed(undefined),
             ])
             const activeGoal = yield* goals.get(sessionID)
             const goalContext = activeGoal && activeGoal.status === "active" ? formatGoalReminder(activeGoal) : undefined
-            const system = [...env, ...instructions, ...(skills ? [skills] : []), ...(goalContext ? [goalContext] : [])]
+            // Per-agent memory is read fresh from disk each turn (not the cached agent
+            // definition) so cross-session writes and external edits are reflected.
+            const memoryContext = agentMemory && agent.memory ? formatMemory(agentMemory, agent.memory) : undefined
+            const system = [
+              ...env,
+              ...instructions,
+              ...(skills ? [skills] : []),
+              ...(memoryContext ? [memoryContext] : []),
+              ...(goalContext ? [goalContext] : []),
+            ]
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
             // OpenAI Responses continuation: thread the most recent assistant
@@ -1759,7 +1771,7 @@ export const defaultLayer = Layer.suspend(() =>
     Layer.provide(Instruction.defaultLayer),
     Layer.provide(AppFileSystem.defaultLayer),
     Layer.provide(Plugin.defaultLayer),
-    Layer.provide(Layer.mergeAll(Session.defaultLayer, SessionRevert.defaultLayer, SessionSummary.defaultLayer, Goal.defaultLayer, Steering.defaultLayer)),
+    Layer.provide(Layer.mergeAll(Session.defaultLayer, SessionRevert.defaultLayer, SessionSummary.defaultLayer, Goal.defaultLayer, Steering.defaultLayer, Memory.defaultLayer)),
     Layer.provide(Image.defaultLayer),
     Layer.provide(
       Layer.mergeAll(
@@ -1897,6 +1909,15 @@ function formatGoalReminder(goal: Goal.Info): string {
     "",
     "Keep this objective in mind as you work. Call the goal tool with action 'update' and status 'completed' when the objective is fully achieved.",
     "</active_goal>",
+  ].join("\n")
+}
+
+function formatMemory(content: string, scope: string): string {
+  return [
+    `<agent_memory scope="${scope}">`,
+    content.trim(),
+    "</agent_memory>",
+    "This is your persistent memory, loaded from disk. Use the memory tool to append durable facts you'll want next time.",
   ].join("\n")
 }
 

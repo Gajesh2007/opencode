@@ -12,6 +12,7 @@ import { WorkflowTool } from "./workflow"
 import { SendMessageTool } from "./send_message"
 import { InboxTool } from "./inbox"
 import { TeamTasksTool } from "./team_tasks"
+import { MemoryTool } from "./memory"
 import { TodoWriteTool } from "./todo"
 import { WebFetchTool } from "./webfetch"
 import { WriteTool } from "./write"
@@ -56,6 +57,7 @@ import { Bus } from "../bus"
 import { Agent } from "../agent/agent"
 import { SubagentLimit } from "@/agent/subagent-limit"
 import { Team } from "@/agent/team"
+import { Memory } from "@/memory/memory"
 import { Git } from "@/git"
 import { Skill } from "../skill"
 import { Permission } from "@/permission"
@@ -118,6 +120,7 @@ export const layer: Layer.Layer<
   | RuntimeFlags.Service
   | SubagentLimit.Service
   | Team.Service
+  | Memory.Service
 > = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -134,6 +137,7 @@ export const layer: Layer.Layer<
     const sendMessage = yield* SendMessageTool
     const inbox = yield* InboxTool
     const teamTasks = yield* TeamTasksTool
+    const memorytool = yield* MemoryTool
     const taskStatus = yield* TaskStatusTool
     const read = yield* ReadTool
     const question = yield* QuestionTool
@@ -255,6 +259,7 @@ export const layer: Layer.Layer<
           send_message: Tool.init(sendMessage),
           inbox: Tool.init(inbox),
           team_tasks: Tool.init(teamTasks),
+          memory: Tool.init(memorytool),
           task_status: Tool.init(taskStatus),
           fetch: Tool.init(webfetch),
           todo: Tool.init(todo),
@@ -285,6 +290,7 @@ export const layer: Layer.Layer<
             tool.send_message,
             tool.inbox,
             tool.team_tasks,
+            tool.memory,
             tool.task_status,
             tool.fetch,
             tool.todo,
@@ -421,8 +427,7 @@ export const defaultLayer = Layer.suspend(() =>
       Layer.provide(FetchHttpClient.layer),
       Layer.provide(Layer.mergeAll(Format.defaultLayer, CrossSpawnSpawner.defaultLayer, Ripgrep.defaultLayer)),
       Layer.provide(Truncate.defaultLayer),
-      Layer.provide(SubagentLimit.defaultLayer),
-      Layer.provide(Team.defaultLayer),
+      Layer.provide(Layer.mergeAll(SubagentLimit.defaultLayer, Team.defaultLayer, Memory.defaultLayer)),
     )
     .pipe(Layer.provide(RuntimeFlags.defaultLayer)),
 )
