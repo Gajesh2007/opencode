@@ -697,6 +697,64 @@ it.live("session.processor effect tests publish retry status updates", () =>
   ),
 )
 
+it.live("session.processor effect tests retry transient gateway stream errors", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        const bus = yield* Bus.Service
+
+        // A gateway/proxy "internal server error" delivered with a non-5xx status the
+        // SDK does not auto-mark retryable (so the old classifier halted). It must now
+        // retry with backoff based on the transient message.
+        yield* llm.error(418, { error: { message: "internal server error" } })
+        yield* llm.text("recovered")
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "gateway")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const states: number[] = []
+        const off = yield* bus.subscribeCallback(SessionStatus.Event.Status, (evt) => {
+          if (evt.properties.sessionID !== chat.id) return
+          if (evt.properties.status.type === "retry") states.push(evt.properties.status.attempt)
+        })
+        const handle = yield* processors.create({
+          assistantMessage: msg,
+          sessionID: chat.id,
+          model: mdl,
+        })
+
+        const value = yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies MessageV2.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "gateway" }],
+          tools: {},
+        })
+
+        off()
+        const parts = MessageV2.parts(msg.id)
+
+        expect(value).toBe("continue")
+        expect(yield* llm.calls).toBe(2)
+        expect(states).toStrictEqual([1])
+        expect(parts.some((part) => part.type === "text" && part.text === "recovered")).toBe(true)
+        expect(handle.message.error).toBeUndefined()
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
 it.live("session.processor effect tests compact on structured context overflow", () =>
   provideTmpdirServer(
     ({ dir, llm }) =>

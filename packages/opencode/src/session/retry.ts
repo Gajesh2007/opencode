@@ -64,14 +64,72 @@ export function delay(attempt: number, error?: MessageV2.APIError) {
   return cap(Math.min(RETRY_INITIAL_DELAY * Math.pow(RETRY_BACKOFF_FACTOR, attempt - 1), RETRY_MAX_DELAY_NO_HEADERS))
 }
 
+// Transient infrastructure failures that should always be retried with backoff,
+// regardless of how the provider/SDK classified them. These cover gateway/proxy
+// failures (e.g. Vercel AI Gateway "internal server error"), upstream provider
+// outages, overload, and transient network blips that otherwise surface as a
+// generic Error (classified as NamedError.Unknown, which the SDK never marks
+// retryable).
+const TRANSIENT_PATTERNS = [
+  "rate limit",
+  "too many requests",
+  "rate increased too quickly",
+  "internal server error",
+  "server error",
+  "service unavailable",
+  "service_unavailable",
+  "bad gateway",
+  "gateway timeout",
+  "gateway time-out",
+  "overloaded",
+  "temporarily unavailable",
+  "please try again",
+  "upstream error",
+  "upstream connect error",
+  "connection error",
+  "connection reset",
+  "connection closed",
+  "socket hang up",
+  "fetch failed",
+  "network error",
+  "request timeout",
+  "timed out",
+  "etimedout",
+  "econnreset",
+  "econnrefused",
+  "econnaborted",
+  "eai_again",
+  "enetunreach",
+  "epipe",
+]
+
+// HTTP status codes that are safe to retry besides 5xx.
+const RETRYABLE_STATUS = new Set([408, 409, 425, 429])
+// Client errors that are fatal and must never be retried via message heuristics.
+const FATAL_STATUS = new Set([400, 401, 403, 404, 405, 406, 410, 413, 422])
+
+function isTransientMessage(text?: string) {
+  if (!text) return false
+  const lower = text.toLowerCase()
+  return TRANSIENT_PATTERNS.some((pattern) => lower.includes(pattern))
+}
+
 export function retryable(error: Err, provider: string) {
   // context overflow errors should not be retried
   if (MessageV2.ContextOverflowError.isInstance(error)) return undefined
   if (MessageV2.APIError.isInstance(error)) {
     const status = error.data.statusCode
-    // 5xx errors are transient server failures and should always be retried,
-    // even when the provider SDK doesn't explicitly mark them as retryable.
-    if (!error.data.isRetryable && !(status !== undefined && status >= 500)) return undefined
+    // Retry transient server failures with backoff. 5xx and known transient status
+    // codes are always retried (even when the SDK doesn't mark them retryable);
+    // gateway/proxy errors that arrive without a status but with a transient message
+    // are retried too — but never for genuinely fatal client errors (auth, bad
+    // request, not found), unless the SDK itself explicitly marked them retryable.
+    const transient =
+      error.data.isRetryable ||
+      (status !== undefined && (status >= 500 || RETRYABLE_STATUS.has(status))) ||
+      ((status === undefined || !FATAL_STATUS.has(status)) &&
+        (isTransientMessage(error.data.message) || isTransientMessage(error.data.responseBody)))
+    if (!transient) return undefined
     if (error.data.responseBody?.includes("FreeUsageLimitError")) {
       return {
         message: GO_UPSELL_MESSAGE,
@@ -121,17 +179,12 @@ export function retryable(error: Err, provider: string) {
     return { message: error.data.message.includes("Overloaded") ? "Provider is overloaded" : error.data.message }
   }
 
-  // Check for rate limit patterns in plain text error messages
+  // Retry transient infrastructure/network/rate-limit failures that surfaced as a
+  // generic error (NamedError.Unknown) instead of a typed APIError — e.g. a gateway
+  // "internal server error" thrown as a plain Error.
   const msg = isRecord(error.data) ? error.data.message : undefined
-  if (typeof msg === "string") {
-    const lower = msg.toLowerCase()
-    if (
-      lower.includes("rate increased too quickly") ||
-      lower.includes("rate limit") ||
-      lower.includes("too many requests")
-    ) {
-      return { message: msg }
-    }
+  if (typeof msg === "string" && isTransientMessage(msg)) {
+    return { message: msg }
   }
 
   const json = parseJSON(msg)

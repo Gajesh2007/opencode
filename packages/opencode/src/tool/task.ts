@@ -392,6 +392,21 @@ export const TaskTool = Tool.define(
           parts,
         })
         const text = result.parts.findLast((item) => item.type === "text")?.text ?? ""
+        // The turn loop stores provider errors on the assistant message and returns
+        // normally (after retries are exhausted or for a non-retryable error). Surface
+        // that as a real failure so the BackgroundJob records "error" and the parent
+        // sees it, instead of silently reporting an empty "completed". Aborts are not
+        // failures.
+        const failure = result.info.role === "assistant" ? result.info.error : undefined
+        if (failure && failure.name !== "MessageAbortedError") {
+          const reason = (failure.data as { message?: string } | undefined)?.message ?? failure.name
+          yield* plugin.trigger(
+            "subagent.stop",
+            { sessionID: ctx.sessionID, agentSessionID: nextSession.id, agent: next.name, status: "error" },
+            { output: text },
+          )
+          return yield* Effect.fail(new Error(reason || "Subagent stopped due to an error"))
+        }
         yield* plugin.trigger(
           "subagent.stop",
           { sessionID: ctx.sessionID, agentSessionID: nextSession.id, agent: next.name, status: "completed" },

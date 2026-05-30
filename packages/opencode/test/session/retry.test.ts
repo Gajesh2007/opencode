@@ -221,6 +221,58 @@ describe("session.retry.retryable", () => {
     expect(SessionRetry.retryable(error, retryProvider)).toBeUndefined()
   })
 
+  test("retries 429 rate limit status even when isRetryable is false", () => {
+    const error = Schema.decodeUnknownSync(MessageV2.APIError.Schema)(
+      new MessageV2.APIError({
+        message: "Too Many Requests",
+        isRetryable: false,
+        statusCode: 429,
+      }).toObject(),
+    )
+
+    expect(SessionRetry.retryable(error, retryProvider)).toEqual({ message: "Too Many Requests" })
+  })
+
+  test("retries gateway internal server errors that arrive without a status", () => {
+    const error = Schema.decodeUnknownSync(MessageV2.APIError.Schema)(
+      new MessageV2.APIError({
+        message: "Internal server error",
+        isRetryable: false,
+      }).toObject(),
+    )
+
+    expect(SessionRetry.retryable(error, retryProvider)).toEqual({ message: "Internal server error" })
+  })
+
+  test("does not retry fatal 4xx errors even with a transient-looking message", () => {
+    const error = Schema.decodeUnknownSync(MessageV2.APIError.Schema)(
+      new MessageV2.APIError({
+        message: "Service unavailable for your plan",
+        isRetryable: false,
+        statusCode: 403,
+      }).toObject(),
+    )
+
+    expect(SessionRetry.retryable(error, retryProvider)).toBeUndefined()
+  })
+
+  test("retries plain-text gateway internal server errors (Unknown)", () => {
+    const msg = "Vercel AI Gateway: internal server error"
+    expect(SessionRetry.retryable(wrap(msg), retryProvider)).toEqual({ message: msg })
+  })
+
+  test("retries plain-text transient network failures (Unknown)", () => {
+    for (const msg of ["fetch failed", "socket hang up", "ETIMEDOUT", "Connection reset by peer", "bad gateway"]) {
+      expect(SessionRetry.retryable(wrap(msg), retryProvider)).toEqual({ message: msg })
+    }
+  })
+
+  test("does not retry plain-text fatal errors (Unknown)", () => {
+    for (const msg of ["invalid api key", "model not found", "unsupported parameter"]) {
+      expect(SessionRetry.retryable(wrap(msg), retryProvider)).toBeUndefined()
+    }
+  })
+
   test("retries ZlibError decompression failures", () => {
     const error = Schema.decodeUnknownSync(MessageV2.APIError.Schema)(
       new MessageV2.APIError({
