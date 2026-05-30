@@ -128,10 +128,18 @@ export const WorkflowTool = Tool.define(
       const parentUserModel = parentUser.info.role === "user" ? parentUser.info.model : undefined
       const parentModel = { modelID: msg.info.modelID, providerID: msg.info.providerID }
 
-      yield* ctx.metadata({
-        title: params.description,
-        metadata: { units: params.units.length, passes: params.passes.length, cells: cellCount },
-      })
+      // Live progress: the UI reads this metadata reactively, so we re-emit it as
+      // cells complete to drive a Claude-style fan-out progress display.
+      const baseMeta = {
+        units: params.units.length,
+        passes: params.passes.length,
+        cells: cellCount,
+        format: params.format ?? "text",
+      }
+      let completed = 0
+      const emitProgress = () =>
+        ctx.metadata({ title: params.description, metadata: { ...baseMeta, completed, phase: "running" } })
+      yield* emitProgress()
 
       // Each spawned session is tracked so an interrupt can cancel in-flight
       // children explicitly (belt-and-suspenders alongside Effect interruption).
@@ -216,6 +224,10 @@ export const WorkflowTool = Tool.define(
                 error: causeText(cause),
               }),
           ),
+          Effect.tap(() => {
+            completed += 1
+            return emitProgress()
+          }),
         )
       })
 
@@ -242,7 +254,7 @@ export const WorkflowTool = Tool.define(
 
         writeArtifact(nodePath.join(runDir, "report.md"), report)
 
-        return [
+        const output = [
           `workflow: ${params.description}`,
           `cells: ${cellCount} (${params.units.length} units x ${params.passes.length} passes)` +
             (errors.length ? `, ${errors.length} failed` : ""),
@@ -255,9 +267,19 @@ export const WorkflowTool = Tool.define(
         ]
           .filter((line) => line !== undefined)
           .join("\n")
+
+        const meta = {
+          ...baseMeta,
+          completed: cellCount,
+          failed: errors.length,
+          phase: "done" as const,
+          ...(synthesisInput.findings !== undefined ? { findings: synthesisInput.findings } : {}),
+          ...(synthesisInput.counts ? { counts: synthesisInput.counts } : {}),
+        }
+        return { output, meta }
       })
 
-      const output = yield* Effect.acquireUseRelease(
+      const result = yield* Effect.acquireUseRelease(
         Effect.sync(() => ctx.abort.addEventListener("abort", onAbort)),
         () => work,
         () => Effect.sync(() => ctx.abort.removeEventListener("abort", onAbort)),
@@ -265,8 +287,8 @@ export const WorkflowTool = Tool.define(
 
       return {
         title: params.description,
-        metadata: { units: params.units.length, passes: params.passes.length, cells: cellCount },
-        output,
+        metadata: result.meta,
+        output: result.output,
       }
     })
 
@@ -300,7 +322,7 @@ function buildFindingsSynthesis(results: CellResult[], runDir: string) {
       .filter((line) => line !== undefined)
       .join("\n")
 
-    return { prompt, summary, fallback: renderFindingsReport(ranked, counts) }
+    return { prompt, summary, fallback: renderFindingsReport(ranked, counts), findings: ranked.length, counts }
   })
 }
 
@@ -322,6 +344,8 @@ function buildTextSynthesis(results: CellResult[], _runDir: string) {
   return {
     prompt: ["## Collected results", body].join("\n\n"),
     summary: undefined as string | undefined,
+    findings: undefined as number | undefined,
+    counts: undefined as Record<string, number> | undefined,
     fallback: body || "(no results produced)",
   }
 }

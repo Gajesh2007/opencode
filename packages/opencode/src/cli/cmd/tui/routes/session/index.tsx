@@ -45,6 +45,11 @@ import { TodoWriteTool } from "@/tool/todo"
 import type { GrepTool } from "@/tool/grep"
 import type { EditTool } from "@/tool/edit"
 import type { ApplyPatchTool } from "@/tool/apply_patch"
+import type { WorkflowTool } from "@/tool/workflow"
+import type { SendMessageTool } from "@/tool/send_message"
+import type { InboxTool } from "@/tool/inbox"
+import type { TeamTasksTool } from "@/tool/team_tasks"
+import type { MemoryTool } from "@/tool/memory"
 import type { WebFetchTool } from "@/tool/webfetch"
 import { webSearchProviderLabel, type WebSearchTool } from "@/tool/websearch"
 import type { TaskTool } from "@/tool/task"
@@ -1673,6 +1678,21 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
         <Match when={props.part.tool === "skill"}>
           <Skill {...toolprops} />
         </Match>
+        <Match when={props.part.tool === "workflow"}>
+          <Workflow {...toolprops} />
+        </Match>
+        <Match when={props.part.tool === "send_message"}>
+          <SendMessage {...toolprops} />
+        </Match>
+        <Match when={props.part.tool === "inbox"}>
+          <Inbox {...toolprops} />
+        </Match>
+        <Match when={props.part.tool === "team_tasks"}>
+          <TeamTasks {...toolprops} />
+        </Match>
+        <Match when={props.part.tool === "memory"}>
+          <Memory {...toolprops} />
+        </Match>
         <Match when={true}>
           <GenericTool {...toolprops} />
         </Match>
@@ -2107,6 +2127,143 @@ function Task(props: ToolProps<typeof TaskTool>) {
     >
       {content()}
     </InlineTool>
+  )
+}
+
+function SeverityCounts(props: { counts?: Record<string, number> }) {
+  const { theme } = useTheme()
+  const items = createMemo(() => {
+    const order: [string, RGBA][] = [
+      ["critical", theme.error],
+      ["high", theme.warning],
+      ["medium", theme.warning],
+      ["low", theme.info],
+      ["info", theme.textMuted],
+    ]
+    return order.filter(([k]) => (props.counts?.[k] ?? 0) > 0)
+  })
+  return (
+    <box flexDirection="row" gap={1}>
+      <For each={items()}>
+        {([k, color]) => (
+          <text fg={color}>
+            {props.counts![k]} {k}
+          </text>
+        )}
+      </For>
+    </box>
+  )
+}
+
+function Workflow(props: ToolProps<typeof WorkflowTool>) {
+  const { theme } = useTheme()
+  const running = createMemo(() => props.part.state.status === "running")
+  const m = createMemo(
+    () =>
+      props.metadata as {
+        units?: number
+        passes?: number
+        cells?: number
+        completed?: number
+        findings?: number
+        counts?: Record<string, number>
+        failed?: number
+      },
+  )
+  const progress = createMemo(() => {
+    const done = m().completed ?? 0
+    const total = m().cells ?? 0
+    return { done, total, pct: total ? Math.round((done / total) * 100) : 0 }
+  })
+  const bar = createMemo(() => {
+    const width = 24
+    const filled = Math.max(0, Math.min(width, Math.round((progress().pct / 100) * width)))
+    return "█".repeat(filled) + "░".repeat(width - filled)
+  })
+  return (
+    <BlockTool title={`▦ Workflow — ${props.input.description ?? "fan-out"}`} part={props.part} spinner={running()}>
+      <text fg={theme.textMuted}>
+        {m().units ?? 0} units × {m().passes ?? 0} passes = {m().cells ?? 0} cells
+      </text>
+      <Show when={(m().cells ?? 0) > 0}>
+        <box flexDirection="row" gap={1}>
+          <text fg={running() ? theme.accent : theme.success}>{bar()}</text>
+          <text fg={theme.textMuted}>
+            {progress().done}/{progress().total} ({progress().pct}%)
+          </text>
+        </box>
+      </Show>
+      <Show when={m().findings !== undefined}>
+        <box flexDirection="row" gap={2}>
+          <text fg={theme.text}>
+            <b>{m().findings}</b> findings
+          </text>
+          <SeverityCounts counts={m().counts} />
+        </box>
+      </Show>
+      <Show when={(m().failed ?? 0) > 0}>
+        <text fg={theme.error}>{m().failed} cells failed</text>
+      </Show>
+    </BlockTool>
+  )
+}
+
+function SendMessage(props: ToolProps<typeof SendMessageTool>) {
+  const local = useLocal()
+  const m = createMemo(() => props.metadata as { from?: string; to?: string; team?: string })
+  return (
+    <InlineTool
+      icon="✉"
+      iconColor={local.agent.color(m().from ?? "")}
+      pending="Sending..."
+      complete={props.input.to}
+      part={props.part}
+    >
+      <span style={{ fg: local.agent.color(m().from ?? "") }}>{m().from ?? "?"}</span> → {props.input.to}:{" "}
+      {props.input.message}
+    </InlineTool>
+  )
+}
+
+function Inbox(props: ToolProps<typeof InboxTool>) {
+  const m = createMemo(() => props.metadata as { count?: number; team?: string })
+  const count = createMemo(() => m().count ?? 0)
+  return (
+    <InlineTool icon="✉" pending="Checking inbox..." complete={true} part={props.part}>
+      Inbox{m().team ? ` · ${m().team}` : ""}: {count()} message{count() === 1 ? "" : "s"}
+    </InlineTool>
+  )
+}
+
+function TeamTasks(props: ToolProps<typeof TeamTasksTool>) {
+  const { theme } = useTheme()
+  const m = createMemo(() => props.metadata as { team?: string })
+  return (
+    <BlockTool
+      title={`☰ Team tasks${m().team ? ` — ${m().team}` : ""}`}
+      part={props.part}
+      spinner={props.part.state.status === "running"}
+    >
+      <Show when={props.output}>
+        <text fg={theme.text}>{props.output}</text>
+      </Show>
+    </BlockTool>
+  )
+}
+
+function Memory(props: ToolProps<typeof MemoryTool>) {
+  const { theme } = useTheme()
+  const m = createMemo(() => props.metadata as { scope?: string })
+  return (
+    <BlockTool
+      title={`◆ Memory${m().scope ? ` (${m().scope})` : ""}`}
+      part={props.part}
+      spinner={props.part.state.status === "running"}
+    >
+      <Show when={props.output}>
+        <text fg={theme.text}>{props.output}</text>
+      </Show>
+    </BlockTool>
   )
 }
 
