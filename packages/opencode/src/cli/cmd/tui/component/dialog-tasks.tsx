@@ -31,6 +31,23 @@ export function DialogTasks() {
     return status?.type === "busy" || status?.type === "retry"
   }
 
+  const backgroundIds = createMemo(() => {
+    const ids = new Set<string>()
+    for (const msgs of Object.values(sync.data.message)) {
+      for (const msg of msgs) {
+        for (const part of sync.data.part[msg.id] ?? []) {
+          if (part.type !== "tool" || part.tool !== "task") continue
+          const meta = (part.state.status === "pending" ? {} : (part.state.metadata ?? {})) as {
+            sessionId?: string
+            background?: boolean
+          }
+          if (meta.background && meta.sessionId) ids.add(meta.sessionId)
+        }
+      }
+    }
+    return ids
+  })
+
   const options = createMemo(() => {
     const subagents = sync.data.session
       .filter((x) => x.parentID !== undefined)
@@ -53,6 +70,7 @@ export function DialogTasks() {
       const meta = [
         agent ? Locale.titlecase(agent) : undefined,
         kind === "fork" ? "fork" : undefined,
+        backgroundIds().has(s.id) ? "background" : undefined,
         tokensFor(s.id) > 0 ? `${Locale.number(tokensFor(s.id))} tokens` : undefined,
         Locale.time(s.time.updated),
       ].filter(Boolean)
