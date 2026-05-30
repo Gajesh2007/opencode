@@ -43,6 +43,7 @@ import { DialogHelp } from "./ui/dialog-help"
 import { DialogAgents } from "@tui/component/dialog-agents"
 import { DialogTasks } from "@tui/component/dialog-tasks"
 import { DialogWorkflows } from "@tui/component/dialog-workflows"
+import { DialogTeams } from "@tui/component/dialog-teams"
 import { DialogSessionList } from "@tui/component/dialog-session-list"
 import { DialogConsoleOrg } from "@tui/component/dialog-console-org"
 import { ThemeProvider, useTheme } from "@tui/context/theme"
@@ -598,6 +599,15 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
         slashName: "workflows",
         run: () => {
           dialog.replace(() => <DialogWorkflows />)
+        },
+      },
+      {
+        name: "teams.list",
+        title: "List agent teams",
+        category: "Agent",
+        slashName: "teams",
+        run: () => {
+          dialog.replace(() => <DialogTeams />)
         },
       },
       {
