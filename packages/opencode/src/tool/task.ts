@@ -140,6 +140,14 @@ function errorText(error: unknown) {
   return String(error)
 }
 
+// Some models (especially reasoning models) end a turn after thinking and/or tool
+// use without writing a final answer, leaving the subagent's reply empty. When that
+// happens we nudge the subagent to produce its result so the calling agent gets a
+// usable reply instead of an empty <task_result>. Bounded to avoid loops.
+const CONTINUE_REPLY_ATTEMPTS = 2
+const CONTINUE_REPLY_PROMPT =
+  "You ended your turn without writing a reply. Provide your final answer for the task above now, as a concise message for the agent that delegated it — summarize what you found or did. Do not start new work unless it is required to answer."
+
 function slugify(input: string) {
   return (
     input
@@ -372,26 +380,49 @@ export const TaskTool = Tool.define(
           {},
         )
         const parts = yield* ops.resolvePromptParts(teamPreamble + params.prompt)
-        const result = yield* ops.prompt({
+        const subagentModel = { modelID: model.modelID, providerID: model.providerID }
+        const subagentTools = {
+          ...(next.permission.some((rule) => rule.permission === "todowrite") ? {} : { todowrite: false }),
+          ...(next.permission.some((rule) => rule.permission === id) ? {} : { task: false }),
+          ...(next.permission.some((rule) => rule.permission === "workflow") ? {} : { workflow: false }),
+          ...Object.fromEntries((cfg.experimental?.primary_tools ?? []).map((item) => [item, false])),
+        }
+        let result = yield* ops.prompt({
           messageID: MessageID.ascending(),
           sessionID: nextSession.id,
-          model: {
-            modelID: model.modelID,
-            providerID: model.providerID,
-          },
+          model: subagentModel,
           agent: next.name,
           variant: inheritedVariant,
           serviceTier: inheritedServiceTier,
           upstream: inheritedUpstream,
-          tools: {
-            ...(next.permission.some((rule) => rule.permission === "todowrite") ? {} : { todowrite: false }),
-            ...(next.permission.some((rule) => rule.permission === id) ? {} : { task: false }),
-            ...(next.permission.some((rule) => rule.permission === "workflow") ? {} : { workflow: false }),
-            ...Object.fromEntries((cfg.experimental?.primary_tools ?? []).map((item) => [item, false])),
-          },
+          tools: subagentTools,
           parts,
         })
-        const text = result.parts.findLast((item) => item.type === "text")?.text ?? ""
+
+        // If the subagent finished thinking but produced no written reply, continue it
+        // and ask for its final answer so the parent doesn't get an empty <task_result>.
+        // Only when the turn succeeded (no error/abort); bounded to avoid loops.
+        const replyText = (r: typeof result) => r.parts.findLast((item) => item.type === "text")?.text ?? ""
+        for (
+          let attempt = 0;
+          attempt < CONTINUE_REPLY_ATTEMPTS &&
+          (result.info.role !== "assistant" || result.info.error === undefined) &&
+          replyText(result).trim() === "";
+          attempt++
+        ) {
+          result = yield* ops.prompt({
+            sessionID: nextSession.id,
+            model: subagentModel,
+            agent: next.name,
+            variant: inheritedVariant,
+            serviceTier: inheritedServiceTier,
+            upstream: inheritedUpstream,
+            tools: subagentTools,
+            parts: [{ type: "text", synthetic: true, text: CONTINUE_REPLY_PROMPT }],
+          })
+        }
+
+        const text = replyText(result)
         // The turn loop stores provider errors on the assistant message and returns
         // normally (after retries are exhausted or for a non-retryable error). Surface
         // that as a real failure so the BackgroundJob records "error" and the parent

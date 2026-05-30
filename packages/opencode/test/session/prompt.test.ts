@@ -736,6 +736,42 @@ it.instance("failed subtask preserves metadata on error tool state", () =>
   }),
 )
 
+it.instance("nudges a subagent that finishes without a written reply", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Empty subagent reply" })
+
+    // Parent delegates via the task tool. The subagent's first turn is reasoning + stop
+    // with NO text (an empty reply) — previously this returned an empty <task_result>.
+    // The nudge continues the subagent, which then produces a real answer.
+    yield* llm.tool("task", {
+      description: "inspect bug",
+      prompt: "look into the cache key path",
+      subagent_type: "general",
+    })
+    yield* llm.push(reply().reason("thinking about it").stop())
+    yield* llm.push(reply().text("FINAL ANSWER from subagent").stop())
+    yield* llm.text("parent done")
+
+    const result = yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      parts: [{ type: "text", text: "delegate the task" }],
+    })
+    expect(result.info.role).toBe("assistant")
+
+    // parent task-call + subagent empty turn + subagent nudge + parent done = 4
+    expect(yield* llm.calls).toBe(4)
+
+    const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
+    const taskMsg = msgs.find((item) => item.info.role === "assistant" && item.info.agent === "build")
+    const tool = taskMsg ? completedTool(taskMsg.parts) : undefined
+    expect(tool?.state.output).toContain("FINAL ANSWER from subagent")
+  }),
+)
+
 it.instance(
   "running subtask preserves metadata after tool-call transition",
   () =>
