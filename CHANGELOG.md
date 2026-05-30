@@ -8,7 +8,7 @@ This file tracks customizations made to this personal fork of opencode on top of
 
 Bespoke renderers for the new tools in the session transcript (`cli/cmd/tui/routes/session/index.tsx`), matching opencode's theme + Claude Code's visual language (bullet/branch grammar, dim metadata, per-agent colors, live progress).
 
-- **Workflow** — renders as a bordered block `▦ Workflow — <desc>` with a spinner while running, a `N units × M passes = K cells` summary, and a **live progress bar** (`████░░░░ 3/6 (50%)`) that fills as cells complete. On completion it shows the **findings count + color-coded severity breakdown** (critical/high → red, medium → warning, low → info, info → muted). Backed by the `workflow` tool now emitting live progress via `ctx.metadata` (`completed`, `findings`, `counts`, `failed`).
+- **Workflow** — renders as a bordered block `▦ Workflow — <desc>` with a spinner, a `N units × M passes = K cells` summary, a **live progress bar** (`████░░░░ 3/6 (50%)`), and a **live per-agent fan-out tree** — one row per cell that flips spinner → `✓`/`✗` with the lens color-coded and its per-cell findings count (`✓ security src/x.ts · 5 findings`), capped with a `+N more` overflow. On completion it shows the **findings count + color-coded severity breakdown** (critical/high → red, medium → warning, low → info, info → muted). Backed by the `workflow` tool emitting live `ctx.metadata` (`completed`, per-cell `cellStatus`, `findings`, `counts`, `failed`). The `task` subagent line is also tinted by its agent color.
 - **send_message** — inline `✉ <from> → <to>: <message>`, with the sender tinted by its agent color.
 - **inbox** — inline `✉ Inbox · <team>: N messages`.
 - **team_tasks** — bordered `☰ Team tasks — <team>` block rendering the shared task list.

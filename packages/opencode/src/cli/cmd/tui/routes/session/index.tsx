@@ -2057,6 +2057,7 @@ function WebSearch(props: ToolProps<typeof WebSearchTool>) {
 function Task(props: ToolProps<typeof TaskTool>) {
   const { navigate } = useRoute()
   const sync = useSync()
+  const local = useLocal()
 
   onMount(() => {
     if (props.metadata.sessionId && !sync.data.message[props.metadata.sessionId]?.length)
@@ -2115,6 +2116,7 @@ function Task(props: ToolProps<typeof TaskTool>) {
   return (
     <InlineTool
       icon="│"
+      iconColor={local.agent.color(props.input.subagent_type ?? "")}
       spinner={isRunning()}
       complete={props.input.description}
       pending="Delegating..."
@@ -2155,6 +2157,40 @@ function SeverityCounts(props: { counts?: Record<string, number> }) {
   )
 }
 
+type WorkflowCellInfo = { unit: string; pass: string; status: string; findings?: number }
+
+function WorkflowCell(props: { cell: WorkflowCellInfo }) {
+  const { theme } = useTheme()
+  const local = useLocal()
+  return (
+    <box flexDirection="row" gap={1} paddingLeft={1}>
+      <Switch>
+        <Match when={props.cell.status === "running"}>
+          <Spinner color={theme.accent} />
+        </Match>
+        <Match when={props.cell.status === "done"}>
+          <text fg={theme.success}>✓</text>
+        </Match>
+        <Match when={props.cell.status === "error"}>
+          <text fg={theme.error}>✗</text>
+        </Match>
+        <Match when={true}>
+          <text fg={theme.textMuted}>∙</text>
+        </Match>
+      </Switch>
+      <text fg={local.agent.color(props.cell.pass)}>{props.cell.pass}</text>
+      <text fg={theme.textMuted} wrapMode="none">
+        {props.cell.unit}
+      </text>
+      <Show when={(props.cell.findings ?? 0) > 0}>
+        <text fg={theme.warning}>
+          · {props.cell.findings} finding{props.cell.findings === 1 ? "" : "s"}
+        </text>
+      </Show>
+    </box>
+  )
+}
+
 function Workflow(props: ToolProps<typeof WorkflowTool>) {
   const { theme } = useTheme()
   const running = createMemo(() => props.part.state.status === "running")
@@ -2168,6 +2204,7 @@ function Workflow(props: ToolProps<typeof WorkflowTool>) {
         findings?: number
         counts?: Record<string, number>
         failed?: number
+        cellStatus?: WorkflowCellInfo[]
       },
   )
   const progress = createMemo(() => {
@@ -2180,6 +2217,10 @@ function Workflow(props: ToolProps<typeof WorkflowTool>) {
     const filled = Math.max(0, Math.min(width, Math.round((progress().pct / 100) * width)))
     return "█".repeat(filled) + "░".repeat(width - filled)
   })
+  const UI_CAP = 30
+  const list = createMemo(() => m().cellStatus ?? [])
+  const visible = createMemo(() => list().slice(0, UI_CAP))
+  const hidden = createMemo(() => Math.max(0, (m().cells ?? list().length) - visible().length))
   return (
     <BlockTool title={`▦ Workflow — ${props.input.description ?? "fan-out"}`} part={props.part} spinner={running()}>
       <text fg={theme.textMuted}>
@@ -2191,6 +2232,16 @@ function Workflow(props: ToolProps<typeof WorkflowTool>) {
           <text fg={theme.textMuted}>
             {progress().done}/{progress().total} ({progress().pct}%)
           </text>
+        </box>
+      </Show>
+      <Show when={visible().length > 0}>
+        <box>
+          <For each={visible()}>{(cell) => <WorkflowCell cell={cell} />}</For>
+          <Show when={hidden() > 0}>
+            <text fg={theme.textMuted} paddingLeft={1}>
+              +{hidden()} more
+            </text>
+          </Show>
         </box>
       </Show>
       <Show when={m().findings !== undefined}>

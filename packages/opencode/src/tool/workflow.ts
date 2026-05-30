@@ -28,6 +28,8 @@ const MAX_CELLS = 20000
 const SYNTH_FINDING_LIMIT = 400
 /** Cap total characters of raw text fed to a text-mode synthesizer. */
 const SYNTH_TEXT_LIMIT = 120_000
+/** Cap how many per-cell rows we put in the live metadata (the UI shows the fan-out tree). */
+const DISPLAY_CELLS = 60
 
 const Unit = Schema.Struct({
   id: Schema.String.annotate({ description: "Identifier for this work item, e.g. a file path" }),
@@ -71,6 +73,14 @@ type CellResult = {
   sessionID: SessionID
   text: string
   error?: string
+}
+
+/** Live per-cell status surfaced to the TUI to render the fan-out tree. */
+type CellLive = {
+  unit: string
+  pass: string
+  status: "pending" | "running" | "done" | "error"
+  findings?: number
 }
 
 export const WorkflowTool = Tool.define(
@@ -137,9 +147,13 @@ export const WorkflowTool = Tool.define(
         format: params.format ?? "text",
       }
       let completed = 0
+      // One live row per cell, surfaced (capped) to the TUI for the fan-out tree.
+      const cellStatus: CellLive[] = []
       const emitProgress = () =>
-        ctx.metadata({ title: params.description, metadata: { ...baseMeta, completed, phase: "running" } })
-      yield* emitProgress()
+        ctx.metadata({
+          title: params.description,
+          metadata: { ...baseMeta, completed, phase: "running", cellStatus: cellStatus.slice(0, DISPLAY_CELLS) },
+        })
 
       // Each spawned session is tracked so an interrupt can cancel in-flight
       // children explicitly (belt-and-suspenders alongside Effect interruption).
@@ -190,16 +204,23 @@ export const WorkflowTool = Tool.define(
         return { sessionID: child.id, text: result.parts.findLast((p) => p.type === "text")?.text ?? "" }
       })
 
-      const cells = params.units.flatMap((unit) =>
-        params.passes.map((pass) => ({
-          unit,
-          pass,
-          prompt: pass.prompt.replace(/\{unit_id\}/g, unit.id).replace(/\{unit_context\}/g, unit.context ?? ""),
-        })),
-      )
+      const cells = params.units
+        .flatMap((unit) =>
+          params.passes.map((pass) => ({
+            unit,
+            pass,
+            prompt: pass.prompt.replace(/\{unit_id\}/g, unit.id).replace(/\{unit_context\}/g, unit.context ?? ""),
+          })),
+        )
+        .map((cell, index) => ({ ...cell, index }))
+
+      for (const cell of cells) cellStatus.push({ unit: cell.unit.id, pass: cell.pass.name, status: "pending" })
+      yield* emitProgress()
 
       const runCell = Effect.fn("WorkflowTool.runCell")(function* (cell: (typeof cells)[number]) {
-        return yield* runAgent({
+        cellStatus[cell.index]!.status = "running"
+        yield* emitProgress()
+        const result = yield* runAgent({
           agent: cell.pass.agent,
           title: `${cell.pass.name}: ${cell.unit.id}`,
           prompt: cell.prompt,
@@ -224,11 +245,20 @@ export const WorkflowTool = Tool.define(
                 error: causeText(cause),
               }),
           ),
-          Effect.tap(() => {
-            completed += 1
-            return emitProgress()
-          }),
         )
+        completed += 1
+        const findings =
+          params.format === "findings" && !result.error
+            ? parseFindings(result.text, { file: cell.unit.id, lens: cell.pass.name }).length
+            : undefined
+        cellStatus[cell.index] = {
+          unit: cell.unit.id,
+          pass: cell.pass.name,
+          status: result.error ? "error" : "done",
+          ...(findings !== undefined ? { findings } : {}),
+        }
+        yield* emitProgress()
+        return result
       })
 
       const cap = yield* limit.cap
@@ -273,6 +303,7 @@ export const WorkflowTool = Tool.define(
           completed: cellCount,
           failed: errors.length,
           phase: "done" as const,
+          cellStatus: cellStatus.slice(0, DISPLAY_CELLS),
           ...(synthesisInput.findings !== undefined ? { findings: synthesisInput.findings } : {}),
           ...(synthesisInput.counts ? { counts: synthesisInput.counts } : {}),
         }
