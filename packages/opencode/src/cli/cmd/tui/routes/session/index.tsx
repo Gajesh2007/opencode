@@ -1532,10 +1532,20 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
     setExpanded((prev) => !prev)
   }
 
+  const hasSignature = createMemo(() => {
+    const meta = props.part.metadata as Record<string, any> | undefined
+    if (!meta) return false
+    return meta.anthropic?.signature != null || meta.bedrock?.signature != null
+  })
+
+  const showReasoning = createMemo(() => {
+    return !!content() || !isDone() || hasSignature()
+  })
+
   return (
-    <Show when={content()}>
+    <Show when={showReasoning()}>
       <Switch>
-        <Match when={!inMinimal() || expanded()}>
+        <Match when={(!inMinimal() || expanded()) && content()}>
           {/* Full markdown block: `show` mode, or `hide` after the user opens it. */}
           <box id={"text-" + props.part.id} paddingLeft={3} marginTop={1} flexDirection="column" onMouseUp={toggle}>
             <code
@@ -1558,7 +1568,7 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
         </Match>
         <Match when={true}>
           <box id={"text-" + props.part.id} paddingLeft={3} marginTop={1} flexShrink={0} onMouseUp={toggle}>
-            <Spinner color={theme.textMuted}>{title() ? "Thinking: " + title() : "Thinking"}</Spinner>
+            <Spinner color={theme.textMuted}>{title() ? "Thinking: " + title() : "Thinking…"}</Spinner>
           </box>
         </Match>
       </Switch>

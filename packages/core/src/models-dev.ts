@@ -106,6 +106,41 @@ export const Provider = Schema.Struct({
 
 export type Provider = Schema.Schema.Type<typeof Provider>
 
+// Models that are live on a provider's API but not yet published to models.dev.
+// Keyed by provider id -> model id. Injected into the fetched catalog so they
+// show up in the model picker until upstream adds them. Remove an entry once
+// models.dev ships it (the merge below never overwrites real upstream data).
+const INJECTED_MODELS: Record<string, Record<string, Model>> = {
+  // MiniMax M3 on the Vercel AI Gateway (1M context, multimodal, agentic).
+  // Pricing/limits mirror the Gateway listing.
+  vercel: {
+    "minimax/minimax-m3": {
+      id: "minimax/minimax-m3",
+      name: "MiniMax M3",
+      family: "minimax",
+      release_date: "2026-05-28",
+      attachment: true,
+      reasoning: true,
+      temperature: true,
+      tool_call: true,
+      cost: { input: 0.3, output: 1.2, cache_read: 0.06, cache_write: 0.375 },
+      limit: { context: 1_000_000, output: 128_000 },
+      modalities: { input: ["text", "image"], output: ["text"] },
+    },
+  },
+}
+
+export function injectModels(data: Record<string, Provider>) {
+  for (const [providerID, models] of Object.entries(INJECTED_MODELS)) {
+    const provider = data[providerID]
+    if (!provider) continue
+    const additions = Object.entries(models).filter(([modelID]) => !provider.models[modelID])
+    if (additions.length === 0) continue
+    data[providerID] = { ...provider, models: { ...provider.models, ...Object.fromEntries(additions) } }
+  }
+  return data
+}
+
 export const Event = {
   Refreshed: EventV2.define({
     type: "models-dev.refreshed",
@@ -190,7 +225,7 @@ export const layer = Layer.effect(
         }),
       )
       return JSON.parse(text) as Record<string, Provider>
-    }).pipe(Effect.withSpan("ModelsDev.populate"), Effect.orDie)
+    }).pipe(Effect.map(injectModels), Effect.withSpan("ModelsDev.populate"), Effect.orDie)
 
     const [cachedGet, invalidate] = yield* Effect.cachedInvalidateWithTTL(populate, Duration.infinity)
 

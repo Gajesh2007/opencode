@@ -608,7 +608,7 @@ function openaiCompatibleReasoningEfforts(id: string) {
 }
 
 function anthropicAdaptiveEfforts(apiId: string): string[] | null {
-  if (["opus-4-7", "opus-4.7"].some((v) => apiId.includes(v))) {
+  if (["opus-4-8", "opus-4.8", "opus-4-7", "opus-4.7"].some((v) => apiId.includes(v))) {
     return ["low", "medium", "high", "xhigh", "max"]
   }
   if (["opus-4-6", "opus-4.6", "sonnet-4-6", "sonnet-4.6"].some((v) => apiId.includes(v))) {
@@ -646,7 +646,6 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
     id.includes("glm") ||
     id.includes("kimi") ||
     id.includes("k2p") ||
-    id.includes("qwen") ||
     id.includes("big-pickle")
   )
     return {}
@@ -699,6 +698,9 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
               {
                 thinking: {
                   type: "adaptive",
+                  ...((model.api.id.includes("opus-4-7") || model.api.id.includes("opus-4.7") || model.api.id.includes("opus-4-8") || model.api.id.includes("opus-4.8"))
+                    ? { display: "summarized" }
+                    : {}),
                 },
                 effort,
               },
@@ -832,7 +834,7 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
       if (adaptiveEfforts) {
         let efforts = [...adaptiveEfforts]
         if (model.providerID === "github-copilot") {
-          if (model.api.id.includes("opus-4.7")) {
+          if (model.api.id.includes("opus-4.7") || model.api.id.includes("opus-4.8")) {
             efforts = ["medium"]
           }
           // Efforts currently supported are: low, medium, high
@@ -844,7 +846,7 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
             {
               thinking: {
                 type: "adaptive",
-                ...(model.api.id.includes("opus-4-7") || model.api.id.includes("opus-4.7")
+                ...((model.api.id.includes("opus-4-7") || model.api.id.includes("opus-4.7") || model.api.id.includes("opus-4-8") || model.api.id.includes("opus-4.8"))
                   ? { display: "summarized" }
                   : {}),
               },
@@ -883,7 +885,7 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
               reasoningConfig: {
                 type: "adaptive",
                 maxReasoningEffort: effort,
-                ...(model.api.id.includes("opus-4-7") || model.api.id.includes("opus-4.7")
+                ...((model.api.id.includes("opus-4-7") || model.api.id.includes("opus-4.7") || model.api.id.includes("opus-4-8") || model.api.id.includes("opus-4.8"))
                   ? { display: "summarized" }
                   : {}),
               },
@@ -1088,16 +1090,17 @@ export function availableUpstreams(model: Provider.Model): string[] {
 // Tier names are user-facing so they show up verbatim in the picker.
 export function serviceTiers(model: Provider.Model): Record<string, Record<string, any>> {
   const apiId = model.api.id.toLowerCase()
-  const isOpus46Or47 = ["opus-4-6", "opus-4.6", "opus-4-7", "opus-4.7"].some((v) => apiId.includes(v))
+  const isOpusFastEligible = ["opus-4-6", "opus-4.6", "opus-4-7", "opus-4.7", "opus-4-8", "opus-4.8"].some((v) => apiId.includes(v))
 
   switch (model.api.npm) {
     case "@ai-sdk/anthropic":
     case "@ai-sdk/google-vertex/anthropic": {
       const tiers: Record<string, Record<string, any>> = {}
-      // Fast mode: Opus 4.6 / 4.7 only. @ai-sdk/anthropic auto-adds the
+      // Fast mode: Opus 4.6 / 4.7 / 4.8. @ai-sdk/anthropic auto-adds the
       // anthropic-beta: fast-mode-2026-02-01 header when speed === "fast".
-      // Pricing is 6x standard. Not compatible with Priority Tier or Batch.
-      if (isOpus46Or47) tiers["fast"] = { speed: "fast" }
+      // Pricing is 2x standard for 4.8, 6x for 4.6/4.7. Not compatible with
+      // Priority Tier or Batch.
+      if (isOpusFastEligible) tiers["fast"] = { speed: "fast" }
       return tiers
     }
 
@@ -1133,7 +1136,7 @@ export function serviceTiers(model: Provider.Model): Record<string, Record<strin
       // gateway.serviceTier. Our gateway providerOptions() routes any non-
       // `gateway` keys under the upstream slug, so emitting flat `{ speed }`
       // here lands as `{ anthropic: { speed: "fast" } }` on the wire.
-      if (apiId.startsWith("anthropic/") && isOpus46Or47) {
+      if (apiId.startsWith("anthropic/") && isOpusFastEligible) {
         tiers["fast"] = { speed: "fast" }
       }
       return tiers
@@ -1228,6 +1231,26 @@ export function options(input: {
       type: "enabled",
       budgetTokens: Math.min(16_000, Math.floor(input.model.limit.output / 2 - 1)),
     }
+  }
+
+  // Enable adaptive thinking by default for Anthropic models that support it
+  const supportsAdaptive = anthropicAdaptiveEfforts(input.model.api.id) !== null
+  const isAnthropicSDKOrGateway =
+    input.model.api.npm === "@ai-sdk/anthropic" ||
+    input.model.api.npm === "@ai-sdk/google-vertex/anthropic" ||
+    input.model.api.npm === "@ai-sdk/gateway"
+
+  if (supportsAdaptive && isAnthropicSDKOrGateway) {
+    const isOpus47Or48 =
+      modelId.includes("opus-4-7") ||
+      modelId.includes("opus-4.7") ||
+      modelId.includes("opus-4-8") ||
+      modelId.includes("opus-4.8")
+    result["thinking"] = {
+      type: "adaptive",
+      ...(isOpus47Or48 ? { display: "summarized" } : {}),
+    }
+    result["effort"] = "medium"
   }
 
   // Enable thinking for reasoning models on alibaba-cn (DashScope).

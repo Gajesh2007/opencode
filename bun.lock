@@ -564,6 +564,36 @@
         "@opentui/solid",
       ],
     },
+    "packages/remote": {
+      "name": "@opencode-ai/remote",
+      "version": "1.0.0",
+      "devDependencies": {
+        "@tsconfig/node22": "catalog:",
+        "@types/bun": "catalog:",
+        "@types/node": "catalog:",
+        "@typescript/native-preview": "catalog:",
+        "typescript": "catalog:",
+      },
+    },
+    "packages/remote/app": {
+      "name": "@opencode-ai/remote-app",
+      "version": "1.0.0",
+      "dependencies": {
+        "@opencode-ai/app": "workspace:*",
+        "@opencode-ai/ui": "workspace:*",
+        "@solidjs/router": "catalog:",
+        "solid-js": "catalog:",
+      },
+      "devDependencies": {
+        "@tailwindcss/vite": "catalog:",
+        "@types/bun": "catalog:",
+        "@types/node": "catalog:",
+        "@typescript/native-preview": "catalog:",
+        "typescript": "catalog:",
+        "vite": "catalog:",
+        "vite-plugin-solid": "catalog:",
+      },
+    },
     "packages/script": {
       "name": "@opencode-ai/script",
       "dependencies": {
@@ -1579,6 +1609,10 @@
     "@opencode-ai/llm": ["@opencode-ai/llm@workspace:packages/llm"],
 
     "@opencode-ai/plugin": ["@opencode-ai/plugin@workspace:packages/plugin"],
+
+    "@opencode-ai/remote": ["@opencode-ai/remote@workspace:packages/remote"],
+
+    "@opencode-ai/remote-app": ["@opencode-ai/remote-app@workspace:packages/remote/app"],
 
     "@opencode-ai/script": ["@opencode-ai/script@workspace:packages/script"],
 

@@ -123,6 +123,46 @@ const initialState: MockState = {
   calls: [],
 }
 
+describe("ModelsDev.injectModels", () => {
+  const withVercel = (models: Record<string, ModelsDev.Model> = {}): Record<string, ModelsDev.Provider> => ({
+    vercel: { id: "vercel", name: "Vercel AI Gateway", env: ["AI_GATEWAY_API_KEY"], npm: "@ai-sdk/gateway", models },
+  })
+
+  it.live("adds MiniMax M3 to the Vercel AI Gateway when missing", () =>
+    Effect.sync(() => {
+      const result = ModelsDev.injectModels(withVercel())
+      const model = result.vercel.models["minimax/minimax-m3"]
+      expect(model?.name).toBe("MiniMax M3")
+      expect(model?.tool_call).toBe(true)
+      expect(model?.limit.context).toBe(1_000_000)
+      expect(model?.cost?.input).toBe(0.3)
+    }),
+  )
+
+  it.live("does not overwrite an existing upstream MiniMax M3", () =>
+    Effect.sync(() => {
+      const upstream: ModelsDev.Model = {
+        id: "minimax/minimax-m3",
+        name: "Upstream Wins",
+        release_date: "2026-06-01",
+        attachment: false,
+        reasoning: true,
+        temperature: true,
+        tool_call: true,
+        limit: { context: 200_000, output: 8192 },
+      }
+      const result = ModelsDev.injectModels(withVercel({ "minimax/minimax-m3": upstream }))
+      expect(result.vercel.models["minimax/minimax-m3"].name).toBe("Upstream Wins")
+    }),
+  )
+
+  it.live("leaves catalogs without the target provider untouched", () =>
+    Effect.sync(() => {
+      expect(ModelsDev.injectModels(structuredClone(fixture))).toEqual(fixture)
+    }),
+  )
+})
+
 describe("ModelsDev Service", () => {
   it.live("get() returns providers from disk when cache file exists", () =>
     Effect.gen(function* () {

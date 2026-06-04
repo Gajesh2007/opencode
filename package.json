@@ -24,6 +24,7 @@
     "packages": [
       "packages/*",
       "packages/console/*",
+      "packages/remote/app",
       "packages/sdk/js",
       "packages/slack"
     ],
