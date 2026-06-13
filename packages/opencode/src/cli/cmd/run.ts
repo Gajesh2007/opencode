@@ -644,6 +644,11 @@ export const RunCommand = effectCmd({
         async function loop(client: OpencodeClient, events: Awaited<ReturnType<typeof sdk.event.subscribe>>) {
           const toggles = new Map<string, boolean>()
           let error: string | undefined
+          // Goal mode (GoalDriver) keeps a session resuming across turns, so a
+          // single idle is not "done": exit only once the session is idle AND no
+          // goal is still active.
+          let goalActive = false
+          let sessionIdle = false
 
           for await (const event of events.stream) {
             if (
@@ -732,13 +737,22 @@ export const RunCommand = effectCmd({
               UI.error(err)
             }
 
-            if (
-              event.type === "session.status" &&
-              event.properties.sessionID === sessionID &&
-              event.properties.status.type === "idle"
-            ) {
-              break
+            if (event.type === "session.status" && event.properties.sessionID === sessionID) {
+              sessionIdle = event.properties.status.type === "idle"
             }
+
+            // goal.updated is forwarded raw over the event stream (not in the typed
+            // SDK union), so read it loosely. Active goal => keep waiting across
+            // idles; terminal => allow exit.
+            {
+              const ev = event as { type: string; properties?: { sessionID?: string; goal?: { status?: string } } }
+              if (ev.type === "goal.updated" && ev.properties?.sessionID === sessionID) {
+                goalActive = ev.properties.goal?.status === "active"
+              }
+            }
+
+            // Exit once the session is idle and no goal is driving it forward.
+            if (sessionIdle && !goalActive) break
 
             if (event.type === "permission.asked") {
               const permission = event.properties

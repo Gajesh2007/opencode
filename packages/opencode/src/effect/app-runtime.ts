@@ -25,6 +25,7 @@ import { Permission } from "@/permission"
 import { Todo } from "@/session/todo"
 import { Goal } from "@/session/goal"
 import { Steering } from "@/session/steering"
+import { GoalDriver } from "@/session/goal-driver"
 import { Session } from "@/session/session"
 import { SessionStatus } from "@/session/status"
 import { SessionRunState } from "@/session/run-state"
@@ -96,6 +97,7 @@ export const AppLayer = Layer.mergeAll(
   SessionRevert.defaultLayer,
   SessionSummary.defaultLayer,
   SessionPrompt.defaultLayer,
+  GoalDriver.defaultLayer,
   Instruction.defaultLayer,
   LLM.defaultLayer,
   LSP.defaultLayer,

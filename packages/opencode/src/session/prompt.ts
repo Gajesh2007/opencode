@@ -16,8 +16,6 @@ import { SystemPrompt } from "./system"
 import { Instruction } from "./instruction"
 import { Plugin } from "../plugin"
 import MAX_STEPS from "../session/prompt/max-steps.txt"
-import GOAL_CONTINUATION from "../session/prompt/goal-continuation.txt"
-import GOAL_BUDGET_LIMIT from "../session/prompt/goal-budget-limit.txt"
 import { ToolRegistry } from "@/tool/registry"
 import { MCP } from "../mcp"
 import { LSP } from "@/lsp/lsp"
@@ -65,7 +63,6 @@ import { SessionTools } from "./tools"
 import { LLMEvent } from "@opencode-ai/llm"
 import { Goal } from "./goal"
 import { Memory } from "@/memory/memory"
-import { Steering } from "./steering"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -129,7 +126,6 @@ export const layer = Layer.effect(
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
     const goals = yield* Goal.Service
-    const steering = yield* Steering.Service
     const memory = yield* Memory.Service
     const ops = Effect.fn("SessionPrompt.ops")(function* () {
       return {
@@ -1506,104 +1502,10 @@ export const layer = Layer.effect(
             Effect.ensuring(instruction.clear(handle.message.id)),
             Effect.onInterrupt(() => finalizeInterruptedAssistant),
           )
-          if (outcome === "break") {
-            // Goal auto-continuation: if a goal is active and the turn finished
-            // normally (not an error), check whether we should auto-continue.
-            const activeGoal = yield* goals.get(sessionID)
-            if (activeGoal && activeGoal.status === "active" && !handle.message.error) {
-              // Account tokens and cost from the completed turn.
-              const turnTokens = handle.message.tokens.input + handle.message.tokens.output
-              const turnCost = handle.message.cost
-              const updated = yield* goals.addUsage({ sessionID, tokens: turnTokens, cost: turnCost })
-              if (!updated) break
-
-              const overTokenBudget = updated.tokenBudget && updated.tokensUsed >= updated.tokenBudget
-              const overCostBudget = updated.costBudget && updated.costUsed >= updated.costBudget
-              if (overTokenBudget || overCostBudget) {
-                // Budget exceeded — inject budget-limit prompt, let model wrap up, then stop.
-                yield* goals.setBudgetLimited(sessionID)
-                yield* sessions.updateMessage(
-                  yield* sessions.updateMessage({
-                    id: MessageID.ascending(),
-                    role: "user",
-                    sessionID,
-                    agent: lastUser.agent,
-                    model: lastUser.model,
-                    time: { created: Date.now() },
-                  }),
-                )
-                yield* sessions.updatePart({
-                  id: PartID.ascending(),
-                  messageID: MessageID.ascending(),
-                  sessionID,
-                  type: "text",
-                  text: renderGoalPrompt(GOAL_BUDGET_LIMIT, updated),
-                  synthetic: true,
-                })
-                // Don't continue the loop — the budget-limit message will be
-                // picked up if the user resumes manually.
-                break
-              }
-
-              // Goal still active and within budget — ask the steering agent
-              // to read the conversation state and produce a continuation
-              // nudge, or fall back to the template-based prompt.
-              yield* goals.resetBlockedTurns(sessionID)
-
-              let continuationText: string
-              const steerResult = yield* steering
-                .steer({
-                  sessionID,
-                  goal: updated,
-                  providerID: lastUser.model.providerID,
-                  modelID: lastUser.model.modelID,
-                })
-                .pipe(Effect.catch(() => Effect.succeed(undefined)))
-
-              if (steerResult?.type === "complete") {
-                yield* goals.update({ sessionID, status: "completed" })
-                break
-              }
-              if (steerResult?.type === "blocked") {
-                const turns = yield* goals.incrementBlockedTurns(sessionID)
-                if (turns >= 3) {
-                  yield* goals.update({ sessionID, status: "blocked" })
-                  break
-                }
-              }
-
-              continuationText = steerResult?.message && steerResult.message.length > 0
-                ? [
-                    "<goal_context>",
-                    `<steering_direction>${steerResult.message}</steering_direction>`,
-                    "",
-                    renderGoalPrompt(GOAL_CONTINUATION, updated),
-                    "</goal_context>",
-                  ].join("\n")
-                : renderGoalPrompt(GOAL_CONTINUATION, updated)
-
-              const contMsg = yield* sessions.updateMessage({
-                id: MessageID.ascending(),
-                role: "user",
-                sessionID,
-                agent: lastUser.agent,
-                model: lastUser.model,
-                time: { created: Date.now() },
-              })
-              yield* sessions.updatePart({
-                id: PartID.ascending(),
-                messageID: contMsg.id,
-                sessionID,
-                type: "text",
-                text: continuationText,
-                synthetic: true,
-              })
-              // Continue the loop — the next iteration will pick up the new
-              // synthetic user message and start a fresh turn.
-              continue
-            }
-            break
-          }
+          // Goal auto-continuation is no longer driven from inside this loop. The
+          // turn ends naturally; GoalDriver (session/goal-driver.ts) subscribes to
+          // session.idle and resumes the session when a goal is still active.
+          if (outcome === "break") break
           continue
         }
 
@@ -1771,7 +1673,7 @@ export const defaultLayer = Layer.suspend(() =>
     Layer.provide(Instruction.defaultLayer),
     Layer.provide(AppFileSystem.defaultLayer),
     Layer.provide(Plugin.defaultLayer),
-    Layer.provide(Layer.mergeAll(Session.defaultLayer, SessionRevert.defaultLayer, SessionSummary.defaultLayer, Goal.defaultLayer, Steering.defaultLayer, Memory.defaultLayer)),
+    Layer.provide(Layer.mergeAll(Session.defaultLayer, SessionRevert.defaultLayer, SessionSummary.defaultLayer, Goal.defaultLayer, Memory.defaultLayer)),
     Layer.provide(Image.defaultLayer),
     Layer.provide(
       Layer.mergeAll(
@@ -1918,25 +1820,6 @@ function formatMemory(content: string, scope: string): string {
     content.trim(),
     "</agent_memory>",
     "This is your persistent memory, loaded from disk. Use the memory tool to append durable facts you'll want next time.",
-  ].join("\n")
-}
-
-function renderGoalPrompt(template: string, goal: Goal.Info): string {
-  const budgetStr = goal.costBudget
-    ? `$${goal.costBudget.toFixed(2)}`
-    : goal.tokenBudget
-      ? `${goal.tokenBudget} tokens`
-      : "unlimited"
-  const usedStr = goal.costBudget
-    ? `$${goal.costUsed.toFixed(4)}`
-    : `${goal.tokensUsed} tokens`
-  return [
-    "<goal_context>",
-    template
-      .replace("${objective}", goal.objective)
-      .replace("${tokensUsed}", usedStr)
-      .replace("${tokenBudget}", budgetStr),
-    "</goal_context>",
   ].join("\n")
 }
 

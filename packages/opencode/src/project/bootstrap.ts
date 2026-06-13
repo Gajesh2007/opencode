@@ -9,10 +9,11 @@ import { Bus } from "../bus"
 import { InstanceState } from "@/effect/instance-state"
 import { FileWatcher } from "@/file/watcher"
 import { ShareNext } from "@/share/share-next"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Option } from "effect"
 import { Config } from "@/config/config"
 import { Service } from "./bootstrap-service"
 import { Reference } from "@/reference/reference"
+import { GoalDriver } from "@/session/goal-driver"
 
 export { Service } from "./bootstrap-service"
 export type { Interface } from "./bootstrap-service"
@@ -49,6 +50,15 @@ export const layer = Layer.effect(
         (s) => s.init().pipe(Effect.catchCause((cause) => Effect.logWarning("init failed", { cause }))),
         { concurrency: "unbounded", discard: true },
       ).pipe(Effect.withSpan("InstanceBootstrap.init"))
+
+      // Start the event-driven goal-mode driver for this instance. Resolved via
+      // serviceOption so bootstrap keeps no static dependency on the session/prompt
+      // graph (present in the app runtime, absent in lightweight bootstraps).
+      const goalDriver = Option.getOrUndefined(yield* Effect.serviceOption(GoalDriver.Service))
+      if (goalDriver)
+        yield* goalDriver
+          .init()
+          .pipe(Effect.catchCause((cause) => Effect.logWarning("goal driver init failed", { cause })))
     }).pipe(Effect.withSpan("InstanceBootstrap"))
 
     return Service.of({ run })
