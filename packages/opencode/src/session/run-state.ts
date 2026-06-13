@@ -74,14 +74,26 @@ export const layer = Layer.effect(
     })
 
     const cancel = Effect.fn("SessionRunState.cancel")(function* (sessionID: SessionID) {
-      yield* cancelBackgroundJobs(background, sessionID)
+      // Cancelling a session must also cancel any subtask child sessions it spawned.
+      // cancelBackgroundJobs walks the job graph and returns every affected session id
+      // (the target + descendants via job metadata.sessionId). A child's run fiber is
+      // forked into the instance scope, so cancelling its background job alone leaves
+      // its runner "Running" (busy) — we must cancel each affected session's runner too.
+      const affected = yield* cancelBackgroundJobs(background, sessionID)
       const data = yield* InstanceState.get(state)
-      const existing = data.runners.get(sessionID)
-      if (!existing || !existing.busy) {
-        yield* status.set(sessionID, { type: "idle" })
-        return
-      }
-      yield* existing.cancel
+      yield* Effect.forEach(
+        affected,
+        (id) =>
+          Effect.gen(function* () {
+            const existing = data.runners.get(id)
+            if (!existing || !existing.busy) {
+              yield* status.set(id, { type: "idle" })
+              return
+            }
+            yield* existing.cancel
+          }),
+        { discard: true },
+      )
     })
 
     const ensureRunning = Effect.fn("SessionRunState.ensureRunning")(function* (
@@ -118,6 +130,9 @@ const cancelBackgroundJobs = Effect.fn("SessionRunState.cancelBackgroundJobs")(f
 ) {
   const jobs = yield* background.list()
   const pending = new Set<string>([sessionID])
+  // Every session id touched (the target + descendant subtask sessions), so the caller
+  // can cancel their runners too.
+  const sessions = new Set<SessionID>([sessionID])
   const cancelled = new Set<string>()
   const matches = (job: BackgroundJob.Info) => {
     if (job.status !== "running") return false
@@ -136,7 +151,10 @@ const cancelBackgroundJobs = Effect.fn("SessionRunState.cancelBackgroundJobs")(f
             Effect.sync(() => {
               cancelled.add(job.id)
               pending.add(job.id)
-              if (typeof job.metadata?.sessionId === "string") pending.add(job.metadata.sessionId)
+              if (typeof job.metadata?.sessionId === "string") {
+                pending.add(job.metadata.sessionId)
+                sessions.add(job.metadata.sessionId as SessionID)
+              }
             }),
           ),
         ),
@@ -144,6 +162,7 @@ const cancelBackgroundJobs = Effect.fn("SessionRunState.cancelBackgroundJobs")(f
     )
     batch = jobs.filter(matches)
   }
+  return sessions
 })
 
 function busyError(sessionID: SessionID) {

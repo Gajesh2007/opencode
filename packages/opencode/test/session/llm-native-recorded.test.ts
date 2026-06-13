@@ -244,6 +244,55 @@ const recordingRedactor = Redactor.compose(
   },
 )
 
+// The recorded request's system prompt is `SystemPrompt.provider(model)` + agent.prompt
+// + system, so it drifts whenever the opencode base prompt changes (and the cassettes
+// predate the current prompt). These tests verify tool-loop BEHAVIOR, not prompt wording,
+// so normalize the system fields on BOTH sides before matching. Handles the Anthropic
+// (`system`), OpenAI Responses (`instructions` / system message in `input`), and Chat
+// Completions (`messages`) shapes.
+const SYSTEM_PLACEHOLDER = "[[system]]"
+function normalizeSystem(body: string): string {
+  let json: unknown
+  try {
+    json = JSON.parse(body)
+  } catch {
+    return body
+  }
+  if (json === null || typeof json !== "object") return body
+  const obj = json as Record<string, unknown>
+  if (Array.isArray(obj.system)) {
+    obj.system = obj.system.map((part) =>
+      part && typeof part === "object"
+        ? { ...(part as Record<string, unknown>), text: SYSTEM_PLACEHOLDER }
+        : SYSTEM_PLACEHOLDER,
+    )
+  } else if (typeof obj.system === "string") {
+    obj.system = SYSTEM_PLACEHOLDER
+  }
+  if (typeof obj.instructions === "string") obj.instructions = SYSTEM_PLACEHOLDER
+  const normalizeRoleMessages = (items: unknown, roles: ReadonlyArray<string>) =>
+    Array.isArray(items)
+      ? items.map((m) => {
+          const role = m && typeof m === "object" ? (m as Record<string, unknown>).role : undefined
+          return typeof role === "string" && roles.includes(role)
+            ? { ...(m as Record<string, unknown>), content: SYSTEM_PLACEHOLDER }
+            : m
+        })
+      : items
+  obj.input = normalizeRoleMessages(obj.input, ["system", "developer"])
+  obj.messages = normalizeRoleMessages(obj.messages, ["system"])
+  if (obj.input === undefined) delete obj.input
+  if (obj.messages === undefined) delete obj.messages
+  return JSON.stringify(obj)
+}
+
+// Request matcher that ignores system-prompt wording (normalizes both sides).
+const systemAgnosticMatcher: HttpRecorder.RequestMatcher = (incoming, recorded) =>
+  HttpRecorder.defaultMatcher(
+    { ...incoming, body: normalizeSystem(incoming.body) },
+    { ...recorded, body: normalizeSystem(recorded.body) },
+  )
+
 function authLayer(scenario: RecordedScenario) {
   const replayAuth = shouldRecord ? scenario.recordAuth?.() : scenario.replayAuth
   if (!replayAuth) return Auth.defaultLayer
@@ -290,6 +339,7 @@ function recordedNativeLLMLayer(scenario: RecordedScenario) {
           tags: scenario.tags,
         },
         redactor: recordingRedactor,
+        match: systemAgnosticMatcher,
       }).pipe(Layer.provide(FetchHttpClient.layer)),
     ),
   )
