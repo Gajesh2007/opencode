@@ -608,7 +608,7 @@ function openaiCompatibleReasoningEfforts(id: string) {
 }
 
 function anthropicAdaptiveEfforts(apiId: string): string[] | null {
-  if (["opus-4-8", "opus-4.8", "opus-4-7", "opus-4.7"].some((v) => apiId.includes(v))) {
+  if (["fable-5", "opus-4-8", "opus-4.8", "opus-4-7", "opus-4.7"].some((v) => apiId.includes(v))) {
     return ["low", "medium", "high", "xhigh", "max"]
   }
   if (["opus-4-6", "opus-4.6", "sonnet-4-6", "sonnet-4.6"].some((v) => apiId.includes(v))) {
@@ -1241,14 +1241,17 @@ export function options(input: {
     input.model.api.npm === "@ai-sdk/gateway"
 
   if (supportsAdaptive && isAnthropicSDKOrGateway) {
-    const isOpus47Or48 =
+    // Models whose raw chain-of-thought is never returned (display defaults to
+    // "omitted"); request summarized thinking so opencode can render reasoning.
+    const summarizedThinking =
+      modelId.includes("fable-5") ||
       modelId.includes("opus-4-7") ||
       modelId.includes("opus-4.7") ||
       modelId.includes("opus-4-8") ||
       modelId.includes("opus-4.8")
     result["thinking"] = {
       type: "adaptive",
-      ...(isOpus47Or48 ? { display: "summarized" } : {}),
+      ...(summarizedThinking ? { display: "summarized" } : {}),
     }
     result["effort"] = "medium"
   }

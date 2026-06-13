@@ -106,10 +106,48 @@ export const Provider = Schema.Struct({
 
 export type Provider = Schema.Schema.Type<typeof Provider>
 
-// Models that are live on a provider's API but not yet published to models.dev.
-// Keyed by provider id -> model id. Injected into the fetched catalog so they
-// show up in the model picker until upstream adds them. Remove an entry once
-// models.dev ships it (the merge below never overwrites real upstream data).
+// Providers and models that are live but not yet published to models.dev.
+// Injected into the fetched catalog so they show up in the model picker until
+// upstream adds them. Remove entries once models.dev ships them (the merge below
+// never overwrites real upstream data).
+const INJECTED_PROVIDERS: Record<string, Provider> = {
+  sakana: {
+    id: "sakana",
+    name: "Sakana API",
+    env: ["SAKANA_API_KEY"],
+    api: "https://api.sakana.ai/v1",
+    npm: "@ai-sdk/openai",
+    models: {
+      "fugu-mini": {
+        id: "fugu-mini",
+        name: "Fugu Mini",
+        family: "fugu",
+        release_date: "2026-06-01",
+        attachment: false,
+        reasoning: true,
+        temperature: false,
+        tool_call: true,
+        cost: { input: 0, output: 0 },
+        limit: { context: 1_000_000, output: 100_000 },
+        modalities: { input: ["text", "image"], output: ["text"] },
+      },
+      "fugu-ultra": {
+        id: "fugu-ultra",
+        name: "Fugu Ultra",
+        family: "fugu",
+        release_date: "2026-06-01",
+        attachment: false,
+        reasoning: true,
+        temperature: false,
+        tool_call: true,
+        cost: { input: 0, output: 0 },
+        limit: { context: 1_000_000, output: 100_000 },
+        modalities: { input: ["text", "image"], output: ["text"] },
+      },
+    },
+  },
+}
+
 const INJECTED_MODELS: Record<string, Record<string, Model>> = {
   // MiniMax M3 on the Vercel AI Gateway (1M context, multimodal, agentic).
   // Pricing/limits mirror the Gateway listing.
@@ -127,10 +165,71 @@ const INJECTED_MODELS: Record<string, Record<string, Model>> = {
       limit: { context: 1_000_000, output: 128_000 },
       modalities: { input: ["text", "image"], output: ["text"] },
     },
+    "nvidia/nemotron-3-ultra-550b-a55b": {
+      id: "nvidia/nemotron-3-ultra-550b-a55b",
+      name: "Nemotron 3 Ultra",
+      family: "nemotron",
+      release_date: "2026-06-04",
+      attachment: false,
+      reasoning: true,
+      temperature: true,
+      tool_call: true,
+      cost: { input: 0.6, output: 3.6 },
+      limit: { context: 1_000_000, output: 131_072 },
+      modalities: { input: ["text"], output: ["text"] },
+    },
+  },
+  // Claude Fable 5: Anthropic's Mythos-class frontier model, GA on Google Cloud's
+  // Gemini Enterprise Agent Platform (formerly Vertex AI) since 2026-06-09. Served
+  // through the Anthropic-on-Vertex SDK. Mirrors the `@default` version convention
+  // models.dev uses for the newest Vertex Claude models (opus-4-8, sonnet-4-6).
+  // 1M context / 128k output, vision (text+image+pdf), always-on reasoning,
+  // $10/M input + $50/M output (standard Anthropic cache ratios).
+  "google-vertex": {
+    "claude-fable-5@default": {
+      id: "claude-fable-5@default",
+      name: "Claude Fable 5",
+      family: "claude-fable",
+      release_date: "2026-06-09",
+      attachment: true,
+      reasoning: true,
+      temperature: false,
+      tool_call: true,
+      cost: { input: 10, output: 50, cache_read: 1, cache_write: 12.5 },
+      limit: { context: 1_000_000, output: 128_000 },
+      modalities: { input: ["text", "image", "pdf"], output: ["text"] },
+      provider: { npm: "@ai-sdk/google-vertex/anthropic" },
+    },
+  },
+  "google-vertex-anthropic": {
+    "claude-fable-5@default": {
+      id: "claude-fable-5@default",
+      name: "Claude Fable 5",
+      family: "claude-fable",
+      release_date: "2026-06-09",
+      attachment: true,
+      reasoning: true,
+      temperature: false,
+      tool_call: true,
+      cost: { input: 10, output: 50, cache_read: 1, cache_write: 12.5 },
+      limit: { context: 1_000_000, output: 128_000 },
+      modalities: { input: ["text", "image", "pdf"], output: ["text"] },
+    },
   },
 }
 
 export function injectModels(data: Record<string, Provider>) {
+  for (const [providerID, injected] of Object.entries(INJECTED_PROVIDERS)) {
+    const provider = data[providerID]
+    if (!provider) {
+      data[providerID] = injected
+      continue
+    }
+    const additions = Object.entries(injected.models).filter(([modelID]) => !provider.models[modelID])
+    if (additions.length === 0) continue
+    data[providerID] = { ...provider, models: { ...provider.models, ...Object.fromEntries(additions) } }
+  }
+
   for (const [providerID, models] of Object.entries(INJECTED_MODELS)) {
     const provider = data[providerID]
     if (!provider) continue

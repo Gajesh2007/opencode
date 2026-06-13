@@ -128,6 +128,17 @@ describe("ModelsDev.injectModels", () => {
     vercel: { id: "vercel", name: "Vercel AI Gateway", env: ["AI_GATEWAY_API_KEY"], npm: "@ai-sdk/gateway", models },
   })
 
+  const withSakana = (models: Record<string, ModelsDev.Model> = {}): Record<string, ModelsDev.Provider> => ({
+    sakana: {
+      id: "sakana",
+      name: "Upstream Sakana",
+      env: ["UPSTREAM_SAKANA_API_KEY"],
+      api: "https://upstream.sakana.example/v1",
+      npm: "@ai-sdk/openai-compatible",
+      models,
+    },
+  })
+
   it.live("adds MiniMax M3 to the Vercel AI Gateway when missing", () =>
     Effect.sync(() => {
       const result = ModelsDev.injectModels(withVercel())
@@ -136,6 +147,36 @@ describe("ModelsDev.injectModels", () => {
       expect(model?.tool_call).toBe(true)
       expect(model?.limit.context).toBe(1_000_000)
       expect(model?.cost?.input).toBe(0.3)
+    }),
+  )
+
+  it.live("adds Nemotron 3 Ultra to the Vercel AI Gateway when missing", () =>
+    Effect.sync(() => {
+      const result = ModelsDev.injectModels(withVercel())
+      const model = result.vercel.models["nvidia/nemotron-3-ultra-550b-a55b"]
+      expect(model?.name).toBe("Nemotron 3 Ultra")
+      expect(model?.tool_call).toBe(true)
+      expect(model?.reasoning).toBe(true)
+      expect(model?.limit.context).toBe(1_000_000)
+      expect(model?.cost?.input).toBe(0.6)
+      expect(model?.cost?.output).toBe(3.6)
+    }),
+  )
+
+  it.live("adds Sakana Fugu provider when missing", () =>
+    Effect.sync(() => {
+      const result = ModelsDev.injectModels({})
+      const provider = result.sakana
+      expect(provider?.name).toBe("Sakana API")
+      expect(provider?.env).toEqual(["SAKANA_API_KEY"])
+      expect(provider?.api).toBe("https://api.sakana.ai/v1")
+      expect(provider?.npm).toBe("@ai-sdk/openai")
+      expect(provider?.models["fugu-mini"]?.name).toBe("Fugu Mini")
+      expect(provider?.models["fugu-mini"]?.reasoning).toBe(true)
+      expect(provider?.models["fugu-mini"]?.tool_call).toBe(true)
+      expect(provider?.models["fugu-mini"]?.limit.context).toBe(1_000_000)
+      expect(provider?.models["fugu-ultra"]?.name).toBe("Fugu Ultra")
+      expect(provider?.models["fugu-ultra"]?.limit.context).toBe(1_000_000)
     }),
   )
 
@@ -156,14 +197,40 @@ describe("ModelsDev.injectModels", () => {
     }),
   )
 
-  it.live("leaves catalogs without the target provider untouched", () =>
+  it.live("does not overwrite an existing upstream Sakana provider or model", () =>
     Effect.sync(() => {
-      expect(ModelsDev.injectModels(structuredClone(fixture))).toEqual(fixture)
+      const upstream: ModelsDev.Model = {
+        id: "fugu-mini",
+        name: "Upstream Fugu Mini",
+        release_date: "2026-06-01",
+        attachment: false,
+        reasoning: false,
+        temperature: false,
+        tool_call: false,
+        limit: { context: 128_000, output: 4096 },
+      }
+      const result = ModelsDev.injectModels(withSakana({ "fugu-mini": upstream }))
+      expect(result.sakana.name).toBe("Upstream Sakana")
+      expect(result.sakana.env).toEqual(["UPSTREAM_SAKANA_API_KEY"])
+      expect(result.sakana.api).toBe("https://upstream.sakana.example/v1")
+      expect(result.sakana.npm).toBe("@ai-sdk/openai-compatible")
+      expect(result.sakana.models["fugu-mini"].name).toBe("Upstream Fugu Mini")
+      expect(result.sakana.models["fugu-ultra"].name).toBe("Fugu Ultra")
+    }),
+  )
+
+  it.live("preserves unrelated catalog entries while adding injected providers", () =>
+    Effect.sync(() => {
+      const result = ModelsDev.injectModels(structuredClone(fixture))
+      expect(result.acme).toEqual(fixture.acme)
+      expect(result.sakana).toBeDefined()
     }),
   )
 })
 
 describe("ModelsDev Service", () => {
+  const injected = (data: Record<string, ModelsDev.Provider>) => ModelsDev.injectModels(structuredClone(data))
+
   it.live("get() returns providers from disk when cache file exists", () =>
     Effect.gen(function* () {
       yield* writeCache(fixture)
@@ -172,20 +239,20 @@ describe("ModelsDev Service", () => {
         state,
         ModelsDev.Service.use((s) => s.get()),
       )
-      expect(result).toEqual(fixture)
+      expect(result).toEqual(injected(fixture))
       const final = yield* Ref.get(state)
       expect(final.calls).toEqual([])
     }),
   )
 
-  it.live("get() returns empty catalog when disk empty, fetch disabled, and no bundled snapshot is injected", () =>
+  it.live("get() returns injected providers when disk empty, fetch disabled, and no bundled snapshot is injected", () =>
     Effect.gen(function* () {
       const state = yield* Ref.make(initialState)
       const result = yield* provided(
         state,
         ModelsDev.Service.use((s) => s.get()),
       )
-      expect(result).toEqual({})
+      expect(Object.keys(result)).toEqual(["sakana"])
       const final = yield* Ref.get(state)
       expect(final.calls).toEqual([])
     }),
@@ -204,7 +271,7 @@ describe("ModelsDev Service", () => {
           })
         }),
       )
-      for (const result of results) expect(result).toEqual(fixture)
+      for (const result of results) expect(result).toEqual(injected(fixture))
     }),
   )
 
@@ -223,8 +290,8 @@ describe("ModelsDev Service", () => {
           return { a, b }
         }),
       )
-      expect(first.a).toEqual(fixture)
-      expect(first.b).toEqual(fixture)
+      expect(first.a).toEqual(injected(fixture))
+      expect(first.b).toEqual(injected(fixture))
     }),
   )
 
@@ -242,8 +309,8 @@ describe("ModelsDev Service", () => {
           return { before, after }
         }),
       )
-      expect(result.before).toEqual(fixture)
-      expect(result.after).toEqual(fixture2)
+      expect(result.before).toEqual(injected(fixture))
+      expect(result.after).toEqual(injected(fixture2))
       const final = yield* Ref.get(state)
       expect(final.calls.length).toBe(1)
       expect(final.calls[0].url).toContain("/api.json")
@@ -280,7 +347,7 @@ describe("ModelsDev Service", () => {
       )
       const final = yield* Ref.get(state)
       expect(final.calls.length).toBe(1)
-      expect(after).toEqual(fixture2)
+      expect(after).toEqual(injected(fixture2))
     }),
   )
 
@@ -296,7 +363,7 @@ describe("ModelsDev Service", () => {
           return yield* svc.get()
         }),
       )
-      expect(result).toEqual(fixture)
+      expect(result).toEqual(injected(fixture))
       // retryTransient retries 5xx, so calls may be > 1.
       const final = yield* Ref.get(state)
       expect(final.calls.length).toBeGreaterThanOrEqual(1)

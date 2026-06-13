@@ -216,6 +216,33 @@ it.instance(
   },
 )
 
+it.instance("loads injected Sakana Fugu models from SAKANA_API_KEY", () =>
+  Effect.gen(function* () {
+    yield* set("SAKANA_API_KEY", "test-sakana-key")
+    const providers = yield* list
+    const provider = providers[ProviderID.make("sakana")]
+    expect(provider).toBeDefined()
+    expect(provider.source).toBe("env")
+    expect(provider.env).toEqual(["SAKANA_API_KEY"])
+    expect(provider.models["fugu-mini"].name).toBe("Fugu Mini")
+    expect(provider.models["fugu-mini"].api.npm).toBe("@ai-sdk/openai")
+    expect(provider.models["fugu-mini"].api.url).toBe("https://api.sakana.ai/v1")
+    expect(provider.models["fugu-mini"].capabilities.reasoning).toBe(true)
+    expect(provider.models["fugu-mini"].capabilities.toolcall).toBe(true)
+    expect(provider.models["fugu-ultra"].name).toBe("Fugu Ultra")
+  }),
+)
+
+it.instance("loads Sakana Fugu through the OpenAI Responses SDK path", () =>
+  Effect.gen(function* () {
+    yield* set("SAKANA_API_KEY", "test-sakana-key")
+    const provider = yield* Provider.Service
+    const model = yield* provider.getModel(ProviderID.make("sakana"), ModelID.make("fugu-mini"))
+    const language = yield* provider.getLanguage(model)
+    expect((language as { provider: string }).provider).toBe("sakana.responses")
+  }),
+)
+
 it.instance(
   "filters alpha provider models by default",
   Effect.gen(function* () {
