@@ -30,6 +30,11 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
 
 const DOOM_LOOP_THRESHOLD = 3
+// Re-issue a request that "succeeded" but produced no output at all — no text,
+// reasoning, or tool call — which usually means the provider/gateway ended the
+// turn before inference really ran. Bounded so a persistently-empty provider
+// can't loop forever; after this many retries we accept the empty turn.
+const EMPTY_COMPLETION_MAX_RETRIES = 2
 const log = Log.create({ service: "session.processor" })
 
 export type Result = "compact" | "stop" | "continue"
@@ -78,6 +83,11 @@ interface ProcessorContext extends Input {
   needsCompaction: boolean
   currentText: MessageV2.TextPart | undefined
   reasoningMap: Record<string, MessageV2.ReasoningPart>
+  // Whether the current stream attempt produced any output (text, reasoning, or a
+  // tool call). Reset per attempt; used to detect a hollow completion to retry.
+  streamedAny: boolean
+  // Hollow-completion retries used this turn (bounded by EMPTY_COMPLETION_MAX_RETRIES).
+  emptyCompletionRetries: number
 }
 
 type StreamEvent = LLMEvent
@@ -118,6 +128,8 @@ export const layer = Layer.effect(
         needsCompaction: false,
         currentText: undefined,
         reasoningMap: {},
+        streamedAny: false,
+        emptyCompletionRetries: 0,
       }
       let aborted = false
       const slog = log.clone().tag("session.id", input.sessionID).tag("messageID", input.assistantMessage.id)
@@ -286,6 +298,7 @@ export const layer = Layer.effect(
         name: string
         providerExecuted?: boolean
       }) {
+        ctx.streamedAny = true
         const existing = yield* readToolCall(input.id)
         if (existing) {
           if (!input.providerExecuted || existing.part.metadata?.providerExecuted) return existing
@@ -364,6 +377,7 @@ export const layer = Layer.effect(
         }
         switch (value.type) {
           case "reasoning-start":
+            ctx.streamedAny = true
             if (value.id in ctx.reasoningMap) return
             // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
             if (flags.experimentalEventSystem) {
@@ -692,6 +706,7 @@ export const layer = Layer.effect(
           }
 
           case "text-start":
+            ctx.streamedAny = true
             if (!ctx.assistantMessage.summary) {
               // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
               if (flags.experimentalEventSystem) {
@@ -864,6 +879,7 @@ export const layer = Layer.effect(
           yield* Effect.gen(function* () {
             ctx.currentText = undefined
             ctx.reasoningMap = {}
+            ctx.streamedAny = false
             yield* status.set(ctx.sessionID, { type: "busy" })
             const stream = llm.stream(streamInput)
 
@@ -872,6 +888,24 @@ export const layer = Layer.effect(
               Stream.takeUntil(() => ctx.needsCompaction),
               Stream.runDrain,
             )
+
+            // A provider/gateway sometimes ends a turn "successfully" (finish
+            // reason, no error) without producing ANY output — no text, reasoning,
+            // or tool call — e.g. an early stream close or a hiccup where inference
+            // never really ran. That isn't an error, so the retry boundary below
+            // never sees it and the agent would stop on an empty turn. Re-issue the
+            // request (bounded, with backoff) by failing with a retryable sentinel.
+            // Aborts and compaction are legitimate stops, not hollow completions.
+            if (
+              !aborted &&
+              !ctx.needsCompaction &&
+              !ctx.streamedAny &&
+              ctx.emptyCompletionRetries < EMPTY_COMPLETION_MAX_RETRIES
+            ) {
+              ctx.emptyCompletionRetries++
+              slog.warn("empty completion, retrying", { attempt: ctx.emptyCompletionRetries })
+              return yield* Effect.fail(new Error(SessionRetry.EMPTY_COMPLETION_RETRY_SIGNAL))
+            }
           }).pipe(
             Effect.onInterrupt(() =>
               Effect.gen(function* () {

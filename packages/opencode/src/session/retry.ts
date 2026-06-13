@@ -27,6 +27,14 @@ export const RETRY_BACKOFF_FACTOR = 2
 export const RETRY_MAX_DELAY_NO_HEADERS = 30_000 // 30 seconds
 export const RETRY_MAX_DELAY = 2_147_483_647 // max 32-bit signed integer for setTimeout
 
+// Sentinel error message the session processor throws to flag a "hollow"
+// successful turn — one where the provider/gateway ended the stream without
+// producing any output (no text, reasoning, or tool call), as if inference never
+// ran. It is routed through the same retry+backoff path as transient errors so
+// the request is re-issued; the processor itself bounds how many times this can
+// happen, so it is always treated as retryable here.
+export const EMPTY_COMPLETION_RETRY_SIGNAL = "opencode:empty-completion-retry"
+
 function cap(ms: number) {
   return Math.min(ms, RETRY_MAX_DELAY)
 }
@@ -117,6 +125,15 @@ function isTransientMessage(text?: string) {
 export function retryable(error: Err, provider: string) {
   // context overflow errors should not be retried
   if (MessageV2.ContextOverflowError.isInstance(error)) return undefined
+  // Hollow/premature completion flagged by the processor — always retryable here;
+  // the processor bounds the attempt count before it stops throwing this signal.
+  if (
+    isRecord(error.data) &&
+    typeof error.data.message === "string" &&
+    error.data.message.includes(EMPTY_COMPLETION_RETRY_SIGNAL)
+  ) {
+    return { message: "Provider returned an empty response — retrying" }
+  }
   if (MessageV2.APIError.isInstance(error)) {
     const status = error.data.statusCode
     // Retry transient server failures with backoff. 5xx and known transient status

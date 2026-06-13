@@ -255,6 +255,110 @@ it.live("session.processor effect tests capture llm input cleanly", () =>
   ),
 )
 
+it.live("session.processor effect tests retry a hollow completion with no output", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+
+        // First turn finishes "successfully" with no text / reasoning / tool — a
+        // hollow completion (provider ended before inference really ran). The
+        // processor must re-issue the request rather than accept the empty turn.
+        yield* llm.push(reply().stop())
+        yield* llm.push(reply().text("recovered answer").stop())
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "hi")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({
+          assistantMessage: msg,
+          sessionID: chat.id,
+          model: mdl,
+        })
+
+        const input = {
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies MessageV2.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "hi" }],
+          tools: {},
+        } satisfies LLM.StreamInput
+
+        const value = yield* handle.process(input)
+        const parts = MessageV2.parts(msg.id)
+        const calls = yield* llm.calls
+
+        // hollow attempt + one retry = 2 calls; the recovered text reaches the message.
+        expect(calls).toBe(2)
+        expect(value).toBe("continue")
+        expect(parts.some((part) => part.type === "text" && part.text === "recovered answer")).toBe(true)
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
+it.live("session.processor effect tests stop retrying empty completions after the cap", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+
+        // Every attempt is hollow. The processor must give up after the bounded
+        // cap (EMPTY_COMPLETION_MAX_RETRIES) instead of looping forever. Queue
+        // exactly initial + cap = 3 so a 4th call (a bug) would hit the auto
+        // fallback and fail the count assertion rather than be masked.
+        for (let i = 0; i < 3; i++) yield* llm.push(reply().stop())
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "hi")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({
+          assistantMessage: msg,
+          sessionID: chat.id,
+          model: mdl,
+        })
+
+        const input = {
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies MessageV2.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "hi" }],
+          tools: {},
+        } satisfies LLM.StreamInput
+
+        const value = yield* handle.process(input)
+        const calls = yield* llm.calls
+
+        // initial attempt + EMPTY_COMPLETION_MAX_RETRIES (2) = 3 calls, then accept.
+        expect(calls).toBe(3)
+        expect(value).toBe("continue")
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+  // Two real backoffs (2s + 4s) exceed the default 5s test timeout.
+  15_000,
+)
+
 it.live("session.processor effect tests preserve text start time", () =>
   provideTmpdirServer(
     ({ dir, llm }) =>
@@ -653,7 +757,9 @@ it.live("session.processor effect tests publish retry status updates", () =>
         const bus = yield* Bus.Service
 
         yield* llm.error(503, { error: "boom" })
-        yield* llm.text("")
+        // Non-empty success: an empty-text turn is now treated as a hollow
+        // completion and retried, which would add an extra call to this count.
+        yield* llm.text("recovered")
 
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "retry")
