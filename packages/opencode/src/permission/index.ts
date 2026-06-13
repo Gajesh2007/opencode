@@ -9,7 +9,7 @@ import { Database } from "@/storage/db"
 import { eq } from "drizzle-orm"
 import * as Log from "@opencode-ai/core/util/log"
 import { Wildcard } from "@opencode-ai/core/util/wildcard"
-import { Deferred, Effect, Layer, Schema, Context } from "effect"
+import { Deferred, Duration, Effect, Layer, Schema, Context } from "effect"
 import os from "os"
 import { PermissionV2 } from "@opencode-ai/core/permission"
 import { PermissionID } from "./schema"
@@ -187,6 +187,13 @@ export const layer = Layer.effect(
 
       if (!needsAsk) return
 
+      const yoloEnabled = process.env.OPENCODE_YOLO === "true"
+
+      if (yoloEnabled && request.permission !== "external_directory") {
+        log.info("yolo auto-approved", { permission: request.permission, patterns: request.patterns })
+        return
+      }
+
       const id = request.id ?? PermissionID.ascending()
       const info: Request = {
         id,
@@ -202,6 +209,28 @@ export const layer = Layer.effect(
       const deferred = yield* Deferred.make<void, RejectedError | CorrectedError>()
       pending.set(id, { info, deferred })
       yield* bus.publish(Event.Asked, info)
+
+      if (yoloEnabled) {
+        yield* Effect.gen(function* () {
+          yield* Effect.sleep(Duration.seconds(30))
+          const didFail = yield* Deferred.fail(
+            deferred,
+            new CorrectedError({
+              feedback:
+                "The user is not currently active. No response was received within 30 seconds. Continue working within your current permission set. Deleting files outside the working directory requires explicit user approval.",
+            }),
+          )
+          if (didFail) {
+            pending.delete(id)
+            yield* bus.publish(Event.Replied, {
+              sessionID: info.sessionID,
+              requestID: info.id,
+              reply: "reject" as const,
+            })
+          }
+        }).pipe(Effect.forkDetach)
+      }
+
       return yield* Effect.ensuring(
         Deferred.await(deferred),
         Effect.sync(() => {

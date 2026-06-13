@@ -238,12 +238,19 @@ export const RunCommand = effectCmd({
         describe: "auto-approve permissions that are not explicitly denied (dangerous!)",
         default: false,
       })
+      .option("yolo", {
+        type: "boolean",
+        describe:
+          "YOLO mode: auto-approve all permissions; prompt for external directory access with 30s timeout (auto-skip if no reply)",
+        default: false,
+      })
       .option("demo", {
         type: "boolean",
         default: false,
         describe: "enable direct interactive demo slash commands; pass one as the message to run it immediately",
       }),
   handler: Effect.fn("Cli.run")(function* (args) {
+    if (args.yolo) process.env.OPENCODE_YOLO = "true"
     const agentSvc = yield* Agent.Service
     const flags = yield* RuntimeFlags.Service
     const localInstance = yield* InstanceRef

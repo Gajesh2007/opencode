@@ -111,8 +111,15 @@ export const TuiThreadCommand = cmd({
       .option("agent", {
         type: "string",
         describe: "agent to use",
+      })
+      .option("yolo", {
+        type: "boolean",
+        describe:
+          "YOLO mode: auto-approve all permissions; prompt for external directory access with 30s timeout (auto-skip if no reply)",
+        default: false,
       }),
   handler: async (args) => {
+    if (args.yolo) process.env.OPENCODE_YOLO = "true"
     // Keep ENABLE_PROCESSED_INPUT cleared even if other code flips it.
     // (Important when running under `bun run` wrappers on Windows.)
     const unguard = win32InstallCtrlCGuard()
