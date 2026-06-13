@@ -150,6 +150,23 @@ export const GoalTable = sqliteTable(
   (table) => [index("goal_session_idx").on(table.session_id)],
 )
 
+export const MetaAgentTable = sqliteTable(
+  "metaagent",
+  {
+    session_id: text()
+      .$type<SessionID>()
+      .notNull()
+      .references(() => SessionTable.id, { onDelete: "cascade" }),
+    enabled: integer().notNull().default(0),
+    base_prompt: text().notNull().default(""),
+    model_provider: text(),
+    model_id: text(),
+    effort: text().$type<"low" | "medium" | "high" | "xhigh" | "max">(),
+    ...Timestamps,
+  },
+  (table) => [index("metaagent_session_idx").on(table.session_id)],
+)
+
 export const PermissionTable = sqliteTable("permission", {
   project_id: text()
     .primaryKey()

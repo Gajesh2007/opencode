@@ -12,6 +12,7 @@ import PROMPT_COMPACTION from "./prompt/compaction.txt"
 import PROMPT_EXPLORE from "./prompt/explore.txt"
 import PROMPT_SCOUT from "./prompt/scout.txt"
 import PROMPT_STEER from "./prompt/steer.txt"
+import PROMPT_REASONING_REVIEWER from "./prompt/reasoning-reviewer.txt"
 import PROMPT_SUMMARY from "./prompt/summary.txt"
 import PROMPT_TITLE from "./prompt/title.txt"
 import PROMPT_REVIEW_SECURITY from "./prompt/review-security.txt"
@@ -449,6 +450,26 @@ export const layer = Layer.effect(
               user,
             ),
             prompt: PROMPT_STEER,
+          },
+          "reasoning-reviewer": {
+            name: "reasoning-reviewer",
+            mode: "primary",
+            options: {},
+            native: true,
+            hidden: true,
+            temperature: 0.2,
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                "*": "deny",
+                grep: "allow",
+                glob: "allow",
+                read: "allow",
+                external_directory: readonlyExternalDirectory,
+              }),
+              user,
+            ),
+            prompt: PROMPT_REASONING_REVIEWER,
           },
         }
 

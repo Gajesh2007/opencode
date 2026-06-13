@@ -50,6 +50,8 @@ import { Skill } from "../../src/skill"
 import { SystemPrompt } from "../../src/session/system"
 import { Todo } from "../../src/session/todo"
 import { Goal } from "../../src/session/goal"
+import { MetaAgent } from "../../src/session/metaagent"
+import { ReasoningReviewer } from "../../src/session/reasoning-reviewer"
 import { Steering } from "../../src/session/steering"
 import { SessionCompaction } from "../../src/session/compaction"
 import { Instruction } from "../../src/session/instruction"
@@ -181,7 +183,16 @@ function makeHttp() {
       Layer.provideMerge(registry),
       Layer.provideMerge(trunc),
       Layer.provide(Instruction.defaultLayer),
-      Layer.provide(Layer.mergeAll(SystemPrompt.defaultLayer, Goal.defaultLayer, Steering.defaultLayer, Memory.defaultLayer)),
+      Layer.provide(
+        Layer.mergeAll(
+          SystemPrompt.defaultLayer,
+          Goal.defaultLayer,
+          MetaAgent.defaultLayer,
+          ReasoningReviewer.defaultLayer,
+          Steering.defaultLayer,
+          Memory.defaultLayer,
+        ),
+      ),
       Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
       Layer.provideMerge(deps),
     ),

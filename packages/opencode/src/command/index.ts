@@ -10,6 +10,7 @@ import { Skill } from "../skill"
 import PROMPT_INITIALIZE from "./template/initialize.txt"
 import PROMPT_REVIEW from "./template/review.txt"
 import PROMPT_BATCH from "./template/batch.txt"
+import PROMPT_METAAGENT from "./template/metaagent.txt"
 
 type State = {
   commands: Record<string, Info>
@@ -55,6 +56,7 @@ export const Default = {
   INIT: "init",
   REVIEW: "review",
   BATCH: "batch",
+  METAAGENT: "metaagent",
 } as const
 
 export interface Interface {
@@ -106,6 +108,15 @@ export const layer = Layer.effect(
         },
         subtask: true,
         hints: hints(PROMPT_BATCH),
+      }
+      commands[Default.METAAGENT] = {
+        name: Default.METAAGENT,
+        description: "configure the reasoning reviewer (meta agent): lens, model, effort",
+        source: "command",
+        get template() {
+          return PROMPT_METAAGENT
+        },
+        hints: hints(PROMPT_METAAGENT),
       }
 
       for (const [name, command] of Object.entries(cfg.command ?? {})) {

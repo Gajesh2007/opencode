@@ -14,6 +14,7 @@ import { Plugin } from "@/plugin"
 import { Question } from "@/question"
 import { Todo } from "@/session/todo"
 import { Goal } from "@/session/goal"
+import { MetaAgent } from "@/session/metaagent"
 import { Skill } from "@/skill"
 import { Agent } from "@/agent/agent"
 import { SubagentLimit } from "@/agent/subagent-limit"
@@ -54,7 +55,7 @@ const registryLayer = (opts: RegistryLayerOptions = {}) =>
     .pipe(
       Layer.provide(configLayer),
       Layer.provide(opts.plugin ?? Plugin.defaultLayer),
-      Layer.provide(Layer.mergeAll(Question.defaultLayer, Todo.defaultLayer, Goal.defaultLayer)),
+      Layer.provide(Layer.mergeAll(Question.defaultLayer, Todo.defaultLayer, Goal.defaultLayer, MetaAgent.defaultLayer)),
       Layer.provide(Skill.defaultLayer),
       Layer.provide(Agent.defaultLayer),
       Layer.provide(Session.defaultLayer),

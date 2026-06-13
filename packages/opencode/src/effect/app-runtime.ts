@@ -24,7 +24,9 @@ import { Question } from "@/question"
 import { Permission } from "@/permission"
 import { Todo } from "@/session/todo"
 import { Goal } from "@/session/goal"
+import { MetaAgent } from "@/session/metaagent"
 import { Steering } from "@/session/steering"
+import { ReasoningReviewer } from "@/session/reasoning-reviewer"
 import { GoalDriver } from "@/session/goal-driver"
 import { Session } from "@/session/session"
 import { SessionStatus } from "@/session/status"
@@ -86,7 +88,9 @@ export const AppLayer = Layer.mergeAll(
   Permission.defaultLayer,
   Todo.defaultLayer,
   Goal.defaultLayer,
+  MetaAgent.defaultLayer,
   Steering.defaultLayer,
+  ReasoningReviewer.defaultLayer,
   Session.defaultLayer,
   SessionStatus.defaultLayer,
   BackgroundJob.defaultLayer,

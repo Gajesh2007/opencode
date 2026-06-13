@@ -329,7 +329,9 @@ const lowerToolResultOutput = Effect.fn("OpenAIResponses.lowerToolResultOutput")
   // Text/json/error results are encoded as a plain string for backward
   // compatibility with existing cassettes and provider expectations.
   if (part.result.type !== "content") return ProviderShared.toolResultText(part)
-  return yield* Effect.forEach(part.result.value, lowerToolResultContentItem)
+  // Explicit element type: keeps tsgo's overload resolution stable here regardless
+  // of whole-program inference budget (otherwise the element infers as `unknown`).
+  return yield* Effect.forEach(part.result.value as readonly ToolResultContentPart[], lowerToolResultContentItem)
 })
 
 const continuationMessages = (request: LLMRequest) => {

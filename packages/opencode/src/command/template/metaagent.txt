@@ -1,0 +1,11 @@
+The user wants to configure the metacognition reviewer ("meta agent") for this session — a thin agent that reviews your reasoning after each step against a lens, and can redirect you if you drift.
+
+User request: $ARGUMENTS
+
+Call the `metaagent` tool to apply it:
+- Translate the request into a concise `base_prompt` — the thinking lens / review criteria (e.g. "reason from first principles and flag unstated assumptions", "review as David Deutsch would: seek hard-to-vary explanations").
+- If the user named a reviewer model, pass `model` as "provider/model-id"; otherwise omit it (defaults to google/gemini-3.5-flash).
+- If the user named an effort level (low|medium|high|xhigh|max), pass `effort`.
+- Use action "set" to enable it. If the user asked to turn it off, call the tool with action "clear" instead.
+
+After configuring, confirm in one sentence what you set.

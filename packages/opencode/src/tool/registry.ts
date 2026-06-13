@@ -36,6 +36,7 @@ import { LspTool } from "./lsp"
 import * as Truncate from "./truncate"
 import { ApplyPatchTool } from "./apply_patch"
 import { GoalTool } from "./goal"
+import { MetaAgentTool } from "./metaagent"
 import { Glob } from "@opencode-ai/core/util/glob"
 import path from "path"
 import { pathToFileURL } from "url"
@@ -50,6 +51,7 @@ import { EffectBridge } from "@/effect/bridge"
 import { Question } from "../question"
 import { Todo } from "../session/todo"
 import { Goal } from "../session/goal"
+import { MetaAgent } from "../session/metaagent"
 import { LSP } from "@/lsp/lsp"
 import { Instruction } from "../session/instruction"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
@@ -99,6 +101,7 @@ export const layer: Layer.Layer<
   | Question.Service
   | Todo.Service
   | Goal.Service
+  | MetaAgent.Service
   | Agent.Service
   | Skill.Service
   | Session.Service
@@ -143,6 +146,7 @@ export const layer: Layer.Layer<
     const question = yield* QuestionTool
     const todo = yield* TodoWriteTool
     const goaltool = yield* GoalTool
+    const metaagenttool = yield* MetaAgentTool
     const lsptool = yield* LspTool
     const plan = yield* PlanExitTool
     const webfetch = yield* WebFetchTool
@@ -264,6 +268,7 @@ export const layer: Layer.Layer<
           fetch: Tool.init(webfetch),
           todo: Tool.init(todo),
           goal: Tool.init(goaltool),
+          metaagent: Tool.init(metaagenttool),
           search: Tool.init(websearch),
           repo_clone: Tool.init(repoClone),
           repo_overview: Tool.init(repoOverview),
@@ -295,6 +300,7 @@ export const layer: Layer.Layer<
             tool.fetch,
             tool.todo,
             tool.goal,
+            tool.metaagent,
             tool.search,
             ...(flags.experimentalScout ? [tool.repo_clone, tool.repo_overview] : []),
             tool.skill,
@@ -412,7 +418,7 @@ export const defaultLayer = Layer.suspend(() =>
     .pipe(
       Layer.provide(Config.defaultLayer),
       Layer.provide(Plugin.defaultLayer),
-      Layer.provide(Layer.mergeAll(Question.defaultLayer, Todo.defaultLayer, Goal.defaultLayer)),
+      Layer.provide(Layer.mergeAll(Question.defaultLayer, Todo.defaultLayer, Goal.defaultLayer, MetaAgent.defaultLayer)),
       Layer.provide(Skill.defaultLayer),
       Layer.provide(Agent.defaultLayer),
       Layer.provide(Session.defaultLayer),

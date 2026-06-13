@@ -1,0 +1,10 @@
+Configure the metacognition layer for this session: a thin "meta agent" that reviews your reasoning after each thinking step and can redirect you if you drift, and a "base prompt" (lens) that also shapes how you think.
+
+Use this tool when the user asks you to think in a particular way or to have your reasoning checked — e.g. "think in first principles", "reason like David Deutsch", "be more rigorous / red-team your thinking", "double-check your reasoning as you go". Translate the user's request into a concise `base_prompt` describing the thinking lens and review criteria.
+
+Actions:
+- "set": configure the reviewer. `base_prompt` is the lens/criteria (also injected into your own system prompt so you actually think that way). Optional `model` ("provider/model-id", default google/gemini-3.5-flash), `effort` (low|medium|high|xhigh|max, default medium), and `enabled`.
+- "get": read the current configuration.
+- "clear": disable the reviewer for this session.
+
+Setting any field enables the reviewer unless you pass enabled=false. Keep the base_prompt focused (the method or persona and what good reasoning looks like for this task).

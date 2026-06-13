@@ -62,6 +62,8 @@ import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
 import { LLMEvent } from "@opencode-ai/llm"
 import { Goal } from "./goal"
+import { MetaAgent } from "./metaagent"
+import { ReasoningReviewer } from "./reasoning-reviewer"
 import { Memory } from "@/memory/memory"
 
 // @ts-ignore
@@ -82,6 +84,9 @@ const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested struc
 
 const log = Log.create({ service: "session.prompt" })
 const elog = EffectLogger.create({ service: "session.prompt" })
+
+// Max times the per-step reasoning reviewer (metacognition) may redirect within one turn.
+const MAX_REASONING_REDIRECTS = 2
 
 export interface Interface {
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
@@ -126,6 +131,8 @@ export const layer = Layer.effect(
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
     const goals = yield* Goal.Service
+    const metaagent = yield* MetaAgent.Service
+    const reviewer = yield* ReasoningReviewer.Service
     const memory = yield* Memory.Service
     const ops = Effect.fn("SessionPrompt.ops")(function* () {
       return {
@@ -1250,6 +1257,7 @@ export const layer = Layer.effect(
         const slog = elog.with({ sessionID })
         let structured: unknown
         let step = 0
+        let reasoningRedirects = 0
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
         while (true) {
@@ -1371,6 +1379,10 @@ export const layer = Layer.effect(
             })
             .pipe(Effect.onInterrupt(() => finalizeInterruptedAssistant))
 
+          // Metacognition config for this session — drives the lens injected into the
+          // system prompt and the per-step reasoning reviewer below. Read fresh each step.
+          const metaConfig = yield* metaagent.get(sessionID)
+
           const outcome: "break" | "continue" = yield* Effect.gen(function* () {
             const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
             const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
@@ -1436,12 +1448,15 @@ export const layer = Layer.effect(
             // Per-agent memory is read fresh from disk each turn (not the cached agent
             // definition) so cross-session writes and external edits are reflected.
             const memoryContext = agentMemory && agent.memory ? formatMemory(agentMemory, agent.memory) : undefined
+            const lensContext =
+              metaConfig?.enabled && metaConfig.basePrompt ? formatLens(metaConfig.basePrompt) : undefined
             const system = [
               ...env,
               ...instructions,
               ...(skills ? [skills] : []),
               ...(memoryContext ? [memoryContext] : []),
               ...(goalContext ? [goalContext] : []),
+              ...(lensContext ? [lensContext] : []),
             ]
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
@@ -1502,9 +1517,51 @@ export const layer = Layer.effect(
             Effect.ensuring(instruction.clear(handle.message.id)),
             Effect.onInterrupt(() => finalizeInterruptedAssistant),
           )
-          // Goal auto-continuation is no longer driven from inside this loop. The
-          // turn ends naturally; GoalDriver (session/goal-driver.ts) subscribes to
-          // session.idle and resumes the session when a goal is still active.
+          // Goal auto-continuation is event-driven now (GoalDriver, on session.idle).
+          // What runs here is the per-step metacognition reviewer: when a meta agent is
+          // configured, grade this step's reasoning and, if it drifts, inject a
+          // correction and force another step (bounded by MAX_REASONING_REDIRECTS).
+          if (metaConfig?.enabled && reasoningRedirects < MAX_REASONING_REDIRECTS && !handle.message.error) {
+            const reasoning = reasoningOf(MessageV2.parts(handle.message.id))
+            if (reasoning) {
+              const priorReasoning = msgs
+                .flatMap((m) => m.parts.filter((p): p is MessageV2.ReasoningPart => p.type === "reasoning"))
+                .slice(-3)
+                .map((p) => p.text)
+                .join("\n---\n")
+              const verdict = yield* reviewer
+                .review({
+                  sessionID,
+                  reasoning,
+                  priorReasoning,
+                  basePrompt: metaConfig.basePrompt,
+                  model: metaConfig.model ?? MetaAgent.DEFAULT_MODEL,
+                  effort: metaConfig.effort,
+                  fallback: model,
+                })
+                .pipe(Effect.catch(() => Effect.succeed({ type: "ok" as const, message: "" })))
+              if (verdict.type === "redirect" && verdict.message) {
+                reasoningRedirects++
+                const reviewMsg = yield* sessions.updateMessage({
+                  id: MessageID.ascending(),
+                  role: "user",
+                  sessionID,
+                  agent: lastUser.agent,
+                  model: lastUser.model,
+                  time: { created: Date.now() },
+                })
+                yield* sessions.updatePart({
+                  id: PartID.ascending(),
+                  messageID: reviewMsg.id,
+                  sessionID,
+                  type: "text",
+                  text: ["<reasoning_review>", verdict.message, "</reasoning_review>"].join("\n"),
+                  synthetic: true,
+                })
+                continue
+              }
+            }
+          }
           if (outcome === "break") break
           continue
         }
@@ -1673,7 +1730,7 @@ export const defaultLayer = Layer.suspend(() =>
     Layer.provide(Instruction.defaultLayer),
     Layer.provide(AppFileSystem.defaultLayer),
     Layer.provide(Plugin.defaultLayer),
-    Layer.provide(Layer.mergeAll(Session.defaultLayer, SessionRevert.defaultLayer, SessionSummary.defaultLayer, Goal.defaultLayer, Memory.defaultLayer)),
+    Layer.provide(Layer.mergeAll(Session.defaultLayer, SessionRevert.defaultLayer, SessionSummary.defaultLayer, Goal.defaultLayer, MetaAgent.defaultLayer, ReasoningReviewer.defaultLayer, Memory.defaultLayer)),
     Layer.provide(Image.defaultLayer),
     Layer.provide(
       Layer.mergeAll(
@@ -1821,6 +1878,24 @@ function formatMemory(content: string, scope: string): string {
     "</agent_memory>",
     "This is your persistent memory, loaded from disk. Use the memory tool to append durable facts you'll want next time.",
   ].join("\n")
+}
+
+function formatLens(basePrompt: string): string {
+  return [
+    "<thinking_lens>",
+    basePrompt,
+    "",
+    "Apply this lens to how you reason. Your reasoning is reviewed against it after each step.",
+    "</thinking_lens>",
+  ].join("\n")
+}
+
+function reasoningOf(parts: readonly MessageV2.Part[]): string {
+  return parts
+    .filter((p): p is MessageV2.ReasoningPart => p.type === "reasoning")
+    .map((p) => p.text)
+    .join("\n")
+    .trim()
 }
 
 export * as SessionPrompt from "./prompt"
