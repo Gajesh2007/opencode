@@ -13,6 +13,9 @@ import { Storage } from "@/storage/storage"
 import { SyncEvent } from "@/sync"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { BackgroundJob } from "@/background/job"
+import { Database, eq } from "@/storage/db"
+import { MessageTable, PartTable } from "@/session/session.sql"
+import { ModelID, ProviderID } from "@/provider/schema"
 
 void Log.init({ print: false })
 
@@ -22,6 +25,33 @@ const it = testEffect(
       Layer.provide(Bus.layer),
       Layer.provide(Storage.defaultLayer),
       Layer.provide(SyncEvent.defaultLayer),
+      Layer.provide(RuntimeFlags.layer({ experimentalWorkspaces: false })),
+      Layer.provide(BackgroundJob.defaultLayer),
+    ),
+    CrossSpawnSpawner.defaultLayer,
+  ),
+)
+
+const postCommitPublicationFailureSync = Layer.effect(
+  SyncEvent.Service,
+  Effect.gen(function* () {
+    const sync = yield* SyncEvent.Service
+    return SyncEvent.Service.of({
+      ...sync,
+      run: (definition, data, options) =>
+        definition.type === MessageV2.Event.Updated.type || definition.type === MessageV2.Event.PartUpdated.type
+          ? Effect.die(new Error("simulated post-commit publication failure"))
+          : sync.run(definition, data, options),
+    })
+  }),
+).pipe(Layer.provide(SyncEvent.defaultLayer))
+
+const itWithPostCommitPublicationFailure = testEffect(
+  Layer.mergeAll(
+    SessionNs.layer.pipe(
+      Layer.provide(Bus.layer),
+      Layer.provide(Storage.defaultLayer),
+      Layer.provide(postCommitPublicationFailureSync),
       Layer.provide(RuntimeFlags.layer({ experimentalWorkspaces: false })),
       Layer.provide(BackgroundJob.defaultLayer),
     ),
@@ -171,6 +201,71 @@ describe("step-finish token propagation via Bus event", () => {
 })
 
 describe("Session", () => {
+  it.instance("atomically persists a user message with its initial part", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const info = yield* session.create({})
+      const user: MessageV2.User = {
+        id: MessageID.ascending(),
+        sessionID: info.id,
+        role: "user",
+        time: { created: Date.now() },
+        agent: "build",
+        model: { providerID: ProviderID.make("test"), modelID: ModelID.make("test") },
+      }
+      const part: MessageV2.TextPart = {
+        id: PartID.ascending(),
+        sessionID: info.id,
+        messageID: user.id,
+        type: "text",
+        text: "persist together",
+      }
+
+      yield* session.appendMessageWithPart(user, part)
+
+      const rows = Database.use((db) => ({
+        messages: db.select().from(MessageTable).where(eq(MessageTable.id, user.id)).all(),
+        parts: db.select().from(PartTable).where(eq(PartTable.id, part.id)).all(),
+      }))
+      expect(rows.messages).toHaveLength(1)
+      expect(rows.parts).toHaveLength(1)
+      expect(rows.parts[0]?.message_id).toBe(user.id)
+      expect(yield* session.messages({ sessionID: info.id })).toEqual([{ info: user, parts: [part] }])
+    }),
+  )
+
+  itWithPostCommitPublicationFailure.instance("keeps atomically appended rows when notifications fail", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const info = yield* session.create({})
+      const user: MessageV2.User = {
+        id: MessageID.ascending(),
+        sessionID: info.id,
+        role: "user",
+        time: { created: Date.now() },
+        agent: "build",
+        model: { providerID: ProviderID.make("test"), modelID: ModelID.make("test") },
+      }
+      const part: MessageV2.TextPart = {
+        id: PartID.ascending(),
+        sessionID: info.id,
+        messageID: user.id,
+        type: "text",
+        text: "durable despite publication failure",
+      }
+
+      expect(yield* session.appendMessageWithPart(user, part)).toEqual({ message: user, part })
+
+      const rows = Database.use((db) => ({
+        messages: db.select().from(MessageTable).where(eq(MessageTable.id, user.id)).all(),
+        parts: db.select().from(PartTable).where(eq(PartTable.id, part.id)).all(),
+      }))
+      expect(rows.messages).toHaveLength(1)
+      expect(rows.parts).toHaveLength(1)
+      expect(rows.parts[0]?.message_id).toBe(user.id)
+    }),
+  )
+
   it.live("remove works without an instance", () =>
     Effect.gen(function* () {
       const session = yield* SessionNs.Service

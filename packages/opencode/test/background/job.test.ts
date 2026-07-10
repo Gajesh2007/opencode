@@ -93,6 +93,16 @@ describe("background.job", () => {
     }),
   )
 
+  it.instance("tracks immediately interrupted jobs", () =>
+    Effect.gen(function* () {
+      const jobs = yield* BackgroundJob.Service
+      const job = yield* jobs.start({ type: "test", run: Effect.interrupt })
+      const result = yield* jobs.wait({ id: job.id })
+
+      expect(result.info?.status).toBe("cancelled")
+    }),
+  )
+
   it.instance("can cancel running jobs", () =>
     Effect.gen(function* () {
       const jobs = yield* BackgroundJob.Service

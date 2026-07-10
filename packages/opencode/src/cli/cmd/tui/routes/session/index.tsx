@@ -63,6 +63,7 @@ import { TodoItem } from "../../component/todo-item"
 import { DialogMessage } from "./dialog-message"
 import type { PromptInfo } from "../../component/prompt/history"
 import { DialogConfirm } from "@tui/ui/dialog-confirm"
+import { DialogSelect } from "@tui/ui/dialog-select"
 import { DialogTimeline } from "./dialog-timeline"
 import { DialogForkFromTimeline } from "./dialog-fork-from-timeline"
 import { DialogSessionRename } from "../../component/dialog-session-rename"
@@ -637,22 +638,30 @@ export function Session() {
       slash: {
         name: "redo",
       },
-      run: () => {
-        dialog.clear()
+      run: async () => {
         const messageID = session()?.revert?.messageID
         if (!messageID) return
         const message = messages().find((x) => x.role === "user" && x.id > messageID)
-        if (!message) {
-          void sdk.client.session.unrevert({
-            sessionID: route.sessionID,
+        try {
+          if (message) {
+            await sdk.client.session.revert(
+              {
+                sessionID: route.sessionID,
+                messageID: message.id,
+              },
+              { throwOnError: true },
+            )
+          } else {
+            await sdk.client.session.unrevert({ sessionID: route.sessionID }, { throwOnError: true })
+            prompt?.set({ input: "", parts: [] })
+          }
+          dialog.clear()
+        } catch (error) {
+          toast.show({
+            message: error instanceof Error ? error.message : "Failed to restore reverted content",
+            variant: "error",
           })
-          prompt?.set({ input: "", parts: [] })
-          return
         }
-        void sdk.client.session.revert({
-          sessionID: route.sessionID,
-          messageID: message.id,
-        })
       },
     },
     {
@@ -1136,26 +1145,73 @@ export function Session() {
                     <Switch>
                       <Match when={message.id === revert()?.messageID}>
                         {(function () {
-                          const redoShortcut = useCommandShortcut("session.redo")
                           const [hover, setHover] = createSignal(false)
                           const dialog = useDialog()
 
-                          const handleUnrevert = async () => {
-                            const confirmed = await DialogConfirm.show(
-                              dialog,
-                              "Confirm Redo",
-                              "Are you sure you want to restore the reverted messages?",
-                            )
-                            if (confirmed) {
-                              keymap.dispatchCommand("session.redo")
-                            }
+                          const handleRestore = () => {
+                            dialog.replace(() => (
+                              <DialogSelect
+                                title="Restore reverted content"
+                                renderFilter={false}
+                                options={[
+                                  {
+                                    title: "Restore chat",
+                                    value: false,
+                                    description: "Restore messages and keep reverted files",
+                                    onSelect: async (dialog) => {
+                                      try {
+                                        await sdk.client.session.unrevert(
+                                          { sessionID: route.sessionID, restoreFiles: false },
+                                          { throwOnError: true },
+                                        )
+                                        prompt?.set({ input: "", parts: [] })
+                                        toBottom()
+                                        dialog.clear()
+                                      } catch (error) {
+                                        toast.show({
+                                          message:
+                                            error instanceof Error
+                                              ? error.message
+                                              : "Failed to restore reverted content",
+                                          variant: "error",
+                                        })
+                                      }
+                                    },
+                                  },
+                                  {
+                                    title: "Restore code + conversation",
+                                    value: true,
+                                    description: "Restore messages and files",
+                                    onSelect: async (dialog) => {
+                                      try {
+                                        await sdk.client.session.unrevert(
+                                          { sessionID: route.sessionID, restoreFiles: true },
+                                          { throwOnError: true },
+                                        )
+                                        prompt?.set({ input: "", parts: [] })
+                                        toBottom()
+                                        dialog.clear()
+                                      } catch (error) {
+                                        toast.show({
+                                          message:
+                                            error instanceof Error
+                                              ? error.message
+                                              : "Failed to restore reverted content",
+                                          variant: "error",
+                                        })
+                                      }
+                                    },
+                                  },
+                                ]}
+                              />
+                            ))
                           }
 
                           return (
                             <box
                               onMouseOver={() => setHover(true)}
                               onMouseOut={() => setHover(false)}
-                              onMouseUp={handleUnrevert}
+                              onMouseUp={handleRestore}
                               marginTop={1}
                               flexShrink={0}
                               border={["left"]}
@@ -1169,9 +1225,7 @@ export function Session() {
                                 backgroundColor={hover() ? theme.backgroundElement : theme.backgroundPanel}
                               >
                                 <text fg={theme.textMuted}>{revert()!.reverted.length} message reverted</text>
-                                <text fg={theme.textMuted}>
-                                  <span style={{ fg: theme.text }}>{redoShortcut()}</span> or /redo to restore
-                                </text>
+                                <text fg={theme.textMuted}>Click to choose how to restore</text>
                                 <Show when={revert()!.diffFiles?.length}>
                                   <box marginTop={1}>
                                     <For each={revert()!.diffFiles}>
@@ -2098,11 +2152,11 @@ function Task(props: ToolProps<typeof TaskTool>) {
   })
 
   const tokens = createMemo(() => {
-    const last = messages().findLast(
-      (x): x is AssistantMessage => x.role === "assistant" && x.tokens.output > 0,
-    )
+    const last = messages().findLast((x): x is AssistantMessage => x.role === "assistant" && x.tokens.output > 0)
     if (!last) return 0
-    return last.tokens.input + last.tokens.output + last.tokens.reasoning + last.tokens.cache.read + last.tokens.cache.write
+    return (
+      last.tokens.input + last.tokens.output + last.tokens.reasoning + last.tokens.cache.read + last.tokens.cache.write
+    )
   })
 
   const content = createMemo(() => {

@@ -210,6 +210,15 @@ describe("SessionRevert.RevertInput", () => {
   })
 })
 
+describe("SessionRevert.UnrevertInput", () => {
+  const decode = decodeUnknown(SessionRevert.UnrevertInput)
+
+  test("restoreFiles is optional", () => {
+    expect(decode({ sessionID })).toEqual({ sessionID })
+    expect(decode({ sessionID, restoreFiles: false })).toEqual({ sessionID, restoreFiles: false })
+  })
+})
+
 describe("SessionSummary.DiffInput", () => {
   const decode = decodeUnknown(SessionSummary.DiffInput)
 

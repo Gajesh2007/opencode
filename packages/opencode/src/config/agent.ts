@@ -30,9 +30,9 @@ const WorkflowDef = Schema.Struct({
   passes: Schema.mutable(Schema.Array(WorkflowPass)).annotate({
     description: "The lenses applied to every unit when this agent runs its workflow.",
   }),
-  synthesis: Schema.optional(
-    Schema.Struct({ agent: Schema.String, prompt: Schema.optional(Schema.String) }),
-  ).annotate({ description: "Optional subagent that reduces all results into one report." }),
+  synthesis: Schema.optional(Schema.Struct({ agent: Schema.String, prompt: Schema.optional(Schema.String) })).annotate({
+    description: "Optional subagent that reduces all results into one report.",
+  }),
   format: Schema.optional(Schema.Literals(["text", "findings"])).annotate({
     description: "'findings' parses+dedupes+ranks JSON findings per cell before synthesis; 'text' keeps raw text.",
   }),
@@ -51,7 +51,7 @@ const AgentSchema = Schema.StructWithRest(
     variant: Schema.optional(Schema.String).annotate({
       description: "Default model variant for this agent (applies only when using the agent's configured model).",
     }),
-    effort: Schema.optional(Schema.Literals(["low", "medium", "high", "xhigh", "max"])).annotate({
+    effort: Schema.optional(Schema.Literals(["low", "medium", "high", "xhigh", "max", "ultra"])).annotate({
       description: "Reasoning effort ladder; sets the model variant when no explicit variant is given.",
     }),
     temperature: Schema.optional(Schema.Finite),

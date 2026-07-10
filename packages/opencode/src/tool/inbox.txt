@@ -1,3 +1,3 @@
-Read messages your teammates have sent you.
+Read messages your teammates have sent you. Collaboration members read their local collaboration mailbox; other sessions use the legacy Team inbox.
 
-Returns the messages queued in your inbox and clears them (pass peek=true to leave them). Check your inbox when you start work and periodically while coordinating with a team. Only available when you are part of a team.
+Returns the messages queued in your inbox and clears them (pass peek=true to leave named-team messages). Collaboration mail is claimed and acknowledged before named-team mail is drained, preventing duplicate delivery and preserving Team mail if collaboration delivery fails. Check your inbox when you start work and periodically while coordinating with a team.

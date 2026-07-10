@@ -6549,6 +6549,7 @@ export type SessionMessageResponse = SessionMessageResponses[keyof SessionMessag
 export type SessionForkData = {
   body?: {
     messageID?: string
+    lastTurns?: number
   }
   path: {
     sessionID: string
@@ -6967,6 +6968,7 @@ export type SessionUnrevertData = {
   query?: {
     directory?: string
     workspace?: string
+    restoreFiles?: boolean
   }
   url: "/session/{sessionID}/unrevert"
 }

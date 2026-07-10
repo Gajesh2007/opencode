@@ -453,8 +453,7 @@ export function message(msgs: ModelMessage[], model: Provider.Model, options: Re
     model.api.npm === "@ai-sdk/alibaba"
   // Gateway: only apply manual caching for Anthropic upstreams. Other upstreams
   // (OpenAI/Google) cache implicitly and don't need breakpoints.
-  const gatewayAnthropic =
-    model.api.npm === "@ai-sdk/gateway" && model.api.id.toLowerCase().startsWith("anthropic/")
+  const gatewayAnthropic = model.api.npm === "@ai-sdk/gateway" && model.api.id.toLowerCase().startsWith("anthropic/")
   if ((looksAnthropic && model.api.npm !== "@ai-sdk/gateway") || gatewayAnthropic) {
     msgs = applyCaching(msgs, model)
   }
@@ -530,6 +529,8 @@ const WIDELY_SUPPORTED_EFFORTS = ["low", "medium", "high"]
 const OPENAI_EFFORTS = ["none", "minimal", ...WIDELY_SUPPORTED_EFFORTS, "xhigh"]
 const OPENAI_GPT5_1_EFFORTS = ["none", ...WIDELY_SUPPORTED_EFFORTS]
 const OPENAI_GPT5_2_PLUS_EFFORTS = [...OPENAI_GPT5_1_EFFORTS, "xhigh"]
+const OPENAI_GPT5_6_EFFORTS = [...OPENAI_GPT5_2_PLUS_EFFORTS, "max"]
+const OPENAI_GPT5_6_ULTRA_EFFORTS = [...OPENAI_GPT5_6_EFFORTS, "ultra"]
 const OPENAI_GPT5_PRO_EFFORTS = ["high"]
 const OPENAI_GPT5_PRO_2_PLUS_EFFORTS = ["medium", "high", "xhigh"]
 const OPENAI_GPT5_CHAT_EFFORTS = ["medium"]
@@ -556,12 +557,47 @@ function gpt5Version(apiId: string) {
   return Number(GPT5_VERSION_RE.exec(apiId)?.[1]) || undefined
 }
 
+function isGpt56UltraModel(apiId: string, direct: boolean) {
+  const prefix = direct ? "" : "openai/"
+  return [
+    `${prefix}gpt-5.6-sol`,
+    `${prefix}gpt-5-6-sol`,
+    `${prefix}gpt-5.6-terra`,
+    `${prefix}gpt-5-6-terra`,
+    ...(direct ? ["gpt-5.6", "gpt-5-6"] : []),
+  ].includes(apiId.toLowerCase())
+}
+
+function gpt56ReasoningEfforts(apiId: string, direct: boolean) {
+  const id = apiId.toLowerCase()
+  const prefix = direct ? "" : "openai/"
+  if (isGpt56UltraModel(id, direct)) return OPENAI_GPT5_6_ULTRA_EFFORTS
+  if ([`${prefix}gpt-5.6-luna`, `${prefix}gpt-5-6-luna`].includes(id)) return OPENAI_GPT5_6_EFFORTS
+  return undefined
+}
+
 function versionedGpt5ReasoningEfforts(apiId: string) {
   if (GPT5_VERSIONED_PRO_RE.test(apiId)) return OPENAI_GPT5_PRO_2_PLUS_EFFORTS
   const version = gpt5Version(apiId)
   if (version === undefined) return undefined
   if (version === 1) return OPENAI_GPT5_1_EFFORTS
   return OPENAI_GPT5_2_PLUS_EFFORTS
+}
+
+export function isUltraVariant(model: Provider.Model, variant: string | undefined): boolean {
+  if (variant !== "ultra" || !model.capabilities.reasoning) return false
+  if (model.api.npm === "@ai-sdk/openai") return isGpt56UltraModel(model.api.id, true)
+  if (["@openrouter/ai-sdk-provider", "@ai-sdk/gateway"].includes(model.api.npm)) {
+    return isGpt56UltraModel(model.api.id, false)
+  }
+  return false
+}
+
+function openaiWireReasoningEffort(effort: string) {
+  // Ultra is an opencode/Codex-style user-facing mode. OpenAI's inference
+  // boundary still expects `max`; proactive multi-agent orchestration is owned
+  // by runtimes that implement it, not by the provider wire effort value.
+  return effort === "ultra" ? "max" : effort
 }
 
 function gpt5CodexReasoningEfforts(apiId: string) {
@@ -580,7 +616,7 @@ function gpt5ChatReasoningEfforts(apiId: string) {
 // Computes the reasoning_effort tiers an OpenAI (or OpenAI-compatible upstream
 // routed through it, e.g. cf-ai-gateway) model exposes. Effort order: weakest
 // to strongest.
-function openaiReasoningEfforts(apiId: string, releaseDate: string) {
+function openaiReasoningEfforts(apiId: string, releaseDate: string, direct = false) {
   const id = apiId.toLowerCase()
   if (id.includes("deep-research")) return ["medium"]
   const chatEfforts = gpt5ChatReasoningEfforts(id)
@@ -588,6 +624,8 @@ function openaiReasoningEfforts(apiId: string, releaseDate: string) {
   if (GPT5_PRO_RE.test(id)) return OPENAI_GPT5_PRO_EFFORTS
   const codexEfforts = gpt5CodexReasoningEfforts(id)
   if (codexEfforts) return codexEfforts
+  const gpt56Efforts = direct ? gpt56ReasoningEfforts(id, true) : undefined
+  if (gpt56Efforts) return gpt56Efforts
   const versionedEfforts = versionedGpt5ReasoningEfforts(id)
   // GPT-5.1 replaced GPT-5's `minimal` effort with `none`; GPT-5.2+
   // additionally accepts `xhigh`. Model pages list the supported subset.
@@ -604,7 +642,12 @@ function openaiCompatibleReasoningEfforts(id: string) {
   const chatEfforts = gpt5ChatReasoningEfforts(apiId)
   if (chatEfforts) return chatEfforts
   if (GPT5_PRO_RE.test(apiId)) return OPENAI_GPT5_PRO_EFFORTS
-  return gpt5CodexReasoningEfforts(apiId) ?? versionedGpt5ReasoningEfforts(apiId) ?? OPENAI_EFFORTS
+  return (
+    gpt56ReasoningEfforts(apiId, false) ??
+    gpt5CodexReasoningEfforts(apiId) ??
+    versionedGpt5ReasoningEfforts(apiId) ??
+    OPENAI_EFFORTS
+  )
 }
 
 function anthropicAdaptiveEfforts(apiId: string): string[] | null {
@@ -632,6 +675,18 @@ function googleThinkingBudgetMax(apiId: string) {
   return 24_576
 }
 
+// GLM 5.2+ exposes `reasoning_effort` (max/xhigh/high/medium/low/minimal/none).
+// Earlier GLM models (4.5/4.6/4.7/5/5.1) only support `thinking: {type:"enabled"}`
+// and 400 on `reasoning_effort`, so they stay excluded from variants.
+// https://docs.z.ai/guides/capabilities/thinking
+const GLM_52_PLUS_RE = /glm-5\.(?:[2-9]|\d{2,})(?:[.-]|$)/
+// `reasoningEffort` is the AI SDK providerOptions key. For direct zai/zhipuai
+// (`@ai-sdk/openai-compatible`) it becomes the upstream `reasoning_effort`
+// body field; for Vercel AI Gateway (`@ai-sdk/gateway`) it is routed under
+// `providerOptions.zai.reasoningEffort` and passed through to zai upstream.
+// GLM's native `max` tier is exposed on both paths.
+const GLM_EFFORTS = ["max", "xhigh", "high", "medium", "low", "minimal", "none"]
+
 export function variants(model: Provider.Model): Record<string, Record<string, any>> {
   if (!model.capabilities.reasoning) return {}
 
@@ -643,14 +698,23 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
     id.includes("deepseek-r1") ||
     id.includes("deepseek-v3") ||
     id.includes("minimax") ||
-    id.includes("glm") ||
+    (id.includes("glm") && !GLM_52_PLUS_RE.test(id)) ||
     id.includes("kimi") ||
     id.includes("k2p") ||
     id.includes("big-pickle")
   )
     return {}
 
+  // GLM 5.2+: expose reasoning_effort variants. The model's own default is
+  // `max`, so leaving no variant selected still yields max-effort reasoning.
+  if (id.includes("glm") && GLM_52_PLUS_RE.test(id)) {
+    return Object.fromEntries(GLM_EFFORTS.map((effort) => [effort, { reasoningEffort: effort }]))
+  }
+
   // see: https://docs.x.ai/docs/guides/reasoning#control-how-hard-the-model-thinks
+  if (id.includes("grok-4.5") && model.api.npm === "@ai-sdk/gateway") {
+    return Object.fromEntries(WIDELY_SUPPORTED_EFFORTS.map((effort) => [effort, { reasoningEffort: effort }]))
+  }
   if (id.includes("grok") && id.includes("grok-3-mini")) {
     if (model.api.npm === "@openrouter/ai-sdk-provider") {
       return {
@@ -671,7 +735,7 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
       return Object.fromEntries(
         (id.includes("gpt") ? openaiCompatibleReasoningEfforts(id) : OPENAI_EFFORTS).map((effort) => [
           effort,
-          { reasoning: { effort } },
+          { reasoning: { effort: openaiWireReasoningEffort(effort) } },
         ]),
       )
 
@@ -684,7 +748,9 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
       // models that support it.
       if (model.api.id.startsWith("openai/")) {
         const efforts = openaiReasoningEfforts(model.api.id, model.release_date)
-        return Object.fromEntries(efforts.map((effort) => [effort, { reasoningEffort: effort }]))
+        return Object.fromEntries(
+          efforts.map((effort) => [effort, { reasoningEffort: openaiWireReasoningEffort(effort) }]),
+        )
       }
       return Object.fromEntries(WIDELY_SUPPORTED_EFFORTS.map((effort) => [effort, { reasoningEffort: effort }]))
     }
@@ -698,7 +764,10 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
               {
                 thinking: {
                   type: "adaptive",
-                  ...((model.api.id.includes("opus-4-7") || model.api.id.includes("opus-4.7") || model.api.id.includes("opus-4-8") || model.api.id.includes("opus-4.8"))
+                  ...(model.api.id.includes("opus-4-7") ||
+                  model.api.id.includes("opus-4.7") ||
+                  model.api.id.includes("opus-4-8") ||
+                  model.api.id.includes("opus-4.8")
                     ? { display: "summarized" }
                     : {}),
                 },
@@ -750,7 +819,10 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
         )
       }
       return Object.fromEntries(
-        openaiCompatibleReasoningEfforts(model.api.id).map((effort) => [effort, { reasoningEffort: effort }]),
+        openaiCompatibleReasoningEfforts(model.api.id).map((effort) => [
+          effort,
+          { reasoningEffort: openaiWireReasoningEffort(effort) },
+        ]),
       )
 
     case "@ai-sdk/github-copilot":
@@ -814,12 +886,12 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
       )
     case "@ai-sdk/openai": {
       // https://v5.ai-sdk.dev/providers/ai-sdk-providers/openai
-      const efforts = openaiReasoningEfforts(model.api.id, model.release_date)
+      const efforts = openaiReasoningEfforts(model.api.id, model.release_date, true)
       return Object.fromEntries(
         efforts.map((effort) => [
           effort,
           {
-            reasoningEffort: effort,
+            reasoningEffort: openaiWireReasoningEffort(effort),
             reasoningSummary: "auto",
             include: INCLUDE_ENCRYPTED_REASONING,
           },
@@ -846,7 +918,10 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
             {
               thinking: {
                 type: "adaptive",
-                ...((model.api.id.includes("opus-4-7") || model.api.id.includes("opus-4.7") || model.api.id.includes("opus-4-8") || model.api.id.includes("opus-4.8"))
+                ...(model.api.id.includes("opus-4-7") ||
+                model.api.id.includes("opus-4.7") ||
+                model.api.id.includes("opus-4-8") ||
+                model.api.id.includes("opus-4.8")
                   ? { display: "summarized" }
                   : {}),
               },
@@ -885,7 +960,10 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
               reasoningConfig: {
                 type: "adaptive",
                 maxReasoningEffort: effort,
-                ...((model.api.id.includes("opus-4-7") || model.api.id.includes("opus-4.7") || model.api.id.includes("opus-4-8") || model.api.id.includes("opus-4.8"))
+                ...(model.api.id.includes("opus-4-7") ||
+                model.api.id.includes("opus-4.7") ||
+                model.api.id.includes("opus-4-8") ||
+                model.api.id.includes("opus-4.8")
                   ? { display: "summarized" }
                   : {}),
               },
@@ -1090,7 +1168,9 @@ export function availableUpstreams(model: Provider.Model): string[] {
 // Tier names are user-facing so they show up verbatim in the picker.
 export function serviceTiers(model: Provider.Model): Record<string, Record<string, any>> {
   const apiId = model.api.id.toLowerCase()
-  const isOpusFastEligible = ["opus-4-6", "opus-4.6", "opus-4-7", "opus-4.7", "opus-4-8", "opus-4.8"].some((v) => apiId.includes(v))
+  const isOpusFastEligible = ["opus-4-6", "opus-4.6", "opus-4-7", "opus-4.7", "opus-4-8", "opus-4.8"].some((v) =>
+    apiId.includes(v),
+  )
 
   switch (model.api.npm) {
     case "@ai-sdk/anthropic":
@@ -1107,7 +1187,8 @@ export function serviceTiers(model: Provider.Model): Record<string, Record<strin
     case "@ai-sdk/openai": {
       const tiers: Record<string, Record<string, any>> = {}
       // Priority: gpt-4 / gpt-5 / gpt-5-mini / o3 / o4-mini (NOT gpt-5-nano)
-      const hasPriority = /(^|\/)(gpt-4|gpt-5-mini|o3|o4-mini)(?:[.-]|$)/.test(apiId) ||
+      const hasPriority =
+        /(^|\/)(gpt-4|gpt-5-mini|o3|o4-mini)(?:[.-]|$)/.test(apiId) ||
         (/(^|\/)gpt-5(?:[.-]|$)/.test(apiId) && !apiId.includes("gpt-5-nano"))
       // Flex: o3 / o4-mini / gpt-5 family
       const hasFlex = /(^|\/)(o3|o4-mini)(?:[.-]|$)/.test(apiId) || /(^|\/)gpt-5(?:[.-]|$)/.test(apiId)
@@ -1125,7 +1206,8 @@ export function serviceTiers(model: Provider.Model): Record<string, Record<strin
         latency: { gateway: { sort: "ttft" } },
         cheapest: { gateway: { sort: "cost" } },
       }
-      const supportsTierField = apiId.startsWith("openai/") || apiId.startsWith("google/") || apiId.startsWith("vertex/")
+      const supportsTierField =
+        apiId.startsWith("openai/") || apiId.startsWith("google/") || apiId.startsWith("vertex/")
       if (supportsTierField) {
         tiers["priority"] = { gateway: { serviceTier: "priority" } }
         tiers["flex"] = { gateway: { serviceTier: "flex" } }

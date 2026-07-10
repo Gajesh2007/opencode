@@ -148,10 +148,83 @@ const INJECTED_PROVIDERS: Record<string, Provider> = {
   },
 }
 
+function gpt56Model(
+  id: string,
+  name: string,
+  input: number,
+  output: number,
+  options: { tiered?: boolean; inputLimit?: boolean } = {},
+): Model {
+  return {
+    id,
+    name,
+    family: "gpt",
+    release_date: "2026-07-09",
+    attachment: true,
+    reasoning: true,
+    temperature: false,
+    tool_call: true,
+    cost:
+      (options.tiered ?? true)
+        ? {
+            input,
+            output,
+            cache_read: input / 10,
+            cache_write: input * 1.25,
+            context_over_200k: {
+              input: input * 2,
+              output: output * 1.5,
+              cache_read: input / 5,
+              cache_write: input * 2.5,
+            },
+            tiers: [
+              {
+                input: input * 2,
+                output: output * 1.5,
+                cache_read: input / 5,
+                cache_write: input * 2.5,
+                tier: { type: "context", size: 272_000 },
+              },
+            ],
+          }
+        : { input, output, cache_read: input / 10 },
+    limit:
+      options.inputLimit === false
+        ? { context: 1_050_000, output: 128_000 }
+        : { context: 1_050_000, input: 922_000, output: 128_000 },
+    modalities: { input: ["text", "image", "pdf"], output: ["text"] },
+  }
+}
+
 const INJECTED_MODELS: Record<string, Record<string, Model>> = {
+  // GPT-5.6 was announced after the latest models.dev snapshot. OpenAI uses
+  // bare model ids; OpenRouter and Vercel AI Gateway use `openai/...` ids.
+  openai: {
+    "gpt-5.6": gpt56Model("gpt-5.6", "GPT-5.6", 5, 30),
+    "gpt-5.6-sol": gpt56Model("gpt-5.6-sol", "GPT-5.6 Sol", 5, 30),
+    "gpt-5.6-terra": gpt56Model("gpt-5.6-terra", "GPT-5.6 Terra", 2.5, 15),
+    "gpt-5.6-luna": gpt56Model("gpt-5.6-luna", "GPT-5.6 Luna", 1, 6),
+  },
+  openrouter: {
+    "openai/gpt-5.6-sol": gpt56Model("openai/gpt-5.6-sol", "OpenAI: GPT-5.6 Sol", 5, 30, {
+      tiered: false,
+      inputLimit: false,
+    }),
+    "openai/gpt-5.6-terra": gpt56Model("openai/gpt-5.6-terra", "OpenAI: GPT-5.6 Terra", 2.5, 15, {
+      tiered: false,
+      inputLimit: false,
+    }),
+    "openai/gpt-5.6-luna": gpt56Model("openai/gpt-5.6-luna", "OpenAI: GPT-5.6 Luna", 1, 6, {
+      tiered: false,
+      inputLimit: false,
+    }),
+  },
   // MiniMax M3 on the Vercel AI Gateway (1M context, multimodal, agentic).
   // Pricing/limits mirror the Gateway listing.
   vercel: {
+    "openai/gpt-5.6-sol": gpt56Model("openai/gpt-5.6-sol", "GPT-5.6 Sol", 5, 30),
+    "openai/gpt-5.6-terra": gpt56Model("openai/gpt-5.6-terra", "GPT-5.6 Terra", 2.5, 15),
+    "openai/gpt-5.6-luna": gpt56Model("openai/gpt-5.6-luna", "GPT-5.6 Luna", 1, 6),
     "minimax/minimax-m3": {
       id: "minimax/minimax-m3",
       name: "MiniMax M3",
@@ -177,6 +250,44 @@ const INJECTED_MODELS: Record<string, Record<string, Model>> = {
       cost: { input: 0.6, output: 3.6 },
       limit: { context: 1_000_000, output: 131_072 },
       modalities: { input: ["text"], output: ["text"] },
+    },
+    // Kimi K2.7 Code High Speed: the latency-optimized variant of Moonshot's
+    // K2.7 Code (same model, ~180-260 tps). models.dev ships the base
+    // `moonshotai/kimi-k2.7-code` but not yet this Gateway-only highspeed slug.
+    // Mirrors the base entry's flags (always-thinking, interleaved
+    // reasoning_content, temperature locked off); pricing/release per the
+    // Vercel Gateway listing ($1.90/$8.00, $0.38 cache read).
+    "moonshotai/kimi-k2.7-code-highspeed": {
+      id: "moonshotai/kimi-k2.7-code-highspeed",
+      name: "Kimi K2.7 Code High Speed",
+      family: "kimi-k2",
+      release_date: "2026-06-15",
+      attachment: true,
+      reasoning: true,
+      temperature: false,
+      tool_call: true,
+      interleaved: { field: "reasoning_content" },
+      cost: { input: 1.9, output: 8, cache_read: 0.38 },
+      limit: { context: 262_144, output: 262_144 },
+      modalities: { input: ["text", "image", "video"], output: ["text"] },
+    },
+    "xai/grok-4.5": {
+      id: "xai/grok-4.5",
+      name: "Grok 4.5",
+      family: "grok",
+      release_date: "2026-07-08",
+      attachment: true,
+      reasoning: true,
+      temperature: true,
+      tool_call: true,
+      cost: {
+        input: 2,
+        output: 6,
+        cache_read: 0.5,
+        context_over_200k: { input: 4, output: 12, cache_read: 1 },
+      },
+      limit: { context: 500_000, output: 500_000 },
+      modalities: { input: ["text", "image", "pdf"], output: ["text"] },
     },
   },
   // Claude Fable 5: Anthropic's Mythos-class frontier model, GA on Google Cloud's

@@ -575,6 +575,7 @@ export const dict = {
   "session.followupDock.summary.other": "{{count}} queued messages",
   "session.followupDock.sendNow": "Send now",
   "session.followupDock.edit": "Edit",
+  "session.followupDock.retract": "Retract",
   "session.followupDock.collapse": "Collapse queued messages",
   "session.followupDock.expand": "Expand queued messages",
   "session.revertDock.summary.one": "{{count}} rolled back message",
@@ -582,6 +583,8 @@ export const dict = {
   "session.revertDock.collapse": "Collapse rolled back messages",
   "session.revertDock.expand": "Expand rolled back messages",
   "session.revertDock.restore": "Restore message",
+  "session.revertDock.restoreChat": "Restore chat",
+  "session.revertDock.restoreCode": "Restore code + conversation",
 
   "session.new.title": "Build anything",
   "session.new.worktree.main": "Main branch",

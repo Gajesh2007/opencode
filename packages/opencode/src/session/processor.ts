@@ -27,6 +27,7 @@ import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import * as DateTime from "effect/DateTime"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { Collaboration } from "@/agent/collaboration"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
 
 const DOOM_LOOP_THRESHOLD = 3
@@ -88,6 +89,7 @@ interface ProcessorContext extends Input {
   streamedAny: boolean
   // Hollow-completion retries used this turn (bounded by EMPTY_COMPLETION_MAX_RETRIES).
   emptyCompletionRetries: number
+  preempted: boolean
 }
 
 type StreamEvent = LLMEvent
@@ -111,6 +113,7 @@ export const layer = Layer.effect(
     const image = yield* Image.Service
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
+    const collaboration = yield* Collaboration.Service
 
     const create = Effect.fn("SessionProcessor.create")(function* (input: Input) {
       // Pre-capture snapshot before the LLM stream starts. The AI SDK
@@ -130,6 +133,7 @@ export const layer = Layer.effect(
         reasoningMap: {},
         streamedAny: false,
         emptyCompletionRetries: 0,
+        preempted: false,
       }
       let aborted = false
       const slog = log.clone().tag("session.id", input.sessionID).tag("messageID", input.assistantMessage.id)
@@ -418,6 +422,9 @@ export const layer = Layer.effect(
               ctx.reasoningMap[value.id].metadata = value.providerMetadata
             }
             yield* finishReasoning(value.id)
+            // Provider metadata does not expose a portable commentary boundary, so
+            // reasoning-end is the only safe stream preemption point for mail.
+            if (!ctx.assistantMessage.summary && (yield* collaboration.hasMail(ctx.sessionID))) ctx.preempted = true
             return
 
           case "tool-input-start":
@@ -880,12 +887,13 @@ export const layer = Layer.effect(
             ctx.currentText = undefined
             ctx.reasoningMap = {}
             ctx.streamedAny = false
+            ctx.preempted = false
             yield* status.set(ctx.sessionID, { type: "busy" })
             const stream = llm.stream(streamInput)
 
             yield* stream.pipe(
               Stream.tap((event) => handleEvent(event)),
-              Stream.takeUntil(() => ctx.needsCompaction),
+              Stream.takeUntil(() => ctx.needsCompaction || ctx.preempted),
               Stream.runDrain,
             )
 
@@ -955,6 +963,7 @@ export const layer = Layer.effect(
           )
 
           if (ctx.needsCompaction) return "compact"
+          if (ctx.preempted) return "continue"
           if (ctx.blocked || ctx.assistantMessage.error) return "stop"
           return "continue"
         })
@@ -989,6 +998,7 @@ export const defaultLayer = Layer.suspend(() =>
     Layer.provide(Config.defaultLayer),
     Layer.provide(RuntimeFlags.defaultLayer),
     Layer.provide(EventV2Bridge.defaultLayer),
+    Layer.provide(Collaboration.defaultLayer),
   ),
 )
 

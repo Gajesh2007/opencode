@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { cycleModelVariant, getConfiguredAgentVariant, resolveModelVariant } from "./model-variant"
+import {
+  cycleModelVariant,
+  getConfiguredAgentVariant,
+  getModelVariantPresentation,
+  resolveModelVariant,
+} from "./model-variant"
 
 describe("model variant", () => {
   test("resolves configured agent variant when model matches", () => {
@@ -82,5 +87,39 @@ describe("model variant", () => {
     })
 
     expect(value).toBe("low")
+  })
+
+  test("presents Ultra with its delegation description and proactive usage warning", () => {
+    expect(getModelVariantPresentation("ultra")).toMatchInlineSnapshot(`
+      {
+        "description": "Maximum reasoning with automatic task delegation",
+        "label": "Ultra",
+        "warning": "Ultra can significantly increase usage and cost. Proactive agents can increase usage further.",
+      }
+    `)
+  })
+
+  test("includes a concurrency-specific Ultra warning when a high cap is available", () => {
+    expect(getModelVariantPresentation("ultra", { subagentConcurrency: 8 }).warning).toBe(
+      "Ultra can significantly increase usage and cost with up to 8 concurrent agents.",
+    )
+  })
+
+  test("preserves arbitrary variant labels and Ultra cycling order", () => {
+    expect(getModelVariantPresentation("custom-effort")).toEqual({ label: "custom-effort" })
+    expect(
+      cycleModelVariant({
+        variants: ["low", "high", "ultra"],
+        selected: "high",
+        configured: undefined,
+      }),
+    ).toBe("ultra")
+    expect(
+      cycleModelVariant({
+        variants: ["low", "high", "ultra"],
+        selected: "ultra",
+        configured: undefined,
+      }),
+    ).toBeUndefined()
   })
 })

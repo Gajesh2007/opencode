@@ -18,6 +18,7 @@ import { ModelsDev } from "@opencode-ai/core/models-dev"
 import { Provider } from "@/provider/provider"
 import { ProviderAuth } from "@/provider/auth"
 import { Agent } from "@/agent/agent"
+import { Collaboration } from "@/agent/collaboration"
 import { Skill } from "@/skill"
 import { Discovery } from "@/skill/discovery"
 import { Question } from "@/question"
@@ -82,6 +83,7 @@ export const AppLayer = Layer.mergeAll(
   Provider.defaultLayer,
   ProviderAuth.defaultLayer,
   Agent.defaultLayer,
+  Collaboration.defaultLayer,
   Skill.defaultLayer,
   Discovery.defaultLayer,
   Question.defaultLayer,

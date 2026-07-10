@@ -287,6 +287,25 @@ it.instance(
 )
 
 it.instance(
+  "agent config accepts ultra effort",
+  () =>
+    Effect.gen(function* () {
+      const agent = yield* load((svc) => svc.get("ultra_effort_agent"))
+      expect(agent).toBeDefined()
+      expect(agent?.variant).toBe("ultra")
+    }),
+  {
+    config: {
+      agent: {
+        ultra_effort_agent: {
+          effort: "ultra",
+        },
+      },
+    },
+  },
+)
+
+it.instance(
   "explicit variant wins over effort",
   () =>
     Effect.gen(function* () {

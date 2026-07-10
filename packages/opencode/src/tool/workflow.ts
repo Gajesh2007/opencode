@@ -1,6 +1,7 @@
 import * as Tool from "./tool"
 import DESCRIPTION from "./workflow.txt"
 import { Agent } from "../agent/agent"
+import { childToolOverrides } from "../agent/child-session"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import { SubagentLimit } from "../agent/subagent-limit"
 import { Session } from "@/session/session"
@@ -59,7 +60,8 @@ export const Parameters = Schema.Struct({
     description: "Optional single subagent that merges all results into one report",
   }),
   format: Schema.optional(Schema.Literals(["text", "findings"])).annotate({
-    description: "'findings' parses+dedupes+ranks JSON findings per cell before synthesis; 'text' (default) keeps raw text",
+    description:
+      "'findings' parses+dedupes+ranks JSON findings per cell before synthesis; 'text' (default) keeps raw text",
   }),
   concurrency: Schema.optional(Schema.Finite).annotate({
     description: "Optional max cells in flight for this run (a global cap also applies)",
@@ -114,7 +116,9 @@ export const WorkflowTool = Tool.define(
 
       // Validate every referenced agent up front so a typo fails fast instead of
       // after spawning hundreds of sessions.
-      const agentNames = [...new Set([...params.passes.map((p) => p.agent), ...(params.synthesis ? [params.synthesis.agent] : [])])]
+      const agentNames = [
+        ...new Set([...params.passes.map((p) => p.agent), ...(params.synthesis ? [params.synthesis.agent] : [])]),
+      ]
       const agentInfos = new Map<string, Agent.Info>()
       for (const name of agentNames) {
         const info = yield* agent.get(name).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
@@ -192,11 +196,7 @@ export const WorkflowTool = Tool.define(
             variant: info.variant ?? parentUserModel?.variant,
             serviceTier: info.serviceTier ?? parentUserModel?.serviceTier,
             upstream: parentUserModel?.upstream,
-            tools: {
-              ...(info.permission.some((rule) => rule.permission === "todowrite") ? {} : { todowrite: false }),
-              ...(info.permission.some((rule) => rule.permission === "task") ? {} : { task: false }),
-              ...(info.permission.some((rule) => rule.permission === "workflow") ? {} : { workflow: false }),
-            },
+            tools: childToolOverrides({ agent: info }),
             parts,
           }),
         )
@@ -267,7 +267,11 @@ export const WorkflowTool = Tool.define(
       const work = Effect.gen(function* () {
         const results = yield* Effect.forEach(cells, runCell, { concurrency })
         const errors = results.filter((r) => r.error)
-        const runDir = nodePath.join(Global.Path.data, "workflow", `${Date.now().toString(36)}-${slugify(params.description)}`)
+        const runDir = nodePath.join(
+          Global.Path.data,
+          "workflow",
+          `${Date.now().toString(36)}-${slugify(params.description)}`,
+        )
 
         const synthesisInput =
           params.format === "findings"
@@ -275,11 +279,11 @@ export const WorkflowTool = Tool.define(
             : buildTextSynthesis(results, runDir)
 
         const report = params.synthesis
-          ? (yield* runAgent({
+          ? yield* runAgent({
               agent: params.synthesis.agent,
               title: `synthesis: ${params.description}`,
               prompt: `${params.synthesis.prompt}\n\n${synthesisInput.prompt}`,
-            }).pipe(Effect.map((r) => r.text)))
+            }).pipe(Effect.map((r) => r.text))
           : synthesisInput.fallback
 
         writeArtifact(nodePath.join(runDir, "report.md"), report)
@@ -326,7 +330,8 @@ export const WorkflowTool = Tool.define(
     return {
       description: DESCRIPTION,
       parameters: Parameters,
-      execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) => run(params, ctx).pipe(Effect.orDie),
+      execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
+        run(params, ctx).pipe(Effect.orDie),
     }
   }),
 )
@@ -365,7 +370,9 @@ function buildTextSynthesis(results: CellResult[], _runDir: string) {
     if (r.error || !r.text.trim()) continue
     const block = `### ${r.unit} — ${r.pass}\n${r.text.trim()}`
     if (total + block.length > SYNTH_TEXT_LIMIT) {
-      sections.push(`\n[output truncated: ${results.length} cells exceeded the ${SYNTH_TEXT_LIMIT}-char synthesis budget]`)
+      sections.push(
+        `\n[output truncated: ${results.length} cells exceeded the ${SYNTH_TEXT_LIMIT}-char synthesis budget]`,
+      )
       break
     }
     sections.push(block)

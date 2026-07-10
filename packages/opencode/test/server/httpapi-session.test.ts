@@ -1,7 +1,7 @@
 import { afterEach, describe, expect } from "bun:test"
 import { mkdir } from "node:fs/promises"
 import path from "node:path"
-import { Cause, Effect, Exit, Layer } from "effect"
+import { Cause, Effect, Exit, Fiber, Layer } from "effect"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { registerAdapter } from "../../src/control-plane/adapters"
 import type { WorkspaceAdapter } from "../../src/control-plane/types"
@@ -16,6 +16,7 @@ import { Server } from "../../src/server/server"
 import * as HttpSessionError from "../../src/server/routes/instance/httpapi/handlers/session-errors"
 import { SessionPaths } from "../../src/server/routes/instance/httpapi/groups/session"
 import { Session } from "@/session/session"
+import { SessionRunState } from "@/session/run-state"
 import { MessageID, PartID, SessionID, type SessionID as SessionIDType } from "../../src/session/schema"
 import { MessageV2 } from "../../src/session/message-v2"
 import { Database } from "@/storage/db"
@@ -28,7 +29,7 @@ import * as Log from "@opencode-ai/core/util/log"
 import { eq } from "drizzle-orm"
 import { resetDatabase } from "../fixture/db"
 import { disposeAllInstances, TestInstance } from "../fixture/fixture"
-import { testEffect } from "../lib/effect"
+import { pollWithTimeout, testEffect, testEffectShared } from "../lib/effect"
 
 void Log.init({ print: false })
 
@@ -43,6 +44,15 @@ const instanceStoreLayer = InstanceStore.defaultLayer.pipe(
   ),
 )
 const it = testEffect(Layer.mergeAll(instanceStoreLayer, Project.defaultLayer, Session.defaultLayer, workspaceLayer))
+const shared = testEffectShared(
+  Layer.mergeAll(
+    instanceStoreLayer,
+    Project.defaultLayer,
+    Session.defaultLayer,
+    SessionRunState.defaultLayer,
+    workspaceLayer,
+  ),
+)
 
 function app() {
   return Server.Default().app
@@ -734,7 +744,23 @@ describe("session HttpApi", () => {
         const test = yield* TestInstance
         const headers = { "x-opencode-directory": test.directory, "content-type": "application/json" }
         const session = yield* createSession({ title: "messages" })
+        const idle = yield* createTextMessage(session.id, "idle")
         const first = yield* createTextMessage(session.id, "first")
+        const sessions = yield* Session.Service
+        yield* sessions.updateMessage({
+          id: MessageID.ascending(),
+          role: "assistant",
+          parentID: first.info.id,
+          sessionID: session.id,
+          mode: "build",
+          agent: "build",
+          path: { cwd: test.directory, root: test.directory },
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          modelID: ModelID.make("test"),
+          providerID: ProviderID.make("test"),
+          time: { created: Date.now() },
+        } satisfies MessageV2.Assistant)
         const second = yield* createTextMessage(session.id, "second")
 
         const updated = yield* requestJson<MessageV2.Part>(
@@ -764,10 +790,51 @@ describe("session HttpApi", () => {
 
         expect(
           yield* requestJson<boolean>(
+            pathFor(SessionPaths.deleteMessage, { sessionID: session.id, messageID: idle.info.id }),
+            { method: "DELETE", headers },
+          ),
+        ).toBe(true)
+
+        expect(
+          yield* requestJson<boolean>(
             pathFor(SessionPaths.deleteMessage, { sessionID: session.id, messageID: second.info.id }),
             { method: "DELETE", headers },
           ),
         ).toBe(true)
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  shared.instance(
+    "rejects deleting a nonqueued message while busy",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const headers = { "x-opencode-directory": test.directory, "content-type": "application/json" }
+        const session = yield* createSession({ title: "busy message" })
+        const message = yield* createTextMessage(session.id, "active")
+        const run = yield* SessionRunState.Service
+        const running = yield* run
+          .ensureRunning(session.id, Effect.die("cancelled"), Effect.never)
+          .pipe(Effect.forkChild)
+
+        yield* pollWithTimeout(
+          run.assertNotBusy(session.id).pipe(
+            Effect.as(undefined),
+            Effect.catchTag("SessionBusyError", () => Effect.succeed(true)),
+          ),
+          "session never became busy",
+        )
+
+        expect(
+          (yield* request(pathFor(SessionPaths.deleteMessage, { sessionID: session.id, messageID: message.info.id }), {
+            method: "DELETE",
+            headers,
+          })).status,
+        ).toBe(409)
+
+        yield* run.cancel(session.id)
+        yield* Fiber.await(running)
       }),
     { git: true, config: { formatter: false, lsp: false } },
   )
@@ -819,6 +886,16 @@ describe("session HttpApi", () => {
             method: "POST",
             headers,
           }),
+        ).toMatchObject({ id: session.id })
+
+        expect(
+          yield* requestJson<Session.Info>(
+            `${pathFor(SessionPaths.unrevert, { sessionID: session.id })}?restoreFiles=false`,
+            {
+              method: "POST",
+              headers,
+            },
+          ),
         ).toMatchObject({ id: session.id })
 
         const permissionID = String(PermissionID.ascending())

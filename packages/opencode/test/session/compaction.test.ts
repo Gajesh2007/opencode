@@ -6,6 +6,7 @@ import { Bus } from "../../src/bus"
 import { Config } from "@/config/config"
 import { Image } from "@/image/image"
 import { Agent } from "../../src/agent/agent"
+import { Collaboration } from "@/agent/collaboration"
 import { LLM } from "../../src/session/llm"
 import { SessionCompaction } from "../../src/session/compaction"
 import { Token } from "@/util/token"
@@ -268,6 +269,7 @@ function compactionProcessLayer(options?: CompactionProcessOptions) {
         Layer.provide(Image.defaultLayer),
         Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
         Layer.provide(status),
+        Layer.provide(Collaboration.defaultLayer),
       )
     : layer(options?.result ?? "continue")
   return Layer.mergeAll(SessionCompaction.layer.pipe(Layer.provide(processor)), processor, bus, status).pipe(

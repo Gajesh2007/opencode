@@ -68,6 +68,10 @@ export const PromptPayload = Schema.Struct(Struct.omit(SessionPrompt.PromptInput
 export const CommandPayload = Schema.Struct(Struct.omit(SessionPrompt.CommandInput.fields, ["sessionID"]))
 export const ShellPayload = Schema.Struct(Struct.omit(SessionPrompt.ShellInput.fields, ["sessionID"]))
 export const RevertPayload = Schema.Struct(Struct.omit(SessionRevert.RevertInput.fields, ["sessionID"]))
+export const UnrevertQuery = Schema.Struct({
+  ...WorkspaceRoutingQueryFields,
+  restoreFiles: Schema.optional(QueryBoolean),
+})
 export const PermissionResponsePayload = Schema.Struct({
   response: Permission.Reply,
 })
@@ -392,14 +396,14 @@ export const SessionApi = HttpApi.make("session")
         ),
         HttpApiEndpoint.post("unrevert", SessionPaths.unrevert, {
           params: { sessionID: SessionID },
-          query: WorkspaceRoutingQuery,
+          query: UnrevertQuery,
           success: described(Session.Info, "Updated session"),
           error: [HttpApiError.BadRequest, ApiNotFoundError, SessionBusyError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "session.unrevert",
             summary: "Restore reverted messages",
-            description: "Restore all previously reverted messages in a session.",
+            description: "Restore reverted messages, optionally restoring files from the saved snapshot.",
           }),
         ),
         HttpApiEndpoint.post("permissionRespond", SessionPaths.permissions, {

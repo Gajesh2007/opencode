@@ -31,6 +31,8 @@ import { TestLLMServer } from "../lib/llm-server"
 import { NodeFileSystem } from "@effect/platform-node"
 import { Agent as AgentSvc } from "../../src/agent/agent"
 import { BackgroundJob } from "@/background/job"
+import { Collaboration } from "@/agent/collaboration"
+import { SubagentRun } from "@/agent/subagent-run"
 import { SubagentLimit } from "@/agent/subagent-limit"
 import { Team } from "@/agent/team"
 import { Memory } from "@/memory/memory"
@@ -143,6 +145,8 @@ function makeHttp() {
   const question = Question.layer.pipe(Layer.provideMerge(deps))
   const todo = Todo.layer.pipe(Layer.provideMerge(deps))
   const registry = ToolRegistry.layer.pipe(
+    Layer.provideMerge(SubagentRun.defaultLayer),
+    Layer.provideMerge(Collaboration.defaultLayer),
     Layer.provide(Skill.defaultLayer),
     Layer.provide(FetchHttpClient.layer),
     Layer.provide(CrossSpawnSpawner.defaultLayer),

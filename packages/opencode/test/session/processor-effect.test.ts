@@ -6,6 +6,7 @@ import path from "path"
 import z from "zod"
 import type { Agent } from "../../src/agent/agent"
 import { Agent as AgentSvc } from "../../src/agent/agent"
+import { Collaboration } from "@/agent/collaboration"
 import { Bus } from "../../src/bus"
 import { Config } from "@/config/config"
 import { Image } from "@/image/image"
@@ -184,6 +185,7 @@ const deps = Layer.mergeAll(
   status,
   SyncEvent.defaultLayer,
   EventV2Bridge.defaultLayer,
+  Collaboration.defaultLayer,
 ).pipe(Layer.provideMerge(infra))
 const env = Layer.mergeAll(
   TestLLMServer.layer,
@@ -255,6 +257,56 @@ it.live("session.processor effect tests capture llm input cleanly", () =>
   ),
 )
 
+it.live("session.processor preempts after reasoning when collaboration mail arrives", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        const collaboration = yield* Collaboration.Service
+        const release = defer<void>()
+        yield* llm.push(reply().reason("considering options").wait(release.promise).text("must not reach text").stop())
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "hi")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        yield* collaboration.registerRoot(chat.id)
+        const child = SessionID.make("ses_processor_preempt_child")
+        yield* collaboration.registerChild({ parentSessionID: chat.id, sessionID: child, taskName: "worker" })
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+        const input = {
+          user: parent,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user" as const, content: "hi" }],
+          tools: {},
+        } satisfies LLM.StreamInput
+
+        const processing = yield* handle.process(input).pipe(Effect.forkChild)
+        yield* llm.wait(1)
+        yield* collaboration.send({
+          sessionID: child,
+          target: "..",
+          kind: "MESSAGE",
+          content: "new direction",
+          triggerTurn: false,
+        })
+        yield* Effect.sync(() => release.resolve())
+
+        expect(yield* Fiber.join(processing)).toBe("continue")
+        expect(MessageV2.parts(msg.id).some((part) => part.type === "reasoning")).toBe(true)
+        expect(
+          MessageV2.parts(msg.id).some((part) => part.type === "text" && part.text === "must not reach text"),
+        ).toBe(false)
+        expect(msg.error).toBeUndefined()
+        expect(yield* collaboration.hasMail(chat.id)).toBe(true)
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
 it.live("session.processor effect tests retry a hollow completion with no output", () =>
   provideTmpdirServer(
     ({ dir, llm }) =>
@@ -307,54 +359,56 @@ it.live("session.processor effect tests retry a hollow completion with no output
   ),
 )
 
-it.live("session.processor effect tests stop retrying empty completions after the cap", () =>
-  provideTmpdirServer(
-    ({ dir, llm }) =>
-      Effect.gen(function* () {
-        const { processors, session, provider } = yield* boot()
+it.live(
+  "session.processor effect tests stop retrying empty completions after the cap",
+  () =>
+    provideTmpdirServer(
+      ({ dir, llm }) =>
+        Effect.gen(function* () {
+          const { processors, session, provider } = yield* boot()
 
-        // Every attempt is hollow. The processor must give up after the bounded
-        // cap (EMPTY_COMPLETION_MAX_RETRIES) instead of looping forever. Queue
-        // exactly initial + cap = 3 so a 4th call (a bug) would hit the auto
-        // fallback and fail the count assertion rather than be masked.
-        for (let i = 0; i < 3; i++) yield* llm.push(reply().stop())
+          // Every attempt is hollow. The processor must give up after the bounded
+          // cap (EMPTY_COMPLETION_MAX_RETRIES) instead of looping forever. Queue
+          // exactly initial + cap = 3 so a 4th call (a bug) would hit the auto
+          // fallback and fail the count assertion rather than be masked.
+          for (let i = 0; i < 3; i++) yield* llm.push(reply().stop())
 
-        const chat = yield* session.create({})
-        const parent = yield* user(chat.id, "hi")
-        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
-        const handle = yield* processors.create({
-          assistantMessage: msg,
-          sessionID: chat.id,
-          model: mdl,
-        })
-
-        const input = {
-          user: {
-            id: parent.id,
+          const chat = yield* session.create({})
+          const parent = yield* user(chat.id, "hi")
+          const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+          const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+          const handle = yield* processors.create({
+            assistantMessage: msg,
             sessionID: chat.id,
-            role: "user",
-            time: parent.time,
-            agent: parent.agent,
-            model: { providerID: ref.providerID, modelID: ref.modelID },
-          } satisfies MessageV2.User,
-          sessionID: chat.id,
-          model: mdl,
-          agent: agent(),
-          system: [],
-          messages: [{ role: "user", content: "hi" }],
-          tools: {},
-        } satisfies LLM.StreamInput
+            model: mdl,
+          })
 
-        const value = yield* handle.process(input)
-        const calls = yield* llm.calls
+          const input = {
+            user: {
+              id: parent.id,
+              sessionID: chat.id,
+              role: "user",
+              time: parent.time,
+              agent: parent.agent,
+              model: { providerID: ref.providerID, modelID: ref.modelID },
+            } satisfies MessageV2.User,
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [{ role: "user", content: "hi" }],
+            tools: {},
+          } satisfies LLM.StreamInput
 
-        // initial attempt + EMPTY_COMPLETION_MAX_RETRIES (2) = 3 calls, then accept.
-        expect(calls).toBe(3)
-        expect(value).toBe("continue")
-      }),
-    { config: (url) => providerCfg(url) },
-  ),
+          const value = yield* handle.process(input)
+          const calls = yield* llm.calls
+
+          // initial attempt + EMPTY_COMPLETION_MAX_RETRIES (2) = 3 calls, then accept.
+          expect(calls).toBe(3)
+          expect(value).toBe("continue")
+        }),
+      { config: (url) => providerCfg(url) },
+    ),
   // Two real backoffs (2s + 4s) exceed the default 5s test timeout.
   15_000,
 )
@@ -535,81 +589,79 @@ it.live("session.processor effect tests capture reasoning from http mock", () =>
   ),
 )
 
-it.live(
-  "session.processor effect tests coalesce small text deltas into batched PartDelta events",
-  () =>
-    provideTmpdirServer(
-      ({ dir, llm }) =>
-        Effect.gen(function* () {
-          const { processors, session, provider } = yield* boot()
-          const bus = yield* Bus.Service
+it.live("session.processor effect tests coalesce small text deltas into batched PartDelta events", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        const bus = yield* Bus.Service
 
-          // 10 small deltas, each 2 chars (20 chars total — well below the
-          // 64-byte coalescing threshold). Without coalescing, the per-delta
-          // path would publish 10 separate PartDelta events; with coalescing
-          // we expect at most 1-2 (every delta accumulates into one bucket
-          // that flushes at cleanup, plus the part-updated PartUpdated event
-          // emitted on text-end is not counted here).
-          let chain = reply()
-          for (let i = 0; i < 10; i++) chain = chain.text("ab")
-          yield* llm.push(chain.stop())
+        // 10 small deltas, each 2 chars (20 chars total — well below the
+        // 64-byte coalescing threshold). Without coalescing, the per-delta
+        // path would publish 10 separate PartDelta events; with coalescing
+        // we expect at most 1-2 (every delta accumulates into one bucket
+        // that flushes at cleanup, plus the part-updated PartUpdated event
+        // emitted on text-end is not counted here).
+        let chain = reply()
+        for (let i = 0; i < 10; i++) chain = chain.text("ab")
+        yield* llm.push(chain.stop())
 
-          const chat = yield* session.create({})
-          const parent = yield* user(chat.id, "stream")
-          const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-          const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
-          const handle = yield* processors.create({
-            assistantMessage: msg,
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "stream")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({
+          assistantMessage: msg,
+          sessionID: chat.id,
+          model: mdl,
+        })
+
+        const partDeltaEvents: { partID: string; delta: string }[] = []
+        yield* bus.subscribeCallback(MessageV2.Event.PartDelta, (event) => {
+          partDeltaEvents.push({
+            partID: event.properties.partID,
+            delta: event.properties.delta,
+          })
+        })
+
+        const value = yield* handle.process({
+          user: {
+            id: parent.id,
             sessionID: chat.id,
-            model: mdl,
-          })
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies MessageV2.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "stream" }],
+          tools: {},
+        })
 
-          const partDeltaEvents: { partID: string; delta: string }[] = []
-          yield* bus.subscribeCallback(MessageV2.Event.PartDelta, (event) => {
-            partDeltaEvents.push({
-              partID: event.properties.partID,
-              delta: event.properties.delta,
-            })
-          })
+        const parts = MessageV2.parts(msg.id)
+        const text = parts.find((part): part is MessageV2.TextPart => part.type === "text")
 
-          const value = yield* handle.process({
-            user: {
-              id: parent.id,
-              sessionID: chat.id,
-              role: "user",
-              time: parent.time,
-              agent: parent.agent,
-              model: { providerID: ref.providerID, modelID: ref.modelID },
-            } satisfies MessageV2.User,
-            sessionID: chat.id,
-            model: mdl,
-            agent: agent(),
-            system: [],
-            messages: [{ role: "user", content: "stream" }],
-            tools: {},
-          })
+        // Correctness: streamed text is fully reconstructed.
+        expect(value).toBe("continue")
+        expect(text?.text).toBe("ab".repeat(10))
 
-          const parts = MessageV2.parts(msg.id)
-          const text = parts.find((part): part is MessageV2.TextPart => part.type === "text")
+        // Coalescing: all 10 small deltas fit in one bucket and flush at
+        // cleanup. Allow up to 2 PartDelta events for safety (a split would
+        // only happen if cleanup ran before the final text-delta queued —
+        // not the case here, but the threshold is conservative).
+        expect(partDeltaEvents.length).toBeLessThanOrEqual(2)
 
-          // Correctness: streamed text is fully reconstructed.
-          expect(value).toBe("continue")
-          expect(text?.text).toBe("ab".repeat(10))
-
-          // Coalescing: all 10 small deltas fit in one bucket and flush at
-          // cleanup. Allow up to 2 PartDelta events for safety (a split would
-          // only happen if cleanup ran before the final text-delta queued —
-          // not the case here, but the threshold is conservative).
-          expect(partDeltaEvents.length).toBeLessThanOrEqual(2)
-
-          // The accumulated delta text matches the part's text exactly.
-          const sameTarget = partDeltaEvents.every((e) => e.partID === text?.id)
-          expect(sameTarget).toBe(true)
-          const concatenated = partDeltaEvents.map((e) => e.delta).join("")
-          expect(concatenated).toBe("ab".repeat(10))
-        }),
-      { config: (url) => providerCfg(url) },
-    ),
+        // The accumulated delta text matches the part's text exactly.
+        const sameTarget = partDeltaEvents.every((e) => e.partID === text?.id)
+        expect(sameTarget).toBe(true)
+        const concatenated = partDeltaEvents.map((e) => e.delta).join("")
+        expect(concatenated).toBe("ab".repeat(10))
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
 )
 
 it.live("session.processor effect tests reset reasoning state across retries", () =>

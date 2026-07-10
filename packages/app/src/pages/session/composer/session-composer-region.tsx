@@ -35,16 +35,20 @@ export function SessionComposerRegion(props: {
     sending?: string
     edit?: { id: string; prompt: FollowupDraft["prompt"]; context: FollowupDraft["context"] }
     onQueue: (draft: FollowupDraft) => void
+    onQueuedEscape: (event: KeyboardEvent) => boolean
     onAbort: () => void
     onSend: (id: string) => void
     onEdit: (id: string) => void
+    onRetract: (id: string) => void
     onEditLoaded: () => void
   }
   revert?: {
     items: { id: string; text: string }[]
-    restoring?: string
+    restoring?: boolean
     disabled?: boolean
     onRestore: (id: string) => void
+    onRestoreChat: () => void
+    onRestoreCode: () => void
   }
   setPromptDockRef: (el: HTMLDivElement) => void
 }) {
@@ -192,6 +196,8 @@ export function SessionComposerRegion(props: {
                         restoring={revert.restoring}
                         disabled={revert.disabled}
                         onRestore={revert.onRestore}
+                        onRestoreChat={revert.onRestoreChat}
+                        onRestoreCode={revert.onRestoreCode}
                       />
                     </div>
                   )}
@@ -237,6 +243,8 @@ export function SessionComposerRegion(props: {
                     restoring={revert.restoring}
                     disabled={revert.disabled}
                     onRestore={revert.onRestore}
+                    onRestoreChat={revert.onRestoreChat}
+                    onRestoreCode={revert.onRestoreCode}
                   />
                 </div>
               )}
@@ -255,6 +263,7 @@ export function SessionComposerRegion(props: {
                   sending={props.followup!.sending}
                   onSend={props.followup!.onSend}
                   onEdit={props.followup!.onEdit}
+                  onRetract={props.followup!.onRetract}
                 />
               </Show>
               <Show
@@ -271,6 +280,7 @@ export function SessionComposerRegion(props: {
                       onEditLoaded={props.followup?.onEditLoaded}
                       shouldQueue={props.followup?.queue}
                       onQueue={props.followup?.onQueue}
+                      onQueuedEscape={props.followup?.onQueuedEscape}
                       onAbort={props.followup?.onAbort}
                       onSubmit={props.onSubmit}
                     />

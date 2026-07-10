@@ -17,6 +17,8 @@ import { Goal } from "@/session/goal"
 import { MetaAgent } from "@/session/metaagent"
 import { Skill } from "@/skill"
 import { Agent } from "@/agent/agent"
+import { Collaboration } from "@/agent/collaboration"
+import { SubagentRun } from "@/agent/subagent-run"
 import { SubagentLimit } from "@/agent/subagent-limit"
 import { Team } from "@/agent/team"
 import { Memory } from "@/memory/memory"
@@ -53,9 +55,12 @@ type RegistryLayerOptions = {
 const registryLayer = (opts: RegistryLayerOptions = {}) =>
   ToolRegistry.layer
     .pipe(
+      Layer.provideMerge(SubagentRun.defaultLayer.pipe(Layer.provideMerge(Collaboration.defaultLayer))),
       Layer.provide(configLayer),
       Layer.provide(opts.plugin ?? Plugin.defaultLayer),
-      Layer.provide(Layer.mergeAll(Question.defaultLayer, Todo.defaultLayer, Goal.defaultLayer, MetaAgent.defaultLayer)),
+      Layer.provide(
+        Layer.mergeAll(Question.defaultLayer, Todo.defaultLayer, Goal.defaultLayer, MetaAgent.defaultLayer),
+      ),
       Layer.provide(Skill.defaultLayer),
       Layer.provide(Agent.defaultLayer),
       Layer.provide(Session.defaultLayer),
@@ -68,9 +73,7 @@ const registryLayer = (opts: RegistryLayerOptions = {}) =>
       Layer.provide(AppFileSystem.defaultLayer),
       Layer.provide(Bus.layer),
       Layer.provide(FetchHttpClient.layer),
-      Layer.provide(Format.defaultLayer),
-      Layer.provide(node),
-      Layer.provide(Ripgrep.defaultLayer),
+      Layer.provide(Layer.mergeAll(Format.defaultLayer, node, Ripgrep.defaultLayer)),
       Layer.provide(Truncate.defaultLayer),
       Layer.provide(Layer.mergeAll(SubagentLimit.defaultLayer, Team.defaultLayer, Memory.defaultLayer)),
     )
@@ -140,6 +143,24 @@ describe("tool.registry", () => {
       const ids = yield* registry.ids()
 
       expect(ids).toContain("task_status")
+    }),
+  )
+
+  it.instance("registers the local collaboration tools", () =>
+    Effect.gen(function* () {
+      const registry = yield* ToolRegistry.Service
+      const ids = yield* registry.ids()
+      const spawnAgent = (yield* registry.all()).find((tool) => tool.id === "spawn_agent")
+
+      expect(ids).toContain("spawn_agent")
+      expect(ids).toContain("send_message")
+      expect(ids).toContain("followup_task")
+      expect(ids).toContain("wait_agent")
+      expect(ids).toContain("interrupt_agent")
+      expect(ids).toContain("list_agents")
+      expect(spawnAgent?.description).toContain("recursively use spawn_agent")
+      expect(spawnAgent?.description).toContain("four total concurrency slots")
+      expect(spawnAgent?.description).toContain("explicit denies win")
     }),
   )
 

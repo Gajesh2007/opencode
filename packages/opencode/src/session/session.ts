@@ -21,7 +21,7 @@ import { lt } from "drizzle-orm"
 import { or } from "drizzle-orm"
 import { SyncEvent } from "../sync"
 import type { SQL } from "drizzle-orm"
-import { PartTable, SessionTable } from "./session.sql"
+import { MessageTable, PartTable, SessionTable } from "./session.sql"
 import { ProjectTable } from "../project/project.sql"
 import { Storage } from "@/storage/storage"
 import * as Log from "@opencode-ai/core/util/log"
@@ -38,7 +38,7 @@ import type { Provider } from "@/provider/provider"
 import { Permission } from "@/permission"
 import { Global } from "@opencode-ai/core/global"
 import { Effect, Layer, Option, Context, Schema, Types } from "effect"
-import { NonNegativeInt, optionalOmitUndefined } from "@opencode-ai/core/schema"
+import { NonNegativeInt, PositiveInt, optionalOmitUndefined } from "@opencode-ai/core/schema"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 
 const log = Log.create({ service: "session" })
@@ -255,6 +255,7 @@ export type CreateInput = Types.DeepMutable<Schema.Schema.Type<typeof CreateInpu
 export const ForkInput = Schema.Struct({
   sessionID: SessionID,
   messageID: Schema.optional(MessageID),
+  lastTurns: Schema.optional(PositiveInt),
 })
 export const GetInput = SessionID
 export const ChildrenInput = SessionID
@@ -479,6 +480,7 @@ export interface Interface {
     agent?: string
     title?: string
     directory?: string
+    lastTurns?: number
   }) => Effect.Effect<Info, NotFound>
   readonly touch: (sessionID: SessionID) => Effect.Effect<void>
   readonly get: (id: SessionID) => Effect.Effect<Info, NotFound>
@@ -497,7 +499,17 @@ export interface Interface {
   readonly children: (parentID: SessionID) => Effect.Effect<Info[]>
   readonly remove: (sessionID: SessionID) => Effect.Effect<void, NotFound>
   readonly updateMessage: <T extends MessageV2.Info>(msg: T) => Effect.Effect<T>
+  /** Persists a user message and its initial part together before publishing update events. */
+  readonly appendMessageWithPart: <T extends MessageV2.Part>(
+    message: MessageV2.User,
+    part: T,
+  ) => Effect.Effect<{ message: MessageV2.User; part: T }>
   readonly removeMessage: (input: { sessionID: SessionID; messageID: MessageID }) => Effect.Effect<MessageID>
+  /** Removes a still-queued user message without racing the next processor turn. */
+  readonly retractQueuedMessage: (input: {
+    sessionID: SessionID
+    messageID: MessageID
+  }) => Effect.Effect<MessageID, BusyError>
   readonly removePart: (input: { sessionID: SessionID; messageID: MessageID; partID: PartID }) => Effect.Effect<PartID>
   readonly getPart: (input: {
     sessionID: SessionID
@@ -642,6 +654,56 @@ export const layer: Layer.Layer<
         return msg
       }).pipe(Effect.withSpan("Session.updateMessage"))
 
+    const appendMessageWithPart: Interface["appendMessageWithPart"] = (message, part) =>
+      Effect.gen(function* () {
+        const time = Date.now()
+        yield* Effect.sync(() =>
+          Database.transaction(
+            (db) => {
+              const { id, sessionID, ...messageData } = message
+              const { id: partID, messageID, sessionID: partSessionID, ...partData } = part
+              db.insert(MessageTable)
+                .values({ id, session_id: sessionID, time_created: message.time.created, data: messageData })
+                .onConflictDoUpdate({ target: MessageTable.id, set: { data: messageData } })
+                .run()
+              db.insert(PartTable)
+                .values({
+                  id: partID,
+                  message_id: messageID,
+                  session_id: partSessionID,
+                  time_created: time,
+                  data: partData,
+                })
+                .onConflictDoUpdate({ target: PartTable.id, set: { data: partData } })
+                .run()
+            },
+            { behavior: "immediate" },
+          ),
+        )
+        // The rows are already durable. Notification failures must not make callers
+        // retry the append and create duplicate messages; projectors safely upsert
+        // when publishing succeeds.
+        yield* sync
+          .run(MessageV2.Event.Updated, { sessionID: message.sessionID, info: message })
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.sync(() => log.warn("failed to publish atomically appended message", { cause })),
+            ),
+          )
+        yield* sync
+          .run(MessageV2.Event.PartUpdated, {
+            sessionID: part.sessionID,
+            part: structuredClone(part),
+            time,
+          })
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.sync(() => log.warn("failed to publish atomically appended message part", { cause })),
+            ),
+          )
+        return { message, part }
+      }).pipe(Effect.withSpan("Session.appendMessageWithPart"))
+
     const updatePart = <T extends MessageV2.Part>(part: T): Effect.Effect<T> =>
       Effect.gen(function* () {
         yield* sync.run(MessageV2.Event.PartUpdated, {
@@ -716,6 +778,7 @@ export const layer: Layer.Layer<
       agent?: string
       title?: string
       directory?: string
+      lastTurns?: number
     }) {
       const ctx = yield* InstanceState.context
       const original = yield* get(input.sessionID)
@@ -729,11 +792,20 @@ export const layer: Layer.Layer<
         ...(input.agent ? { agent: input.agent } : {}),
         ...(input.permission ? { permission: input.permission } : {}),
       })
-      const msgs = yield* messages({ sessionID: input.sessionID })
+      const source = (yield* messages({ sessionID: input.sessionID })).filter(
+        (msg) => !input.messageID || msg.info.id < input.messageID,
+      )
+      const first =
+        input.lastTurns === undefined
+          ? 0
+          : (source
+              .map((msg, index) => (msg.info.role === "user" ? index : undefined))
+              .filter((index): index is number => index !== undefined)
+              .at(-input.lastTurns) ?? source.length)
+      const msgs = source.slice(first)
       const idMap = new Map<string, MessageID>()
 
       for (const msg of msgs) {
-        if (input.messageID && msg.info.id >= input.messageID) break
         const newID = MessageID.ascending()
         idMap.set(msg.info.id, newID)
 
@@ -839,6 +911,46 @@ export const layer: Layer.Layer<
       return input.messageID
     })
 
+    const retractQueuedMessage: Interface["retractQueuedMessage"] = Effect.fn("Session.retractQueuedMessage")(
+      function* (input) {
+        const removed = yield* Effect.sync(() =>
+          Database.transaction(
+            (tx) => {
+              const messages = tx.select().from(MessageTable).where(eq(MessageTable.session_id, input.sessionID)).all()
+              const target = messages.find((message) => message.id === input.messageID)
+              if (target?.data.role !== "user") return false
+
+              // An assistant parented by this user message has claimed the turn.
+              if (
+                messages.some(
+                  (message) => message.data.role === "assistant" && message.data.parentID === input.messageID,
+                )
+              ) {
+                return false
+              }
+
+              const pending = messages.findLast(
+                (message) => message.data.role === "assistant" && !message.data.time.completed,
+              )
+              if (!pending || target.id <= pending.id) return false
+
+              tx.delete(MessageTable)
+                .where(and(eq(MessageTable.id, input.messageID), eq(MessageTable.session_id, input.sessionID)))
+                .run()
+              return true
+            },
+            { behavior: "immediate" },
+          ),
+        )
+        if (!removed) return yield* Effect.fail(new BusyError({ sessionID: input.sessionID }))
+
+        // The delete above is the atomic ownership decision. Record and publish the
+        // corresponding sync event afterwards so other clients drop the message too.
+        yield* sync.run(MessageV2.Event.Removed, input)
+        return input.messageID
+      },
+    )
+
     const removePart = Effect.fn("Session.removePart")(function* (input: {
       sessionID: SessionID
       messageID: MessageID
@@ -896,7 +1008,9 @@ export const layer: Layer.Layer<
       children,
       remove,
       updateMessage,
+      appendMessageWithPart,
       removeMessage,
+      retractQueuedMessage,
       removePart,
       updatePart,
       getPart,

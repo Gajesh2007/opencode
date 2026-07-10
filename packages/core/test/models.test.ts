@@ -128,6 +128,20 @@ describe("ModelsDev.injectModels", () => {
     vercel: { id: "vercel", name: "Vercel AI Gateway", env: ["AI_GATEWAY_API_KEY"], npm: "@ai-sdk/gateway", models },
   })
 
+  const withOpenAI = (models: Record<string, ModelsDev.Model> = {}): Record<string, ModelsDev.Provider> => ({
+    openai: { id: "openai", name: "OpenAI", env: ["OPENAI_API_KEY"], npm: "@ai-sdk/openai", models },
+  })
+
+  const withOpenRouter = (models: Record<string, ModelsDev.Model> = {}): Record<string, ModelsDev.Provider> => ({
+    openrouter: {
+      id: "openrouter",
+      name: "OpenRouter",
+      env: ["OPENROUTER_API_KEY"],
+      npm: "@openrouter/ai-sdk-provider",
+      models,
+    },
+  })
+
   const withSakana = (models: Record<string, ModelsDev.Model> = {}): Record<string, ModelsDev.Provider> => ({
     sakana: {
       id: "sakana",
@@ -138,6 +152,58 @@ describe("ModelsDev.injectModels", () => {
       models,
     },
   })
+
+  it.live("adds GPT-5.6 family to OpenAI when missing", () =>
+    Effect.sync(() => {
+      const result = ModelsDev.injectModels(withOpenAI())
+      const alias = result.openai.models["gpt-5.6"]
+      const sol = result.openai.models["gpt-5.6-sol"]
+      const terra = result.openai.models["gpt-5.6-terra"]
+      const luna = result.openai.models["gpt-5.6-luna"]
+      expect(alias?.name).toBe("GPT-5.6")
+      expect(alias?.limit.context).toBe(1_050_000)
+      expect(sol?.name).toBe("GPT-5.6 Sol")
+      expect(sol?.reasoning).toBe(true)
+      expect(sol?.limit.context).toBe(1_050_000)
+      expect(sol?.cost?.input).toBe(5)
+      expect(sol?.cost?.cache_write).toBe(6.25)
+      expect(sol?.cost?.context_over_200k?.output).toBe(45)
+      expect(terra?.cost?.input).toBe(2.5)
+      expect(luna?.cost?.output).toBe(6)
+    }),
+  )
+
+  it.live("adds GPT-5.6 base models to OpenRouter when missing", () =>
+    Effect.sync(() => {
+      const result = ModelsDev.injectModels(withOpenRouter())
+      const sol = result.openrouter.models["openai/gpt-5.6-sol"]
+      const terra = result.openrouter.models["openai/gpt-5.6-terra"]
+      const luna = result.openrouter.models["openai/gpt-5.6-luna"]
+      expect(sol?.name).toBe("OpenAI: GPT-5.6 Sol")
+      expect(sol?.limit.input).toBeUndefined()
+      expect(sol?.cost?.input).toBe(5)
+      expect(sol?.cost?.cache_write).toBeUndefined()
+      expect(terra?.cost?.output).toBe(15)
+      expect(luna?.cost?.input).toBe(1)
+      expect(result.openrouter.models["openai/gpt-5.6-sol-pro"]).toBeUndefined()
+    }),
+  )
+
+  it.live("adds GPT-5.6 family to the Vercel AI Gateway when missing", () =>
+    Effect.sync(() => {
+      const result = ModelsDev.injectModels(withVercel())
+      const sol = result.vercel.models["openai/gpt-5.6-sol"]
+      const terra = result.vercel.models["openai/gpt-5.6-terra"]
+      const luna = result.vercel.models["openai/gpt-5.6-luna"]
+      expect(sol?.name).toBe("GPT-5.6 Sol")
+      expect(sol?.reasoning).toBe(true)
+      expect(sol?.tool_call).toBe(true)
+      expect(sol?.cost?.input).toBe(5)
+      expect(sol?.cost?.cache_write).toBe(6.25)
+      expect(terra?.cost?.context_over_200k?.input).toBe(5)
+      expect(luna?.limit.output).toBe(128_000)
+    }),
+  )
 
   it.live("adds MiniMax M3 to the Vercel AI Gateway when missing", () =>
     Effect.sync(() => {
@@ -160,6 +226,38 @@ describe("ModelsDev.injectModels", () => {
       expect(model?.limit.context).toBe(1_000_000)
       expect(model?.cost?.input).toBe(0.6)
       expect(model?.cost?.output).toBe(3.6)
+    }),
+  )
+
+  it.live("adds Kimi K2.7 Code High Speed to the Vercel AI Gateway when missing", () =>
+    Effect.sync(() => {
+      const result = ModelsDev.injectModels(withVercel())
+      const model = result.vercel.models["moonshotai/kimi-k2.7-code-highspeed"]
+      expect(model?.name).toBe("Kimi K2.7 Code High Speed")
+      expect(model?.reasoning).toBe(true)
+      expect(model?.tool_call).toBe(true)
+      expect(model?.temperature).toBe(false)
+      expect(model?.interleaved).toEqual({ field: "reasoning_content" })
+      expect(model?.limit.context).toBe(262_144)
+      expect(model?.cost?.input).toBe(1.9)
+      expect(model?.cost?.output).toBe(8)
+      expect(model?.cost?.cache_read).toBe(0.38)
+    }),
+  )
+
+  it.live("adds Grok 4.5 to the Vercel AI Gateway when missing", () =>
+    Effect.sync(() => {
+      const result = ModelsDev.injectModels(withVercel())
+      const model = result.vercel.models["xai/grok-4.5"]
+      expect(model?.name).toBe("Grok 4.5")
+      expect(model?.reasoning).toBe(true)
+      expect(model?.tool_call).toBe(true)
+      expect(model?.limit.context).toBe(500_000)
+      expect(model?.limit.output).toBe(500_000)
+      expect(model?.cost?.input).toBe(2)
+      expect(model?.cost?.output).toBe(6)
+      expect(model?.cost?.cache_read).toBe(0.5)
+      expect(model?.cost?.context_over_200k?.input).toBe(4)
     }),
   )
 

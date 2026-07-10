@@ -7,9 +7,11 @@ import { useLanguage } from "@/context/language"
 
 export function SessionRevertDock(props: {
   items: { id: string; text: string }[]
-  restoring?: string
+  restoring?: boolean
   disabled?: boolean
   onRestore: (id: string) => void
+  onRestoreChat: () => void
+  onRestoreCode: () => void
 }) {
   const language = useLanguage()
   const [store, setStore] = createStore({
@@ -75,7 +77,7 @@ export function SessionRevertDock(props: {
       </Show>
 
       <Show when={!store.collapsed}>
-        <div class="px-3 pb-7 flex flex-col gap-1.5 max-h-42 overflow-y-auto no-scrollbar">
+        <div class="px-3 flex flex-col gap-1.5 max-h-42 overflow-y-auto no-scrollbar">
           <For each={props.items}>
             {(item) => (
               <div class="flex items-center gap-2 min-w-0 py-1">
@@ -92,6 +94,26 @@ export function SessionRevertDock(props: {
               </div>
             )}
           </For>
+        </div>
+        <div class="px-3 pb-7 pt-3 flex flex-wrap gap-2">
+          <Button
+            size="small"
+            variant="secondary"
+            class="shrink-0"
+            disabled={props.disabled || !!props.restoring}
+            onClick={props.onRestoreChat}
+          >
+            {language.t("session.revertDock.restoreChat")}
+          </Button>
+          <Button
+            size="small"
+            variant="primary"
+            class="shrink-0"
+            disabled={props.disabled || !!props.restoring}
+            onClick={props.onRestoreCode}
+          >
+            {language.t("session.revertDock.restoreCode")}
+          </Button>
         </div>
       </Show>
     </DockTray>
