@@ -1,4 +1,4 @@
-import { describe, expect } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import { ConfigProvider, Effect, Layer, Stream } from "effect"
 import { Headers, HttpClientRequest } from "effect/unstable/http"
 import { LLM, LLMError, Message, Model, ToolCallPart, Usage } from "../../src"
@@ -6,6 +6,7 @@ import { Auth, LLMClient, RequestExecutor, WebSocketExecutor } from "../../src/r
 import * as Azure from "../../src/providers/azure"
 import * as OpenAI from "../../src/providers/openai"
 import * as OpenAIResponses from "../../src/protocols/openai-responses"
+import * as OpenAIOptions from "../../src/protocols/utils/openai-options"
 import * as ProviderShared from "../../src/protocols/shared"
 import { continuationRequest, nativeOpenAIResponsesContinuation } from "../continuation-scenarios"
 import { it } from "../lib/effect"
@@ -40,6 +41,11 @@ const expectToolOutput = (body: OpenAIResponses.OpenAIResponsesBody): OpenAITool
 }
 
 describe("OpenAI Responses route", () => {
+  test("accepts max but excludes semantic ultra from wire reasoning efforts", () => {
+    expect(OpenAIOptions.isReasoningEffort("max")).toBe(true)
+    expect(OpenAIOptions.isReasoningEffort("ultra")).toBe(false)
+  })
+
   it.effect("prepares OpenAI Responses target", () =>
     Effect.gen(function* () {
       const prepared = yield* LLMClient.prepare(request)
@@ -141,93 +147,91 @@ describe("OpenAI Responses route", () => {
     }),
   )
 
-  it.effect(
-    "pooled WebSocket executor reuses a single socket across sequential opens with the same key",
-    () =>
-      Effect.gen(function* () {
-        // Fake `globalThis.WebSocket` that opens synchronously, tracks
-        // construction count, captures sent messages, and exposes a `close()`
-        // we can assert on. We swap it in only for the duration of the test
-        // and restore the real constructor in the finally block.
-        type Listeners = Partial<{
-          message: (event: { data: string | Uint8Array }) => void
-          error: (event: Event) => void
-          close: (event: { code: number }) => void
-          open: (event: Event) => void
-        }>
-        const constructed: FakeSocket[] = []
-        class FakeSocket {
-          static readonly CONNECTING = 0
-          static readonly OPEN = 1
-          static readonly CLOSING = 2
-          static readonly CLOSED = 3
-          readyState = FakeSocket.OPEN // open synchronously so waitOpen short-circuits
-          readonly url: string
-          readonly listeners: Listeners = {}
-          readonly sent: string[] = []
-          closed = false
-          constructor(url: string) {
-            this.url = url
-            constructed.push(this)
-          }
-          addEventListener<K extends keyof Listeners>(kind: K, handler: Listeners[K]) {
-            this.listeners[kind] = handler as Listeners[K]
-          }
-          removeEventListener<K extends keyof Listeners>(kind: K, handler: Listeners[K]) {
-            if (this.listeners[kind] === handler) delete this.listeners[kind]
-          }
-          send(message: string) {
-            this.sent.push(message)
-          }
-          close(code = 1000) {
-            this.closed = true
-            this.readyState = FakeSocket.CLOSED
-            this.listeners.close?.({ code })
-          }
+  it.effect("pooled WebSocket executor reuses a single socket across sequential opens with the same key", () =>
+    Effect.gen(function* () {
+      // Fake `globalThis.WebSocket` that opens synchronously, tracks
+      // construction count, captures sent messages, and exposes a `close()`
+      // we can assert on. We swap it in only for the duration of the test
+      // and restore the real constructor in the finally block.
+      type Listeners = Partial<{
+        message: (event: { data: string | Uint8Array }) => void
+        error: (event: Event) => void
+        close: (event: { code: number }) => void
+        open: (event: Event) => void
+      }>
+      const constructed: FakeSocket[] = []
+      class FakeSocket {
+        static readonly CONNECTING = 0
+        static readonly OPEN = 1
+        static readonly CLOSING = 2
+        static readonly CLOSED = 3
+        readyState = FakeSocket.OPEN // open synchronously so waitOpen short-circuits
+        readonly url: string
+        readonly listeners: Listeners = {}
+        readonly sent: string[] = []
+        closed = false
+        constructor(url: string) {
+          this.url = url
+          constructed.push(this)
         }
-        const original = globalThis.WebSocket
-        // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- minimal subset is all the pool touches.
-        globalThis.WebSocket = FakeSocket as unknown as typeof globalThis.WebSocket
-
-        try {
-          const executor = WebSocketExecutor.pool({ idleTtlMillis: 60_000 })
-          const input = {
-            url: "wss://api.openai.test/v1/responses",
-            headers: Headers.fromInput({ authorization: "Bearer test" }),
-          }
-
-          // First open: constructs a new socket.
-          const first = yield* executor.open(input)
-          yield* first.sendText(`{"type":"response.create","seq":1}`)
-          // Release back to the pool. The pool keeps the socket OPEN.
-          yield* first.close
-          expect(constructed).toHaveLength(1)
-          expect(constructed[0]!.closed).toBe(false)
-
-          // Second open with the same key: must reuse the cached socket.
-          const second = yield* executor.open(input)
-          yield* second.sendText(`{"type":"response.create","seq":2}`)
-          yield* second.close
-          expect(constructed).toHaveLength(1)
-          expect(constructed[0]!.sent).toEqual([
-            `{"type":"response.create","seq":1}`,
-            `{"type":"response.create","seq":2}`,
-          ])
-          expect(constructed[0]!.closed).toBe(false)
-
-          // A different auth header is a different pool key — must construct
-          // a second socket rather than reuse the first.
-          const otherInput = {
-            url: "wss://api.openai.test/v1/responses",
-            headers: Headers.fromInput({ authorization: "Bearer different" }),
-          }
-          const third = yield* executor.open(otherInput)
-          yield* third.close
-          expect(constructed).toHaveLength(2)
-        } finally {
-          globalThis.WebSocket = original
+        addEventListener<K extends keyof Listeners>(kind: K, handler: Listeners[K]) {
+          this.listeners[kind] = handler as Listeners[K]
         }
-      }),
+        removeEventListener<K extends keyof Listeners>(kind: K, handler: Listeners[K]) {
+          if (this.listeners[kind] === handler) delete this.listeners[kind]
+        }
+        send(message: string) {
+          this.sent.push(message)
+        }
+        close(code = 1000) {
+          this.closed = true
+          this.readyState = FakeSocket.CLOSED
+          this.listeners.close?.({ code })
+        }
+      }
+      const original = globalThis.WebSocket
+      // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- minimal subset is all the pool touches.
+      globalThis.WebSocket = FakeSocket as unknown as typeof globalThis.WebSocket
+
+      try {
+        const executor = WebSocketExecutor.pool({ idleTtlMillis: 60_000 })
+        const input = {
+          url: "wss://api.openai.test/v1/responses",
+          headers: Headers.fromInput({ authorization: "Bearer test" }),
+        }
+
+        // First open: constructs a new socket.
+        const first = yield* executor.open(input)
+        yield* first.sendText(`{"type":"response.create","seq":1}`)
+        // Release back to the pool. The pool keeps the socket OPEN.
+        yield* first.close
+        expect(constructed).toHaveLength(1)
+        expect(constructed[0]!.closed).toBe(false)
+
+        // Second open with the same key: must reuse the cached socket.
+        const second = yield* executor.open(input)
+        yield* second.sendText(`{"type":"response.create","seq":2}`)
+        yield* second.close
+        expect(constructed).toHaveLength(1)
+        expect(constructed[0]!.sent).toEqual([
+          `{"type":"response.create","seq":1}`,
+          `{"type":"response.create","seq":2}`,
+        ])
+        expect(constructed[0]!.closed).toBe(false)
+
+        // A different auth header is a different pool key — must construct
+        // a second socket rather than reuse the first.
+        const otherInput = {
+          url: "wss://api.openai.test/v1/responses",
+          headers: Headers.fromInput({ authorization: "Bearer different" }),
+        }
+        const third = yield* executor.open(otherInput)
+        yield* third.close
+        expect(constructed).toHaveLength(2)
+      } finally {
+        globalThis.WebSocket = original
+      }
+    }),
   )
 
   it.effect("pooled WebSocket executor opens a fresh socket after the underlying socket dies", () =>
@@ -708,9 +712,7 @@ describe("OpenAI Responses route", () => {
           system: "You are concise.",
           messages: [
             Message.user("first turn"),
-            Message.assistant([
-              ToolCallPart.make({ id: "call_1", name: "lookup", input: { query: "repo" } }),
-            ]),
+            Message.assistant([ToolCallPart.make({ id: "call_1", name: "lookup", input: { query: "repo" } })]),
             Message.tool({ id: "call_1", name: "lookup", result: "tool result", resultType: "text" }),
           ],
           tools: [
@@ -726,9 +728,7 @@ describe("OpenAI Responses route", () => {
 
       expect(prepared.body.previous_response_id).toBe("resp_123")
       expect(prepared.body.tools).toBeUndefined()
-      expect(prepared.body.input).toEqual([
-        { type: "function_call_output", call_id: "call_1", output: "tool result" },
-      ])
+      expect(prepared.body.input).toEqual([{ type: "function_call_output", call_id: "call_1", output: "tool result" }])
     }),
   )
 

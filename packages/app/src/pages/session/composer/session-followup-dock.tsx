@@ -10,6 +10,7 @@ export function SessionFollowupDock(props: {
   sending?: string
   onSend: (id: string) => void
   onEdit: (id: string) => void
+  onRetract: (id: string) => void
 }) {
   const language = useLanguage()
   const [store, setStore] = createStore({
@@ -98,6 +99,15 @@ export function SessionFollowupDock(props: {
                   onClick={() => props.onEdit(item.id)}
                 >
                   {language.t("session.followupDock.edit")}
+                </Button>
+                <Button
+                  size="small"
+                  variant="ghost"
+                  class="shrink-0"
+                  disabled={!!props.sending}
+                  onClick={() => props.onRetract(item.id)}
+                >
+                  {language.t("session.followupDock.retract")}
                 </Button>
               </div>
             )}

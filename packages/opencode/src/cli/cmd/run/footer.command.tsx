@@ -7,6 +7,7 @@ import { RunFooterMenu, createFooterMenuState, type RunFooterMenuItem } from "./
 import { formatBindings } from "./keymap.shared"
 import type { RunFooterTheme } from "./theme"
 import type { FooterKeybinds, FooterSubagentTab, RunCommand, RunInput, RunProvider } from "./types"
+import { getModelVariantPresentation } from "../tui/component/model-variant"
 
 type PanelEntry = RunFooterMenuItem & {
   category: string
@@ -578,14 +579,23 @@ export function RunVariantSelectBody(props: {
       variant: undefined,
       current: props.current() === undefined,
     },
-    ...props.variants().map((variant) => ({
-      category: "",
-      display: variant,
-      description: props.current() === variant ? "current" : undefined,
-      keywords: variant,
-      variant,
-      current: props.current() === variant,
-    })),
+    ...props.variants().map((variant) => {
+      const presentation = getModelVariantPresentation(variant)
+      const current = props.current() === variant
+      return {
+        category: "",
+        display: presentation.label,
+        description: presentation.description ?? (current ? "current" : undefined),
+        footer: presentation.warning
+          ? current
+            ? "current · Usage & cost warning"
+            : "Usage & cost warning"
+          : undefined,
+        keywords: `${variant} ${presentation.label} ${presentation.description ?? ""}`,
+        variant,
+        current,
+      }
+    }),
   ])
   const items = createMemo<VariantEntry[]>(() => match(query(), entries()))
   const menu = createFooterMenuState({ count: () => items().length, limit: PANEL_LIST_ROWS })

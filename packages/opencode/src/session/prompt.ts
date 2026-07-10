@@ -65,6 +65,9 @@ import { Goal } from "./goal"
 import { MetaAgent } from "./metaagent"
 import { ReasoningReviewer } from "./reasoning-reviewer"
 import { Memory } from "@/memory/memory"
+import { Collaboration } from "@/agent/collaboration"
+import { collaborationGuidance } from "./collaboration"
+import { ProviderTransform } from "@/provider/transform"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -134,6 +137,7 @@ export const layer = Layer.effect(
     const metaagent = yield* MetaAgent.Service
     const reviewer = yield* ReasoningReviewer.Service
     const memory = yield* Memory.Service
+    const collaborationMailbox = yield* Collaboration.Service
     const ops = Effect.fn("SessionPrompt.ops")(function* () {
       return {
         cancel: (sessionID: SessionID) => cancel(sessionID),
@@ -1235,8 +1239,9 @@ export const layer = Layer.effect(
         permissions.push({ permission: t, action: enabled ? "allow" : "deny", pattern: "*" })
       }
       if (permissions.length > 0) {
-        session.permission = permissions
-        yield* sessions.setPermission({ sessionID: session.id, permission: permissions })
+        const merged = Permission.merge(session.permission ?? [], permissions)
+        session.permission = merged
+        yield* sessions.setPermission({ sessionID: session.id, permission: merged })
       }
 
       if (input.noReply === true) return message
@@ -1264,7 +1269,16 @@ export const layer = Layer.effect(
           yield* status.set(sessionID, { type: "busy" })
           yield* slog.info("loop", { step })
 
-          let msgs = yield* MessageV2.filterCompactedEffect(sessionID)
+          const initialMessages = yield* MessageV2.filterCompactedEffect(sessionID)
+          const delivered = (yield* collaborationMailbox.member(sessionID))
+            ? yield* collaborationMailbox.deliver({ sessionID }).pipe(
+                Effect.catchTag("CollaborationMemberNotRegistered", () => Effect.succeed([])),
+                Effect.orDie,
+              )
+            : []
+          // Make exactly one bounded mailbox batch visible, then refetch once so
+          // this iteration invokes the model with that batch before any later mail.
+          let msgs = delivered.length ? yield* MessageV2.filterCompactedEffect(sessionID) : initialMessages
 
           const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)
 
@@ -1284,7 +1298,8 @@ export const layer = Layer.effect(
             lastAssistant?.finish &&
             !["tool-calls"].includes(lastAssistant.finish) &&
             !hasToolCalls &&
-            lastUser.id < lastAssistant.id
+            lastUser.id < lastAssistant.id &&
+            delivered.length === 0
           ) {
             yield* slog.info("exiting loop")
             break
@@ -1361,6 +1376,16 @@ export const layer = Layer.effect(
           }
           yield* sessions.updateMessage(msg)
 
+          // Retraction can win after this turn was selected but before its assistant
+          // message was persisted. Never start inference for a message it removed.
+          const currentUser = yield* sessions
+            .findMessage(sessionID, (message) => message.info.id === lastUser.id)
+            .pipe(Effect.orDie)
+          if (Option.isNone(currentUser)) {
+            yield* sessions.removeMessage({ sessionID, messageID: msg.id })
+            continue
+          }
+
           const finalizeInterruptedAssistant = Effect.gen(function* () {
             if (msg.time.completed) return
             msg.error ??= MessageV2.fromError(new DOMException("Aborted", "AbortError"), {
@@ -1402,6 +1427,7 @@ export const layer = Layer.effect(
               Effect.provideService(ToolRegistry.Service, registry),
               Effect.provideService(MCP.Service, mcp),
               Effect.provideService(Truncate.Service, truncate),
+              Effect.provideService(Collaboration.Service, collaborationMailbox),
             )
 
             if (lastUser.format?.type === "json_schema") {
@@ -1444,12 +1470,26 @@ export const layer = Layer.effect(
               agent.memory ? memory.read({ name: agent.name, scope: agent.memory }) : Effect.succeed(undefined),
             ])
             const activeGoal = yield* goals.get(sessionID)
-            const goalContext = activeGoal && activeGoal.status === "active" ? formatGoalReminder(activeGoal) : undefined
+            const goalContext =
+              activeGoal && activeGoal.status === "active" ? formatGoalReminder(activeGoal) : undefined
             // Per-agent memory is read fresh from disk each turn (not the cached agent
             // definition) so cross-session writes and external edits are reflected.
             const memoryContext = agentMemory && agent.memory ? formatMemory(agentMemory, agent.memory) : undefined
             const lensContext =
               metaConfig?.enabled && metaConfig.basePrompt ? formatLens(metaConfig.basePrompt) : undefined
+            const member = yield* Effect.gen(function* () {
+              const existing = yield* collaborationMailbox.member(sessionID)
+              if (existing) return existing
+              if (session.parentID || !ProviderTransform.isUltraVariant(model, lastUser.model.variant)) return
+              return yield* collaborationMailbox.registerRoot(sessionID).pipe(Effect.orDie)
+            }).pipe(Effect.provideService(Collaboration.Service, collaborationMailbox))
+            const collaboration = member
+              ? collaborationGuidance({
+                  model,
+                  variant: lastUser.model.variant,
+                  isChild: member.parentSessionID !== undefined,
+                })
+              : undefined
             const system = [
               ...env,
               ...instructions,
@@ -1457,6 +1497,7 @@ export const layer = Layer.effect(
               ...(memoryContext ? [memoryContext] : []),
               ...(goalContext ? [goalContext] : []),
               ...(lensContext ? [lensContext] : []),
+              ...(collaboration ? [collaboration] : []),
             ]
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
@@ -1562,7 +1603,15 @@ export const layer = Layer.effect(
               }
             }
           }
-          if (outcome === "break") break
+          if (
+            outcome === "break" ||
+            (delivered.length > 0 &&
+              handle.message.finish !== undefined &&
+              !["tool-calls", "unknown"].includes(handle.message.finish) &&
+              !handle.message.error)
+          ) {
+            break
+          }
           continue
         }
 
@@ -1730,8 +1779,19 @@ export const defaultLayer = Layer.suspend(() =>
     Layer.provide(Instruction.defaultLayer),
     Layer.provide(AppFileSystem.defaultLayer),
     Layer.provide(Plugin.defaultLayer),
-    Layer.provide(Layer.mergeAll(Session.defaultLayer, SessionRevert.defaultLayer, SessionSummary.defaultLayer, Goal.defaultLayer, MetaAgent.defaultLayer, ReasoningReviewer.defaultLayer, Memory.defaultLayer)),
+    Layer.provide(
+      Layer.mergeAll(
+        Session.defaultLayer,
+        SessionRevert.defaultLayer,
+        SessionSummary.defaultLayer,
+        Goal.defaultLayer,
+        MetaAgent.defaultLayer,
+        ReasoningReviewer.defaultLayer,
+        Memory.defaultLayer,
+      ),
+    ),
     Layer.provide(Image.defaultLayer),
+    Layer.provide(Collaboration.defaultLayer),
     Layer.provide(
       Layer.mergeAll(
         EventV2Bridge.defaultLayer,

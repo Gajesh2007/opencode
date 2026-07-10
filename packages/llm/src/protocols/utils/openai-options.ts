@@ -77,7 +77,9 @@ export const promptCacheKey = (request: LLMRequest) => {
 
 export const promptCacheRetention = (request: LLMRequest): PromptCacheRetention | undefined => {
   const value = options(request)?.promptCacheRetention
-  return typeof value === "string" && PROMPT_CACHE_RETENTION_SET.has(value) ? (value as PromptCacheRetention) : undefined
+  return typeof value === "string" && PROMPT_CACHE_RETENTION_SET.has(value)
+    ? (value as PromptCacheRetention)
+    : undefined
 }
 
 export const serviceTier = (request: LLMRequest): ServiceTier | undefined => {

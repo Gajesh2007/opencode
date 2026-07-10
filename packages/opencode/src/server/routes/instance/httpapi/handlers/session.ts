@@ -14,6 +14,7 @@ import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
 import { Goal } from "@/session/goal"
+import { isQueuedUserMessage } from "@/session/queued-message"
 import { MessageID, PartID, SessionID } from "@/session/schema"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { Cause, Effect, Option, Schema, Scope } from "effect"
@@ -33,6 +34,7 @@ import {
   RevertPayload,
   ShellPayload,
   SummarizePayload,
+  UnrevertQuery,
   UpdatePayload,
 } from "../groups/session"
 import { PermissionNotFoundError } from "../errors"
@@ -209,7 +211,11 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload?: typeof ForkPayload.Type
     }) {
       return yield* SessionError.mapStorageNotFound(
-        session.fork({ sessionID: ctx.params.sessionID, messageID: ctx.payload?.messageID }),
+        session.fork({
+          sessionID: ctx.params.sessionID,
+          messageID: ctx.payload?.messageID,
+          lastTurns: ctx.payload?.lastTurns,
+        }),
       )
     })
 
@@ -354,9 +360,14 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       return yield* SessionError.mapBusy(revertSvc.revert({ sessionID: ctx.params.sessionID, ...ctx.payload }))
     })
 
-    const unrevert = Effect.fn("SessionHttpApi.unrevert")(function* (ctx: { params: { sessionID: SessionID } }) {
+    const unrevert = Effect.fn("SessionHttpApi.unrevert")(function* (ctx: {
+      params: { sessionID: SessionID }
+      query: typeof UnrevertQuery.Type
+    }) {
       yield* requireSession(ctx.params.sessionID)
-      return yield* SessionError.mapBusy(revertSvc.unrevert({ sessionID: ctx.params.sessionID }))
+      return yield* SessionError.mapBusy(
+        revertSvc.unrevert({ sessionID: ctx.params.sessionID, restoreFiles: ctx.query.restoreFiles }),
+      )
     })
 
     const permissionRespond = Effect.fn("SessionHttpApi.permissionRespond")(function* (ctx: {
@@ -381,6 +392,16 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID; messageID: MessageID }
     }) {
       yield* requireSession(ctx.params.sessionID)
+      const messages = yield* SessionError.mapStorageNotFound(session.messages({ sessionID: ctx.params.sessionID }))
+      if (
+        isQueuedUserMessage(
+          messages.map((message) => message.info),
+          ctx.params.messageID,
+        )
+      ) {
+        yield* SessionError.mapBusy(session.retractQueuedMessage(ctx.params))
+        return true
+      }
       yield* SessionError.mapBusy(runState.assertNotBusy(ctx.params.sessionID))
       yield* session.removeMessage(ctx.params)
       return true

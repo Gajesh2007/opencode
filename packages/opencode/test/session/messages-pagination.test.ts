@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Option } from "effect"
+import { Effect, Option, Schema } from "effect"
 import { Session as SessionNs } from "@/session/session"
 import { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, PartID, type SessionID } from "../../src/session/schema"
@@ -815,6 +815,66 @@ describe("MessageV2.filterCompacted", () => {
       yield* session.remove(forked.id)
       yield* session.remove(created.id)
     }),
+  )
+
+  it.instance("fork retains only the requested recent turns before the current assistant", () =>
+    withSession(({ session, sessionID }) =>
+      Effect.gen(function* () {
+        const firstUser = yield* addUser(sessionID, "first")
+        yield* addAssistant(sessionID, firstUser, { finish: "stop" })
+
+        const secondUser = yield* addUser(sessionID, "second")
+        const secondAssistant = yield* addAssistant(sessionID, secondUser, { finish: "stop" })
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          sessionID,
+          messageID: secondAssistant,
+          type: "text",
+          text: "second reply",
+        })
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          sessionID,
+          messageID: secondAssistant,
+          type: "tool",
+          callID: "call_second",
+          tool: "read",
+          state: {
+            status: "completed",
+            input: {},
+            output: "second tool result",
+            title: "read",
+            metadata: {},
+            time: { start: 0, end: 1 },
+          },
+        })
+        const thirdUser = yield* addUser(sessionID, "third")
+        const currentAssistant = yield* addAssistant(sessionID, thirdUser)
+
+        const one = yield* session.fork({ sessionID, messageID: currentAssistant, lastTurns: 1 })
+        const oneMessages = yield* session.messages({ sessionID: one.id })
+        expect(oneMessages.map((message) => message.info.role)).toEqual(["user"])
+        expect(oneMessages[0]?.parts.map((part) => part.type)).toEqual(["text"])
+
+        const two = yield* session.fork({ sessionID, messageID: currentAssistant, lastTurns: 2 })
+        const twoMessages = yield* session.messages({ sessionID: two.id })
+        expect(twoMessages.map((message) => message.info.role)).toEqual(["user", "assistant", "user"])
+        expect(twoMessages[1]?.info.role).toBe("assistant")
+        if (twoMessages[0]?.info.role !== "user" || twoMessages[1]?.info.role !== "assistant") {
+          throw new Error("Expected a user turn followed by its assistant result")
+        }
+        expect(twoMessages[1].info.parentID).toBe(twoMessages[0].info.id)
+        expect(twoMessages[1].parts.map((part) => part.type)).toEqual(["text", "tool"])
+        expect(twoMessages.flatMap((message) => message.parts).every((part) => part.sessionID === two.id)).toBe(true)
+
+        for (const lastTurns of [0, -1, 1.5]) {
+          expect(Schema.decodeUnknownExit(SessionNs.ForkInput)({ sessionID, lastTurns })._tag).toBe("Failure")
+        }
+
+        yield* session.remove(one.id)
+        yield* session.remove(two.id)
+      }),
+    ),
   )
 
   it.instance("retains an assistant tail when compaction starts inside a turn", () =>

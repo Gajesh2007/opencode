@@ -173,20 +173,19 @@ describe("ModelsDev.injectModels", () => {
     }),
   )
 
-  it.live("adds GPT-5.6 family and pro aliases to OpenRouter when missing", () =>
+  it.live("adds GPT-5.6 base models to OpenRouter when missing", () =>
     Effect.sync(() => {
       const result = ModelsDev.injectModels(withOpenRouter())
       const sol = result.openrouter.models["openai/gpt-5.6-sol"]
-      const solPro = result.openrouter.models["openai/gpt-5.6-sol-pro"]
       const terra = result.openrouter.models["openai/gpt-5.6-terra"]
-      const lunaPro = result.openrouter.models["openai/gpt-5.6-luna-pro"]
+      const luna = result.openrouter.models["openai/gpt-5.6-luna"]
       expect(sol?.name).toBe("OpenAI: GPT-5.6 Sol")
       expect(sol?.limit.input).toBeUndefined()
       expect(sol?.cost?.input).toBe(5)
       expect(sol?.cost?.cache_write).toBeUndefined()
-      expect(solPro?.name).toBe("OpenAI: GPT-5.6 Sol Pro")
       expect(terra?.cost?.output).toBe(15)
-      expect(lunaPro?.cost?.input).toBe(1)
+      expect(luna?.cost?.input).toBe(1)
+      expect(result.openrouter.models["openai/gpt-5.6-sol-pro"]).toBeUndefined()
     }),
   )
 

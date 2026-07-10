@@ -2389,6 +2389,47 @@ describe("ProviderTransform.variants", () => {
     ...overrides,
   })
 
+  test("identifies Ultra only for supported gpt-5.6 model paths", () => {
+    for (const api of [
+      { id: "gpt-5.6", npm: "@ai-sdk/openai" },
+      { id: "gpt-5.6-sol", npm: "@ai-sdk/openai" },
+      { id: "gpt-5.6-terra", npm: "@ai-sdk/openai" },
+      { id: "openai/gpt-5.6-sol", npm: "@openrouter/ai-sdk-provider" },
+      { id: "openai/gpt-5.6-terra", npm: "@openrouter/ai-sdk-provider" },
+      { id: "openai/gpt-5.6-sol", npm: "@ai-sdk/gateway" },
+      { id: "openai/gpt-5.6-terra", npm: "@ai-sdk/gateway" },
+    ]) {
+      expect(
+        ProviderTransform.isUltraVariant(createMockModel({ api: { ...api, url: "https://api.test.com" } }), "ultra"),
+      ).toBe(true)
+    }
+
+    for (const input of [
+      { api: { id: "gpt-5.6-luna", npm: "@ai-sdk/openai" } },
+      { api: { id: "gpt-5.6-sol-pro", npm: "@ai-sdk/openai" } },
+      { api: { id: "openai/gpt-5.6-sol-pro", npm: "@openrouter/ai-sdk-provider" } },
+      { api: { id: "openai/gpt-5.6-terra-pro", npm: "@ai-sdk/gateway" } },
+      { api: { id: "gpt-5.7-sol", npm: "@ai-sdk/openai" } },
+      { api: { id: "openai/gpt-5.6-sol", npm: "@ai-sdk/openai" } },
+      { api: { id: "gpt-5.6", npm: "@ai-sdk/gateway" } },
+      { api: { id: "openai/gpt-5.6-terra", npm: "@ai-sdk/openai-compatible" } },
+      { api: { id: "gpt-5.6-sol", npm: "@ai-sdk/openai" }, capabilities: { reasoning: false } },
+    ]) {
+      expect(
+        ProviderTransform.isUltraVariant(
+          createMockModel({
+            ...input,
+            api: { ...input.api, url: "https://api.test.com" },
+          }),
+          "ultra",
+        ),
+      ).toBe(false)
+    }
+
+    expect(ProviderTransform.isUltraVariant(createMockModel(), undefined)).toBe(false)
+    expect(ProviderTransform.isUltraVariant(createMockModel(), "max")).toBe(false)
+  })
+
   test("returns empty object when model has no reasoning capabilities", () => {
     const model = createMockModel({
       capabilities: { reasoning: false },
@@ -2601,6 +2642,8 @@ describe("ProviderTransform.variants", () => {
     for (const testCase of [
       { id: "openai/gpt-5.4", efforts: ["none", "low", "medium", "high", "xhigh"] },
       { id: "openai/gpt-5.6-sol", efforts: ["none", "low", "medium", "high", "xhigh", "max", "ultra"] },
+      { id: "openai/gpt-5.6-terra", efforts: ["none", "low", "medium", "high", "xhigh", "max", "ultra"] },
+      { id: "openai/gpt-5.6-luna", efforts: ["none", "low", "medium", "high", "xhigh", "max"] },
       { id: "openai/gpt-5-pro", efforts: ["high"] },
       { id: "openai/gpt-5.5-pro", efforts: ["medium", "high", "xhigh"] },
       { id: "openai/gpt-5.2-codex", efforts: ["low", "medium", "high", "xhigh"] },
@@ -2622,9 +2665,28 @@ describe("ProviderTransform.variants", () => {
           }),
         )
         expect(Object.keys(result)).toEqual(testCase.efforts)
-        if (testCase.id === "openai/gpt-5.6-sol") expect(result.ultra).toEqual({ reasoning: { effort: "max" } })
+        if (["openai/gpt-5.6-sol", "openai/gpt-5.6-terra"].includes(testCase.id)) {
+          expect(result.ultra).toEqual({ reasoning: { effort: "max" } })
+        }
       })
     }
+
+    test("does not advertise Ultra for OpenRouter pro aliases", () => {
+      for (const id of ["openai/gpt-5.6-sol-pro", "openai/gpt-5.6-terra-pro", "openai/gpt-5.6-luna-pro"]) {
+        const result = ProviderTransform.variants(
+          createMockModel({
+            id,
+            providerID: "openrouter",
+            api: {
+              id,
+              url: "https://openrouter.ai",
+              npm: "@openrouter/ai-sdk-provider",
+            },
+          }),
+        )
+        expect(result.ultra).toBeUndefined()
+      }
+    })
 
     test("gemini-3 returns OPENAI_EFFORTS with reasoning", () => {
       const model = createMockModel({
@@ -2834,6 +2896,8 @@ describe("ProviderTransform.variants", () => {
     for (const testCase of [
       { id: "openai/gpt-5-5", efforts: ["none", "low", "medium", "high", "xhigh"] },
       { id: "openai/gpt-5-6-sol", efforts: ["none", "low", "medium", "high", "xhigh", "max", "ultra"] },
+      { id: "openai/gpt-5-6-terra", efforts: ["none", "low", "medium", "high", "xhigh", "max", "ultra"] },
+      { id: "openai/gpt-5-6-luna", efforts: ["none", "low", "medium", "high", "xhigh", "max"] },
       { id: "openai/gpt-5-pro", efforts: ["high"] },
       { id: "openai/gpt-5-5-pro", efforts: ["medium", "high", "xhigh"] },
       { id: "openai/gpt-5-2-codex", efforts: ["low", "medium", "high", "xhigh"] },
@@ -2855,7 +2919,9 @@ describe("ProviderTransform.variants", () => {
           }),
         )
         expect(Object.keys(result)).toEqual(testCase.efforts)
-        if (testCase.id === "openai/gpt-5-6-sol") expect(result.ultra).toEqual({ reasoningEffort: "max" })
+        if (["openai/gpt-5-6-sol", "openai/gpt-5-6-terra"].includes(testCase.id)) {
+          expect(result.ultra).toEqual({ reasoningEffort: "max" })
+        }
       })
     }
   })
@@ -3242,6 +3308,16 @@ describe("ProviderTransform.variants", () => {
         efforts: ["none", "low", "medium", "high", "xhigh", "max", "ultra"],
       },
       {
+        id: "gpt-5.6-terra",
+        releaseDate: "2026-07-09",
+        efforts: ["none", "low", "medium", "high", "xhigh", "max", "ultra"],
+      },
+      {
+        id: "gpt-5.6-luna",
+        releaseDate: "2026-07-09",
+        efforts: ["none", "low", "medium", "high", "xhigh", "max"],
+      },
+      {
         id: "gpt-5.5",
         modelID: "gpt-5-5",
         releaseDate: "2026-04-23",
@@ -3273,7 +3349,7 @@ describe("ProviderTransform.variants", () => {
           }),
         )
         expect(Object.keys(result)).toEqual(testCase.efforts)
-        if (testCase.id === "gpt-5.6" || testCase.id === "gpt-5.6-sol") {
+        if (["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra"].includes(testCase.id)) {
           expect(result.ultra).toEqual({
             reasoningEffort: "max",
             reasoningSummary: "auto",

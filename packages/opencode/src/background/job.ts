@@ -54,6 +54,8 @@ export interface Interface {
   readonly list: () => Effect.Effect<Info[]>
   readonly get: (id: string) => Effect.Effect<Info | undefined>
   readonly start: (input: StartInput) => Effect.Effect<Info>
+  /** Finishes a running job as an error while preserving any valid output. */
+  readonly fail: (input: { id: string; error: string; output?: string }) => Effect.Effect<Info | undefined>
   readonly wait: (input: WaitInput) => Effect.Effect<WaitResult>
   readonly cancel: (id: string) => Effect.Effect<Info | undefined>
 }
@@ -133,39 +135,56 @@ export const layer = Layer.effect(
           const id = input.id ?? Identifier.ascending("job")
           const started_at = yield* Clock.currentTimeMillis
           const done = yield* Deferred.make<Info>()
-          return yield* SynchronizedRef.modifyEffect(
-            s.jobs,
-            Effect.fnUntraced(function* (jobs) {
-              const existing = jobs.get(id)
-              if (existing?.info.status === "running") return [snapshot(existing), jobs] as const
-              const fiber = yield* restore(input.run).pipe(
-                Effect.matchCauseEffect({
-                  onSuccess: (output) => finish(id, "completed", { output }),
-                  onFailure: (cause) =>
-                    finish(id, Cause.hasInterruptsOnly(cause) ? "cancelled" : "error", {
-                      error: errorText(Cause.squash(cause)),
-                    }),
+          const active: Active = {
+            info: {
+              id,
+              type: input.type,
+              title: input.title,
+              status: "running",
+              started_at,
+              metadata: input.metadata,
+            },
+            done,
+          }
+          const existing = yield* SynchronizedRef.modify(s.jobs, (jobs) => {
+            const current = jobs.get(id)
+            if (current?.info.status === "running") return [current, jobs] as const
+            return [undefined, new Map(jobs).set(id, active)] as const
+          })
+          if (existing) return snapshot(existing)
+
+          const ready = yield* Deferred.make<void>()
+          const fiber = yield* Deferred.await(ready).pipe(
+            Effect.andThen(restore(input.run)),
+            Effect.matchCauseEffect({
+              onSuccess: (output) => finish(id, "completed", { output }),
+              onFailure: (cause) =>
+                finish(id, Cause.hasInterruptsOnly(cause) ? "cancelled" : "error", {
+                  error: errorText(Cause.squash(cause)),
                 }),
-                Effect.asVoid,
-                Effect.forkIn(s.scope, { startImmediately: true }),
-              )
-              const job = {
-                info: {
-                  id,
-                  type: input.type,
-                  title: input.title,
-                  status: "running" as const,
-                  started_at,
-                  metadata: input.metadata,
-                },
-                done,
-                fiber,
-              }
-              return [snapshot(job), new Map(jobs).set(id, job)] as const
             }),
+            Effect.asVoid,
+            Effect.forkIn(s.scope, { startImmediately: true }),
           )
+          const attached = yield* SynchronizedRef.modify(s.jobs, (jobs) => {
+            const current = jobs.get(id)
+            if (current !== active || current.info.status !== "running")
+              return [snapshot(current ?? active), jobs] as const
+            const job = { ...current, fiber }
+            return [snapshot(job), new Map(jobs).set(id, job)] as const
+          })
+          if (attached.status !== "running") {
+            yield* Fiber.interrupt(fiber).pipe(Effect.ignore)
+            return attached
+          }
+          yield* Deferred.succeed(ready, undefined).pipe(Effect.ignore)
+          return attached
         }),
       )
+    })
+
+    const fail: Interface["fail"] = Effect.fn("BackgroundJob.fail")(function* (input) {
+      return yield* finish(input.id, "error", { error: input.error, output: input.output })
     })
 
     const wait: Interface["wait"] = Effect.fn("BackgroundJob.wait")(function* (input) {
@@ -191,7 +210,7 @@ export const layer = Layer.effect(
       return info
     })
 
-    return Service.of({ list, get, start, wait, cancel })
+    return Service.of({ list, get, start, fail, wait, cancel })
   }),
 )
 

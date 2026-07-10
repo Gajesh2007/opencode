@@ -9,6 +9,8 @@ import { ReadTool } from "./read"
 import { TaskTool } from "./task"
 import { TaskStatusTool } from "./task_status"
 import { WorkflowTool } from "./workflow"
+import { FollowupTaskTool, InterruptAgentTool, ListAgentsTool, WaitAgentTool } from "./collaboration"
+import { SpawnAgentTool } from "./spawn_agent"
 import { SendMessageTool } from "./send_message"
 import { InboxTool } from "./inbox"
 import { TeamTasksTool } from "./team_tasks"
@@ -58,6 +60,8 @@ import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { Bus } from "../bus"
 import { Agent } from "../agent/agent"
 import { SubagentLimit } from "@/agent/subagent-limit"
+import { Collaboration } from "@/agent/collaboration"
+import { SubagentRun } from "@/agent/subagent-run"
 import { Team } from "@/agent/team"
 import { Memory } from "@/memory/memory"
 import { Git } from "@/git"
@@ -122,6 +126,8 @@ export const layer: Layer.Layer<
   | Truncate.Service
   | RuntimeFlags.Service
   | SubagentLimit.Service
+  | Collaboration.Service
+  | SubagentRun.Service
   | Team.Service
   | Memory.Service
 > = Layer.effect(
@@ -137,6 +143,11 @@ export const layer: Layer.Layer<
     const invalid = yield* InvalidTool
     const task = yield* TaskTool
     const workflow = yield* WorkflowTool
+    const spawnAgent = yield* SpawnAgentTool
+    const followupTask = yield* FollowupTaskTool
+    const waitAgent = yield* WaitAgentTool
+    const interruptAgent = yield* InterruptAgentTool
+    const listAgents = yield* ListAgentsTool
     const sendMessage = yield* SendMessageTool
     const inbox = yield* InboxTool
     const teamTasks = yield* TeamTasksTool
@@ -260,6 +271,11 @@ export const layer: Layer.Layer<
           write: Tool.init(writetool),
           task: Tool.init(task),
           workflow: Tool.init(workflow),
+          spawn_agent: Tool.init(spawnAgent),
+          followup_task: Tool.init(followupTask),
+          wait_agent: Tool.init(waitAgent),
+          interrupt_agent: Tool.init(interruptAgent),
+          list_agents: Tool.init(listAgents),
           send_message: Tool.init(sendMessage),
           inbox: Tool.init(inbox),
           team_tasks: Tool.init(teamTasks),
@@ -292,7 +308,12 @@ export const layer: Layer.Layer<
             tool.write,
             tool.task,
             tool.workflow,
+            tool.spawn_agent,
             tool.send_message,
+            tool.followup_task,
+            tool.wait_agent,
+            tool.interrupt_agent,
+            tool.list_agents,
             tool.inbox,
             tool.team_tasks,
             tool.memory,
@@ -416,9 +437,13 @@ export const layer: Layer.Layer<
 export const defaultLayer = Layer.suspend(() =>
   layer
     .pipe(
+      Layer.provideMerge(SubagentRun.defaultLayer),
+      Layer.provideMerge(Collaboration.defaultLayer),
       Layer.provide(Config.defaultLayer),
       Layer.provide(Plugin.defaultLayer),
-      Layer.provide(Layer.mergeAll(Question.defaultLayer, Todo.defaultLayer, Goal.defaultLayer, MetaAgent.defaultLayer)),
+      Layer.provide(
+        Layer.mergeAll(Question.defaultLayer, Todo.defaultLayer, Goal.defaultLayer, MetaAgent.defaultLayer),
+      ),
       Layer.provide(Skill.defaultLayer),
       Layer.provide(Agent.defaultLayer),
       Layer.provide(Session.defaultLayer),

@@ -3551,6 +3551,7 @@ export class Session2 extends HeyApiClient {
       directory?: string
       workspace?: string
       messageID?: string
+      lastTurns?: number
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -3563,6 +3564,7 @@ export class Session2 extends HeyApiClient {
             { in: "query", key: "directory" },
             { in: "query", key: "workspace" },
             { in: "body", key: "messageID" },
+            { in: "body", key: "lastTurns" },
           ],
         },
       ],
@@ -3979,13 +3981,14 @@ export class Session2 extends HeyApiClient {
   /**
    * Restore reverted messages
    *
-   * Restore all previously reverted messages in a session.
+   * Restore reverted messages, optionally restoring files from the saved snapshot.
    */
   public unrevert<ThrowOnError extends boolean = false>(
     parameters: {
       sessionID: string
       directory?: string
       workspace?: string
+      restoreFiles?: boolean
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -3997,6 +4000,7 @@ export class Session2 extends HeyApiClient {
             { in: "path", key: "sessionID" },
             { in: "query", key: "directory" },
             { in: "query", key: "workspace" },
+            { in: "query", key: "restoreFiles" },
           ],
         },
       ],

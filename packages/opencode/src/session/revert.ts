@@ -19,9 +19,15 @@ export const RevertInput = Schema.Struct({
 })
 export type RevertInput = Schema.Schema.Type<typeof RevertInput>
 
+export const UnrevertInput = Schema.Struct({
+  sessionID: SessionID,
+  restoreFiles: Schema.optional(Schema.Boolean),
+})
+export type UnrevertInput = Schema.Schema.Type<typeof UnrevertInput>
+
 export interface Interface {
   readonly revert: (input: RevertInput) => Effect.Effect<Session.Info, Session.BusyError>
-  readonly unrevert: (input: { sessionID: SessionID }) => Effect.Effect<Session.Info, Session.BusyError>
+  readonly unrevert: (input: UnrevertInput) => Effect.Effect<Session.Info, Session.BusyError>
   readonly cleanup: (session: Session.Info) => Effect.Effect<void>
 }
 
@@ -90,12 +96,12 @@ export const layer = Layer.effect(
       return yield* sessions.get(input.sessionID).pipe(Effect.orDie)
     })
 
-    const unrevert = Effect.fn("SessionRevert.unrevert")(function* (input: { sessionID: SessionID }) {
+    const unrevert = Effect.fn("SessionRevert.unrevert")(function* (input: UnrevertInput) {
       log.info("unreverting", input)
       yield* state.assertNotBusy(input.sessionID)
       const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
       if (!session.revert) return session
-      if (session.revert.snapshot) yield* snap.restore(session.revert.snapshot)
+      if (input.restoreFiles !== false && session.revert.snapshot) yield* snap.restore(session.revert.snapshot)
       yield* sessions.clearRevert(input.sessionID)
       return yield* sessions.get(input.sessionID).pipe(Effect.orDie)
     })

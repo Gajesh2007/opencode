@@ -210,23 +210,11 @@ const INJECTED_MODELS: Record<string, Record<string, Model>> = {
       tiered: false,
       inputLimit: false,
     }),
-    "openai/gpt-5.6-sol-pro": gpt56Model("openai/gpt-5.6-sol-pro", "OpenAI: GPT-5.6 Sol Pro", 5, 30, {
-      tiered: false,
-      inputLimit: false,
-    }),
     "openai/gpt-5.6-terra": gpt56Model("openai/gpt-5.6-terra", "OpenAI: GPT-5.6 Terra", 2.5, 15, {
       tiered: false,
       inputLimit: false,
     }),
-    "openai/gpt-5.6-terra-pro": gpt56Model("openai/gpt-5.6-terra-pro", "OpenAI: GPT-5.6 Terra Pro", 2.5, 15, {
-      tiered: false,
-      inputLimit: false,
-    }),
     "openai/gpt-5.6-luna": gpt56Model("openai/gpt-5.6-luna", "OpenAI: GPT-5.6 Luna", 1, 6, {
-      tiered: false,
-      inputLimit: false,
-    }),
-    "openai/gpt-5.6-luna-pro": gpt56Model("openai/gpt-5.6-luna-pro", "OpenAI: GPT-5.6 Luna Pro", 1, 6, {
       tiered: false,
       inputLimit: false,
     }),

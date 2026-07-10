@@ -7,6 +7,8 @@ import { fileURLToPath, pathToFileURL } from "url"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { Agent as AgentSvc } from "../../src/agent/agent"
 import { BackgroundJob } from "@/background/job"
+import { Collaboration } from "@/agent/collaboration"
+import { SubagentRun } from "@/agent/subagent-run"
 import { SubagentLimit } from "@/agent/subagent-limit"
 import { Team } from "@/agent/team"
 import { Memory } from "@/memory/memory"
@@ -77,6 +79,11 @@ const summary = Layer.succeed(
 const ref = {
   providerID: ProviderID.make("test"),
   modelID: ModelID.make("test-model"),
+}
+
+const ultraRef = {
+  providerID: ProviderID.make("ultra"),
+  modelID: ModelID.make("gpt-5.6-terra"),
 }
 
 function withSh<A, E, R>(fx: () => Effect.Effect<A, E, R>) {
@@ -171,9 +178,14 @@ const blockingProcessor = Layer.succeed(
   }),
 )
 
-function makePrompt(input?: { processor?: "blocking" }) {
+type PromptLayerInput = {
+  processor?: "blocking"
+  session?: Layer.Layer<Session.Service>
+}
+
+function makePrompt(input?: PromptLayerInput) {
   const deps = Layer.mergeAll(
-    Session.defaultLayer,
+    input?.session ?? Session.defaultLayer,
     Snapshot.defaultLayer,
     LLM.defaultLayer,
     Env.defaultLayer,
@@ -194,6 +206,8 @@ function makePrompt(input?: { processor?: "blocking" }) {
   const question = Question.layer.pipe(Layer.provideMerge(deps))
   const todo = Todo.layer.pipe(Layer.provideMerge(deps))
   const registry = ToolRegistry.layer.pipe(
+    Layer.provideMerge(SubagentRun.defaultLayer),
+    Layer.provideMerge(Collaboration.defaultLayer),
     Layer.provide(Skill.defaultLayer),
     Layer.provide(FetchHttpClient.layer),
     Layer.provide(CrossSpawnSpawner.defaultLayer),
@@ -250,17 +264,57 @@ function makePrompt(input?: { processor?: "blocking" }) {
   )
 }
 
-function makeHttp(input?: { processor?: "blocking" }) {
+function makeHttp(input?: PromptLayerInput) {
   return Layer.mergeAll(TestLLMServer.layer, makePrompt(input))
 }
 
-function makeHttpNoLLMServer(input?: { processor?: "blocking" }) {
+function makeHttpNoLLMServer(input?: PromptLayerInput) {
   return makePrompt(input)
 }
 
 const it = testEffect(makeHttp())
 const noLLMServer = testEffect(makeHttpNoLLMServer())
 const raceNoLLMServer = testEffect(makeHttpNoLLMServer({ processor: "blocking" }))
+let retractionInterleave:
+  | {
+      sessionID: SessionID
+      messageID: MessageID
+      active: MessageV2.Assistant
+    }
+  | undefined
+const retractionInterleavedSession = Layer.effect(
+  Session.Service,
+  Effect.gen(function* () {
+    const sessions = yield* Session.Service
+    return Session.Service.of({
+      ...sessions,
+      updateMessage: (message) => {
+        const interleave = retractionInterleave
+        if (
+          message.role !== "assistant" ||
+          !interleave ||
+          message.sessionID !== interleave.sessionID ||
+          message.parentID !== interleave.messageID
+        ) {
+          return sessions.updateMessage(message)
+        }
+        retractionInterleave = undefined
+        return sessions.retractQueuedMessage({ sessionID: interleave.sessionID, messageID: interleave.messageID }).pipe(
+          Effect.orDie,
+          Effect.andThen(
+            sessions.updateMessage({
+              ...interleave.active,
+              finish: "stop",
+              time: { ...interleave.active.time, completed: Date.now() },
+            }),
+          ),
+          Effect.andThen(sessions.updateMessage(message)),
+        )
+      },
+    })
+  }),
+).pipe(Layer.provide(Session.defaultLayer))
+const retracting = testEffect(makeHttp({ session: retractionInterleavedSession }))
 const unix = process.platform !== "win32" ? it.instance : it.instance.skip
 const unixNoLLMServer = process.platform !== "win32" ? noLLMServer.instance : noLLMServer.instance.skip
 
@@ -304,6 +358,36 @@ function providerCfg(url: string) {
         ...cfg.provider.test,
         options: {
           ...cfg.provider.test.options,
+          baseURL: url,
+        },
+      },
+    },
+  }
+}
+
+function ultraProviderCfg(url: string) {
+  return {
+    provider: {
+      ultra: {
+        name: "Ultra",
+        id: "ultra",
+        env: [],
+        npm: "@ai-sdk/openai",
+        models: {
+          "gpt-5.6-terra": {
+            id: "gpt-5.6-terra",
+            name: "GPT-5.6 Terra",
+            attachment: false,
+            reasoning: true,
+            temperature: false,
+            tool_call: true,
+            release_date: "2026-01-01",
+            limit: { context: 128000, output: 16384 },
+            cost: { input: 0, output: 0 },
+          },
+        },
+        options: {
+          apiKey: "test-key",
           baseURL: url,
         },
       },
@@ -499,6 +583,240 @@ it.instance("loop calls LLM and returns assistant message", () =>
   }),
 )
 
+it.instance("drains collaboration wake records without duplicating persisted mail", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const collaboration = yield* Collaboration.Service
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Pinned" })
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      model: ref,
+      agent: "build",
+      variant: "ultra",
+      serviceTier: "priority",
+      upstream: "origin",
+      noReply: true,
+      parts: [{ type: "text", text: "initial task" }],
+    })
+    yield* collaboration.registerRoot(chat.id)
+    const child = SessionID.make("ses_prompt_mail_child")
+    yield* collaboration.registerChild({ parentSessionID: chat.id, sessionID: child, taskName: "research" })
+    yield* collaboration.send({
+      sessionID: child,
+      target: "..",
+      kind: "MESSAGE",
+      content: "found the relevant file",
+      triggerTurn: false,
+    })
+    yield* llm.text("mail handled")
+
+    const result = yield* prompt.loop({ sessionID: chat.id })
+    const mailbox = (yield* sessions.messages({ sessionID: chat.id })).filter((message) =>
+      message.parts.some(
+        (part) => part.type === "text" && part.synthetic && part.text.includes("found the relevant file"),
+      ),
+    )
+
+    expect(result.parts.some((part) => part.type === "text" && part.text === "mail handled")).toBe(true)
+    expect(mailbox).toHaveLength(1)
+    expect(mailbox[0]?.info).toMatchObject({
+      role: "user",
+      agent: "build",
+      model: { ...ref, variant: "ultra", serviceTier: "priority", upstream: "origin" },
+    })
+    expect(yield* collaboration.hasMail(chat.id)).toBe(false)
+    expect(JSON.stringify((yield* llm.inputs)[0])).toContain("found the relevant file")
+  }),
+)
+
+it.instance("delivers one bounded collaboration-mail batch per model request", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const collaboration = yield* Collaboration.Service
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Pinned" })
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      model: ref,
+      agent: "build",
+      variant: "ultra",
+      noReply: true,
+      parts: [{ type: "text", text: "initial task" }],
+    })
+    yield* collaboration.registerRoot(chat.id)
+    const child = SessionID.make("ses_prompt_batch_child")
+    yield* collaboration.registerChild({ parentSessionID: chat.id, sessionID: child, taskName: "research" })
+    yield* Effect.forEach(
+      Array.from({ length: 17 }, (_, index) => index),
+      (index) =>
+        collaboration.send({
+          sessionID: child,
+          target: "..",
+          kind: "MESSAGE",
+          content: `batch message ${index}`,
+          triggerTurn: false,
+        }),
+      { discard: true },
+    )
+    yield* llm.text("first batch handled")
+
+    yield* prompt.loop({ sessionID: chat.id })
+
+    const inputs = yield* llm.inputs
+    expect(inputs).toHaveLength(1)
+    expect(JSON.stringify(inputs[0])).toContain("batch message 15")
+    expect(JSON.stringify(inputs[0])).not.toContain("batch message 16")
+    expect(
+      (yield* sessions.messages({ sessionID: chat.id }))
+        .flatMap((message) => message.parts)
+        .find((part) => part.type === "text" && part.text.includes("batch message 16")),
+    ).toMatchObject({ ignored: true })
+
+    yield* llm.text("second batch handled")
+    yield* prompt.loop({ sessionID: chat.id })
+    expect(yield* llm.inputs).toHaveLength(2)
+    expect(JSON.stringify((yield* llm.inputs)[1])).toContain("batch message 16")
+  }),
+)
+
+it.instance("leaves unregistered sessions without collaboration mailbox prompts", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Pinned" })
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      model: ref,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "ordinary work" }],
+    })
+    yield* llm.text("ordinary answer")
+
+    const result = yield* prompt.loop({ sessionID: chat.id })
+
+    expect(result.parts.some((part) => part.type === "text" && part.text === "ordinary answer")).toBe(true)
+    expect(
+      (yield* sessions.messages({ sessionID: chat.id })).some((message) =>
+        message.parts.some(
+          (part) => part.type === "text" && part.synthetic && part.text.includes("<collaboration_mailbox>"),
+        ),
+      ),
+    ).toBe(false)
+  }),
+)
+
+it.instance("preserves inherited permissions when applying child tool visibility", () =>
+  Effect.gen(function* () {
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const child = yield* sessions.create({
+      permission: [{ permission: "edit", pattern: "*", action: "deny" }],
+    })
+    yield* prompt.prompt({
+      sessionID: child.id,
+      model: ref,
+      agent: "build",
+      noReply: true,
+      tools: { spawn_agent: true, task: false },
+      parts: [{ type: "text", text: "child task" }],
+    })
+
+    expect((yield* sessions.get(child.id)).permission).toEqual(
+      expect.arrayContaining([
+        { permission: "edit", pattern: "*", action: "deny" },
+        { permission: "spawn_agent", pattern: "*", action: "allow" },
+        { permission: "task", pattern: "*", action: "deny" },
+      ]),
+    )
+  }),
+)
+
+it.instance("injects explicit-only collaboration guidance for Ultra-capable non-Ultra models", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(ultraProviderCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const session = yield* sessions.create({ title: "Pinned" })
+    yield* prompt.prompt({
+      sessionID: session.id,
+      agent: "build",
+      model: ultraRef,
+      variant: "max",
+      noReply: true,
+      parts: [{ type: "text", text: "hello" }],
+    })
+    yield* llm.text("world")
+
+    yield* prompt.loop({ sessionID: session.id })
+
+    expect(JSON.stringify((yield* llm.inputs)[0])).toContain("Subagent delegation is explicit-only")
+  }),
+)
+
+it.instance("only injects collaboration guidance for registered roots and descendants", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(ultraProviderCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const collaboration = yield* Collaboration.Service
+    const root = yield* sessions.create({ title: "Pinned" })
+    yield* prompt.prompt({
+      sessionID: root.id,
+      agent: "build",
+      model: ultraRef,
+      variant: "ultra",
+      noReply: true,
+      parts: [{ type: "text", text: "root task" }],
+    })
+    yield* llm.text("root complete")
+    yield* prompt.loop({ sessionID: root.id })
+
+    expect((yield* collaboration.member(root.id))?.parentSessionID).toBeUndefined()
+
+    const child = yield* sessions.create({ parentID: root.id, title: "[agent] child" })
+    yield* collaboration.registerChild({ parentSessionID: root.id, sessionID: child.id, taskName: "research" })
+    yield* prompt.prompt({
+      sessionID: child.id,
+      agent: "build",
+      model: ultraRef,
+      variant: "ultra",
+      noReply: true,
+      parts: [{ type: "text", text: "child task" }],
+    })
+    yield* llm.text("child complete")
+    yield* prompt.loop({ sessionID: child.id })
+
+    const legacyChild = yield* sessions.create({ parentID: root.id, title: "[agent] legacy child" })
+    yield* prompt.prompt({
+      sessionID: legacyChild.id,
+      agent: "build",
+      model: ultraRef,
+      variant: "ultra",
+      noReply: true,
+      parts: [{ type: "text", text: "legacy child task" }],
+    })
+    yield* llm.text("legacy child complete")
+    yield* prompt.loop({ sessionID: legacyChild.id })
+
+    const inputs = yield* llm.inputs
+    const rootInput = JSON.stringify(inputs.find((input) => JSON.stringify(input).includes("root task")))
+    const childInput = JSON.stringify(inputs.find((input) => JSON.stringify(input).includes("child task")))
+    const legacyChildInput = JSON.stringify(inputs.find((input) => JSON.stringify(input).includes("legacy child task")))
+
+    expect(rootInput).toContain("Spawned agents may spawn their own well-scoped subagents")
+    expect(rootInput).toContain("All descendants share the same root collaboration control plane")
+    expect(childInput).toContain("You can spawn your own well-scoped subagents using spawn_agent")
+    expect(childInput).toContain("Results return to your direct parent")
+    expect(legacyChildInput).not.toContain("<collaboration>")
+    expect(legacyChildInput).not.toContain("spawn_agent")
+  }),
+)
+
 noLLMServer.instance(
   "prompt emits v2 prompted and synthetic events",
   () =>
@@ -605,6 +923,56 @@ it.instance("static loop consumes queued replies across turns", () =>
 
     expect(yield* llm.hits).toHaveLength(2)
     expect(yield* llm.pending).toBe(0)
+  }),
+)
+
+retracting.instance("does not infer or execute tools for a successfully retracted queued message", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Pinned" })
+    const firstUser = yield* sessions.updateMessage({
+      id: MessageID.ascending(),
+      role: "user",
+      sessionID: chat.id,
+      agent: "build",
+      model: ref,
+      time: { created: Date.now() },
+    })
+    const active: MessageV2.Assistant = {
+      id: MessageID.ascending(),
+      role: "assistant",
+      parentID: firstUser.id,
+      sessionID: chat.id,
+      mode: "build",
+      agent: "build",
+      path: { cwd: "/tmp", root: "/tmp" },
+      cost: 0,
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      modelID: ref.modelID,
+      providerID: ref.providerID,
+      time: { created: Date.now() },
+    }
+    yield* sessions.updateMessage(active)
+    const queued = yield* sessions.updateMessage({
+      id: MessageID.ascending(),
+      role: "user",
+      sessionID: chat.id,
+      agent: "build",
+      model: ref,
+      time: { created: Date.now() },
+    })
+    retractionInterleave = { sessionID: chat.id, messageID: queued.id, active }
+
+    const result = yield* prompt.loop({ sessionID: chat.id })
+
+    expect(result.info.id).toBe(active.id)
+    expect((yield* sessions.messages({ sessionID: chat.id })).map((message) => message.info.id)).toEqual([
+      firstUser.id,
+      active.id,
+    ])
+    expect(yield* llm.hits).toHaveLength(0)
   }),
 )
 

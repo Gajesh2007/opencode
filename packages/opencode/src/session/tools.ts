@@ -18,6 +18,8 @@ import { SessionProcessor } from "./processor"
 import { PartID } from "./schema"
 import * as Log from "@opencode-ai/core/util/log"
 import { EffectBridge } from "@/effect/bridge"
+import { Collaboration } from "@/agent/collaboration"
+import { SpawnAgentTool } from "@/tool/spawn_agent"
 
 const log = Log.create({ service: "session.tools" })
 
@@ -38,6 +40,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   const registry = yield* ToolRegistry.Service
   const mcp = yield* MCP.Service
   const truncate = yield* Truncate.Service
+  const collaboration = yield* Collaboration.Service
+  const member = input.session.parentID ? yield* collaboration.member(input.session.id) : undefined
 
   const context = (args: Record<string, unknown>, options: ToolExecutionOptions): Tool.Context => ({
     sessionID: input.session.id,
@@ -77,6 +81,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     providerID: input.model.providerID,
     agent: input.agent,
   })) {
+    // Legacy task children have a parent session but no collaboration control
+    // plane, so their spawn_agent calls would be rejected by SubagentRun.
+    if (item.id === SpawnAgentTool.id && input.session.parentID && !member) continue
     const schema = ProviderTransform.schema(input.model, ToolJsonSchema.fromTool(item))
     tools[item.id] = tool({
       description: item.description,

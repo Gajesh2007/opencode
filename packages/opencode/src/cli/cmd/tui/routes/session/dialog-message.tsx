@@ -6,6 +6,7 @@ import { useRoute } from "@tui/context/route"
 import * as Clipboard from "@tui/util/clipboard"
 import type { PromptInfo } from "@tui/component/prompt/history"
 import { strip } from "@tui/component/prompt/part"
+import { isQueuedUserMessage } from "@/session/queued-message"
 
 export function DialogMessage(props: {
   messageID: string
@@ -15,12 +16,34 @@ export function DialogMessage(props: {
   const sync = useSync()
   const sdk = useSDK()
   const message = createMemo(() => sync.data.message[props.sessionID]?.find((x) => x.id === props.messageID))
+  const queued = createMemo(() => isQueuedUserMessage(sync.data.message[props.sessionID] ?? [], props.messageID))
   const route = useRoute()
+  let retracting = false
 
   return (
     <DialogSelect
       title="Message Actions"
       options={[
+        ...(queued()
+          ? [
+              {
+                title: "Retract queued message",
+                value: "message.retract",
+                description: "remove this message before it is used",
+                onSelect: async (dialog: { clear: () => void }) => {
+                  if (retracting) return
+                  retracting = true
+                  const result = await sdk.client.session.deleteMessage({
+                    sessionID: props.sessionID,
+                    messageID: props.messageID,
+                  })
+                  retracting = false
+                  if (result.error) return
+                  dialog.clear()
+                },
+              },
+            ]
+          : []),
         {
           title: "Revert",
           value: "session.revert",

@@ -60,6 +60,7 @@ import { TerminalPanel } from "@/pages/session/terminal-panel"
 import { useSessionCommands } from "@/pages/session/use-session-commands"
 import { useSessionHashScroll } from "@/pages/session/use-session-hash-scroll"
 import { shouldUseV2NewSessionPage } from "@/pages/session/new-session-layout"
+import { createFollowupSendLock, queuedFollowupForEscape, removeQueuedFollowup } from "@/pages/session/followup-queue"
 import { Identifier } from "@/utils/id"
 import { diffs as list } from "@/utils/diffs"
 import { Persist, persisted } from "@/utils/persist"
@@ -808,9 +809,20 @@ export default function Page() {
   }
 
   const handleKeyDown = (event: KeyboardEvent) => {
+    if (event.defaultPrevented || composer.blocked()) return
+
+    const activeElement = deepActiveElement()
+    if (event.key === "Escape") {
+      const focusedPromptInput = !!inputRef && !!activeElement && inputRef.contains(activeElement)
+      if (!focusedPromptInput && sendQueuedFollowupForEscape(event)) {
+        event.preventDefault()
+        event.stopPropagation()
+        return
+      }
+    }
+
     const path = event.composedPath()
     const target = path.find((item): item is HTMLElement => item instanceof HTMLElement)
-    const activeElement = deepActiveElement()
 
     const protectedTarget = path.some(
       (item) => item instanceof HTMLElement && item.closest("[data-prevent-autofocus]") !== null,
@@ -1388,6 +1400,7 @@ export default function Page() {
         sync,
         globalSync,
         draft: item,
+        messageID: item.id,
         optimisticBusy: item.sessionDirectory === sdk.directory,
       }).catch((err) => {
         setFollowup("failed", input.sessionID, input.id)
@@ -1396,13 +1409,15 @@ export default function Page() {
       })
       if (!ok) return
 
-      setFollowup("items", input.sessionID, (items) => (items ?? []).filter((entry) => entry.id !== input.id))
+      setFollowup("items", input.sessionID, (items) => removeQueuedFollowup(items ?? [], input.id))
       if (input.manual) resumeScroll()
     },
   }))
 
+  const followupSendLock = createFollowupSendLock()
+
   const followupBusy = (sessionID: string) =>
-    followupMutation.isPending && followupMutation.variables?.sessionID === sessionID
+    followupSendLock.pending() || (followupMutation.isPending && followupMutation.variables?.sessionID === sessionID)
 
   const sendingFollowup = createMemo(() => {
     const id = params.id
@@ -1451,7 +1466,37 @@ export default function Page() {
     if (!item) return Promise.resolve()
     if (followupBusy(sessionID)) return Promise.resolve()
 
-    return followupMutation.mutateAsync({ sessionID, id, manual: opts?.manual })
+    return followupSendLock.run(() => followupMutation.mutateAsync({ sessionID, id, manual: opts?.manual }))
+  }
+
+  const sendQueuedFollowupForEscape = (event: KeyboardEvent, focused = false) => {
+    const sessionID = params.id
+    const queued = queuedFollowupForEscape({
+      items: sessionID ? (followup.items[sessionID] ?? emptyFollowups) : emptyFollowups,
+      busy: sessionID ? busy(sessionID) : false,
+      dialogOpen: !!dialog.active,
+      composing: event.isComposing,
+      sending: sessionID ? followupBusy(sessionID) : false,
+      defaultPrevented: event.defaultPrevented,
+      blocked: composer.blocked(),
+      consumeWhileSending: focused,
+    })
+    if (!queued || !sessionID) return false
+    if (!followupBusy(sessionID)) void sendFollowup(sessionID, queued.id, { manual: true })
+    return true
+  }
+
+  const retractFollowup = (id: string) => {
+    const sessionID = params.id
+    if (!sessionID || followupBusy(sessionID)) return
+
+    const item = queuedFollowups().find((entry) => entry.id === id)
+    if (!item) return
+
+    batch(() => {
+      setFollowup("items", sessionID, (items) => removeQueuedFollowup(items ?? [], item.id))
+      setFollowup("failed", sessionID, (value) => (value === item.id ? undefined : value))
+    })
   }
 
   const editFollowup = (id: string) => {
@@ -1462,7 +1507,7 @@ export default function Page() {
     const item = queuedFollowups().find((entry) => entry.id === id)
     if (!item) return
 
-    setFollowup("items", sessionID, (items) => (items ?? []).filter((entry) => entry.id !== id))
+    setFollowup("items", sessionID, (items) => removeQueuedFollowup(items ?? [], id))
     setFollowup("failed", sessionID, (value) => (value === id ? undefined : value))
     setFollowup("edit", sessionID, {
       id: item.id,
@@ -1505,11 +1550,12 @@ export default function Page() {
   }))
 
   const restoreMutation = useMutation(() => ({
-    mutationFn: async (id: string) => {
+    mutationFn: async (input: { id?: string; restoreFiles: boolean }) => {
       const sessionID = params.id
       if (!sessionID) return
 
-      const next = userMessages().find((item) => item.id > id)
+      const id = input.id
+      const next = id ? userMessages().find((item) => item.id > id) : undefined
       const prev = prompt.current().slice()
       const last = info()?.revert
 
@@ -1523,7 +1569,7 @@ export default function Page() {
       })
 
       const task = !next
-        ? halt(sessionID).then(() => sdk.client.session.unrevert({ sessionID }))
+        ? halt(sessionID).then(() => sdk.client.session.unrevert({ sessionID, restoreFiles: input.restoreFiles }))
         : halt(sessionID).then(() =>
             sdk.client.session.revert({
               sessionID,
@@ -1546,7 +1592,7 @@ export default function Page() {
   }))
 
   const reverting = createMemo(() => revertMutation.isPending || restoreMutation.isPending)
-  const restoring = createMemo(() => (restoreMutation.isPending ? restoreMutation.variables : undefined))
+  const restoring = createMemo(() => restoreMutation.isPending)
 
   const revert = (input: { sessionID: string; messageID: string }) => {
     if (reverting()) return
@@ -1555,7 +1601,12 @@ export default function Page() {
 
   const restore = (id: string) => {
     if (!params.id || reverting()) return
-    return restoreMutation.mutateAsync(id)
+    return restoreMutation.mutateAsync({ id, restoreFiles: true })
+  }
+
+  const restoreAll = (restoreFiles: boolean) => {
+    if (!params.id || reverting()) return
+    return restoreMutation.mutateAsync({ restoreFiles })
   }
 
   const rolled = createMemo(() => {
@@ -1678,6 +1729,7 @@ export default function Page() {
               sending: sendingFollowup(),
               edit: editingFollowup(),
               onQueue: queueFollowup,
+              onQueuedEscape: (event) => sendQueuedFollowupForEscape(event, true),
               onAbort: () => {
                 const id = params.id
                 if (!id) return
@@ -1687,6 +1739,7 @@ export default function Page() {
                 void sendFollowup(params.id!, id, { manual: true })
               },
               onEdit: editFollowup,
+              onRetract: retractFollowup,
               onEditLoaded: clearFollowupEdit,
             }
           : undefined
@@ -1698,6 +1751,8 @@ export default function Page() {
               restoring: restoring(),
               disabled: reverting(),
               onRestore: restore,
+              onRestoreChat: () => restoreAll(false),
+              onRestoreCode: () => restoreAll(true),
             }
           : undefined
       }

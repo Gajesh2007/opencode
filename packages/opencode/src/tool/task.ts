@@ -6,11 +6,11 @@ import { Session } from "@/session/session"
 import { SessionID, MessageID } from "../session/schema"
 import { MessageV2 } from "../session/message-v2"
 import { Agent } from "../agent/agent"
+import { childToolOverrides, runChildTurn, type TaskPromptOps } from "../agent/child-session"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import { SubagentLimit } from "../agent/subagent-limit"
 import { Team } from "../agent/team"
 import { Plugin } from "@/plugin"
-import type { SessionPrompt } from "../session/prompt"
 import { SessionStatus } from "@/session/status"
 import { Config } from "@/config/config"
 import { TuiEvent } from "@/cli/cmd/tui/event"
@@ -21,12 +21,7 @@ import { spawnSync } from "node:child_process"
 import * as nodePath from "node:path"
 import * as nodeFs from "node:fs"
 
-export interface TaskPromptOps {
-  cancel(sessionID: SessionID): Effect.Effect<void>
-  resolvePromptParts(template: string): Effect.Effect<SessionPrompt.PromptInput["parts"]>
-  prompt(input: SessionPrompt.PromptInput): Effect.Effect<MessageV2.WithParts>
-  loop(input: SessionPrompt.LoopInput): Effect.Effect<MessageV2.WithParts>
-}
+export type { TaskPromptOps } from "../agent/child-session"
 
 const id = "task"
 const EXTRA_DESCRIPTION = [
@@ -139,14 +134,6 @@ function errorText(error: unknown) {
   if (error instanceof Error) return error.message
   return String(error)
 }
-
-// Some models (especially reasoning models) end a turn after thinking and/or tool
-// use without writing a final answer, leaving the subagent's reply empty. When that
-// happens we nudge the subagent to produce its result so the calling agent gets a
-// usable reply instead of an empty <task_result>. Bounded to avoid loops.
-const CONTINUE_REPLY_ATTEMPTS = 2
-const CONTINUE_REPLY_PROMPT =
-  "You ended your turn without writing a reply. Provide your final answer for the task above now, as a concise message for the agent that delegated it — summarize what you found or did. Do not start new work unless it is required to answer."
 
 function slugify(input: string) {
   return (
@@ -351,7 +338,10 @@ export const TaskTool = Tool.define(
         model,
         ...(runInBackground ? { background: true } : {}),
         ...(worktreeInfo
-          ? { worktree: worktreeInfo.directory, ...(worktreeInfo.branch ? { worktreeBranch: worktreeInfo.branch } : {}) }
+          ? {
+              worktree: worktreeInfo.directory,
+              ...(worktreeInfo.branch ? { worktreeBranch: worktreeInfo.branch } : {}),
+            }
           : {}),
       }
       const worktreeDir = worktreeInfo?.directory
@@ -369,81 +359,24 @@ export const TaskTool = Tool.define(
         const teamPreamble = params.team
           ? `[Team "${params.team}"] You are teammate "${memberName}". Coordinate with teammates using the send_message, inbox, and team_tasks tools; check your inbox when you begin and before you finish.\n\n`
           : ""
-        yield* plugin.trigger(
-          "subagent.start",
-          {
-            sessionID: ctx.sessionID,
-            agentSessionID: nextSession.id,
-            agent: next.name,
-            description: params.description,
-          },
-          {},
-        )
-        const parts = yield* ops.resolvePromptParts(teamPreamble + params.prompt)
         const subagentModel = { modelID: model.modelID, providerID: model.providerID }
-        const subagentTools = {
-          ...(next.permission.some((rule) => rule.permission === "todowrite") ? {} : { todowrite: false }),
-          ...(next.permission.some((rule) => rule.permission === id) ? {} : { task: false }),
-          ...(next.permission.some((rule) => rule.permission === "workflow") ? {} : { workflow: false }),
-          ...Object.fromEntries((cfg.experimental?.primary_tools ?? []).map((item) => [item, false])),
-        }
-        let result = yield* ops.prompt({
-          messageID: MessageID.ascending(),
-          sessionID: nextSession.id,
+        return yield* runChildTurn({
+          ops,
+          plugin,
+          parentSessionID: ctx.sessionID,
+          childSessionID: nextSession.id,
+          agent: next,
+          description: params.description,
+          prompt: teamPreamble + params.prompt,
           model: subagentModel,
-          agent: next.name,
           variant: inheritedVariant,
           serviceTier: inheritedServiceTier,
           upstream: inheritedUpstream,
-          tools: subagentTools,
-          parts,
+          tools: childToolOverrides({
+            agent: next,
+            primaryTools: cfg.experimental?.primary_tools,
+          }),
         })
-
-        // If the subagent finished thinking but produced no written reply, continue it
-        // and ask for its final answer so the parent doesn't get an empty <task_result>.
-        // Only when the turn succeeded (no error/abort); bounded to avoid loops.
-        const replyText = (r: typeof result) => r.parts.findLast((item) => item.type === "text")?.text ?? ""
-        for (
-          let attempt = 0;
-          attempt < CONTINUE_REPLY_ATTEMPTS &&
-          (result.info.role !== "assistant" || result.info.error === undefined) &&
-          replyText(result).trim() === "";
-          attempt++
-        ) {
-          result = yield* ops.prompt({
-            sessionID: nextSession.id,
-            model: subagentModel,
-            agent: next.name,
-            variant: inheritedVariant,
-            serviceTier: inheritedServiceTier,
-            upstream: inheritedUpstream,
-            tools: subagentTools,
-            parts: [{ type: "text", synthetic: true, text: CONTINUE_REPLY_PROMPT }],
-          })
-        }
-
-        const text = replyText(result)
-        // The turn loop stores provider errors on the assistant message and returns
-        // normally (after retries are exhausted or for a non-retryable error). Surface
-        // that as a real failure so the BackgroundJob records "error" and the parent
-        // sees it, instead of silently reporting an empty "completed". Aborts are not
-        // failures.
-        const failure = result.info.role === "assistant" ? result.info.error : undefined
-        if (failure && failure.name !== "MessageAbortedError") {
-          const reason = (failure.data as { message?: string } | undefined)?.message ?? failure.name
-          yield* plugin.trigger(
-            "subagent.stop",
-            { sessionID: ctx.sessionID, agentSessionID: nextSession.id, agent: next.name, status: "error" },
-            { output: text },
-          )
-          return yield* Effect.fail(new Error(reason || "Subagent stopped due to an error"))
-        }
-        yield* plugin.trigger(
-          "subagent.stop",
-          { sessionID: ctx.sessionID, agentSessionID: nextSession.id, agent: next.name, status: "completed" },
-          { output: text },
-        )
-        return text
       })
 
       const resumeWhenIdle: (input: { userID: MessageID; state: "completed" | "error" }) => Effect.Effect<void> =

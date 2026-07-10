@@ -69,6 +69,9 @@ import { useQueries } from "@tanstack/solid-query"
 import { useQueryOptions } from "@/context/global-sync"
 import { pathKey } from "@/utils/path-key"
 import { getFilename } from "@opencode-ai/core/util/path"
+import { showToast } from "@opencode-ai/ui/toast"
+import { getModelVariantPresentation } from "@/context/model-variant"
+import { shouldSendQueuedFollowupOnEscape } from "@/pages/session/followup-queue"
 
 interface PromptInputProps {
   class?: string
@@ -81,6 +84,7 @@ interface PromptInputProps {
   onEditLoaded?: () => void
   shouldQueue?: () => boolean
   onQueue?: (draft: FollowupDraft) => void
+  onQueuedEscape?: (event: KeyboardEvent) => boolean
   onAbort?: () => void
   onSubmit?: () => void
 }
@@ -1118,6 +1122,8 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
     onSubmit: props.onSubmit,
   })
 
+  const isShellMode = () => store.mode === "shell"
+
   const handleKeyDown = (event: KeyboardEvent) => {
     if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "u") {
       event.preventDefault()
@@ -1155,6 +1161,8 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
     }
 
     if (event.key === "Escape") {
+      if (event.isComposing) return
+
       if (store.popover) {
         closePopover()
         event.preventDefault()
@@ -1162,7 +1170,7 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
         return
       }
 
-      if (store.mode === "shell") {
+      if (isShellMode()) {
         setStore("mode", "normal")
         event.preventDefault()
         event.stopPropagation()
@@ -1170,6 +1178,19 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
       }
 
       if (working()) {
+        if (
+          shouldSendQueuedFollowupOnEscape({
+            working: working(),
+            popover: !!store.popover,
+            shell: isShellMode(),
+          }) &&
+          props.onQueuedEscape?.(event)
+        ) {
+          event.preventDefault()
+          event.stopPropagation()
+          return
+        }
+
         void abort()
         event.preventDefault()
         event.stopPropagation()
@@ -1866,9 +1887,20 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
                                 size="normal"
                                 options={variants()}
                                 current={local.model.variant.current() ?? "default"}
-                                label={(x) => (x === "default" ? language.t("common.default") : x)}
+                                label={(x) =>
+                                  x === "default" ? language.t("common.default") : getModelVariantPresentation(x).label
+                                }
                                 onSelect={(value) => {
-                                  local.model.variant.set(value === "default" ? undefined : value)
+                                  const variant = value === "default" ? undefined : value
+                                  local.model.variant.set(variant)
+                                  if (variant === "ultra") {
+                                    const presentation = getModelVariantPresentation(variant)
+                                    showToast({
+                                      icon: "warning",
+                                      title: "Ultra usage warning",
+                                      description: presentation.warning,
+                                    })
+                                  }
                                   restoreFocus()
                                 }}
                                 class="capitalize max-w-[160px] text-text-base"
@@ -1876,7 +1908,27 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
                                 triggerStyle={control()}
                                 triggerProps={{ "data-action": "prompt-model-variant" }}
                                 variant="ghost"
-                              />
+                              >
+                                {(variant) => {
+                                  if (!variant || variant === "default") return language.t("common.default")
+                                  const presentation = getModelVariantPresentation(variant)
+                                  return (
+                                    <div class="flex flex-col gap-0.5 py-0.5 whitespace-normal">
+                                      <span>{presentation.label}</span>
+                                      <Show when={presentation.description}>
+                                        <span class="text-12-regular text-text-weaker normal-case">
+                                          {presentation.description}
+                                        </span>
+                                      </Show>
+                                      <Show when={presentation.warning}>
+                                        <span class="text-12-regular text-syntax-warning normal-case">
+                                          {presentation.warning}
+                                        </span>
+                                      </Show>
+                                    </div>
+                                  )
+                                }}
+                              </Select>
                             </TooltipKeybind>
                           </div>
                         </Show>

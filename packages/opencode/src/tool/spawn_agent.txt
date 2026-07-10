@@ -1,0 +1,5 @@
+Start an independent child agent for a concrete unit of work that can proceed in parallel with your own work. Child agents share the workspace, so divide work by files or responsibilities to avoid edit conflicts. The child returns its final answer to your direct-parent mailbox; this tool returns immediately with its canonical task path and session id.
+
+Spawned agents can recursively use spawn_agent for their own well-scoped work. All descendants share the root collaboration control plane and its four total concurrency slots, including the root session. This tool does not grant permissions: inherited and agent permission rules still apply, and explicit denies win.
+
+Use `fork_turns: "all"` (the default) when the child needs the current conversation. Use `fork_turns: "none"` only when the task message is self-contained. Use a positive integer to retain only that many of the latest user turns and their completed context. These fork modes are available to nested children too. Keep task names unique among direct children.
