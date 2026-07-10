@@ -530,6 +530,8 @@ const WIDELY_SUPPORTED_EFFORTS = ["low", "medium", "high"]
 const OPENAI_EFFORTS = ["none", "minimal", ...WIDELY_SUPPORTED_EFFORTS, "xhigh"]
 const OPENAI_GPT5_1_EFFORTS = ["none", ...WIDELY_SUPPORTED_EFFORTS]
 const OPENAI_GPT5_2_PLUS_EFFORTS = [...OPENAI_GPT5_1_EFFORTS, "xhigh"]
+const OPENAI_GPT5_6_PLUS_EFFORTS = [...OPENAI_GPT5_2_PLUS_EFFORTS, "max"]
+const OPENAI_GPT5_6_SOL_EFFORTS = [...OPENAI_GPT5_6_PLUS_EFFORTS, "ultra"]
 const OPENAI_GPT5_PRO_EFFORTS = ["high"]
 const OPENAI_GPT5_PRO_2_PLUS_EFFORTS = ["medium", "high", "xhigh"]
 const OPENAI_GPT5_CHAT_EFFORTS = ["medium"]
@@ -556,12 +558,25 @@ function gpt5Version(apiId: string) {
   return Number(GPT5_VERSION_RE.exec(apiId)?.[1]) || undefined
 }
 
+function isGpt56SolLike(apiId: string) {
+  return /(?:^|\/)gpt-5[.-]6(?:$|[.-]sol(?:[.-]|$))/.test(apiId)
+}
+
 function versionedGpt5ReasoningEfforts(apiId: string) {
   if (GPT5_VERSIONED_PRO_RE.test(apiId)) return OPENAI_GPT5_PRO_2_PLUS_EFFORTS
   const version = gpt5Version(apiId)
   if (version === undefined) return undefined
   if (version === 1) return OPENAI_GPT5_1_EFFORTS
+  if (version >= 6 && isGpt56SolLike(apiId)) return OPENAI_GPT5_6_SOL_EFFORTS
+  if (version >= 6) return OPENAI_GPT5_6_PLUS_EFFORTS
   return OPENAI_GPT5_2_PLUS_EFFORTS
+}
+
+function openaiWireReasoningEffort(effort: string) {
+  // Ultra is an opencode/Codex-style user-facing mode. OpenAI's inference
+  // boundary still expects `max`; proactive multi-agent orchestration is owned
+  // by runtimes that implement it, not by the provider wire effort value.
+  return effort === "ultra" ? "max" : effort
 }
 
 function gpt5CodexReasoningEfforts(apiId: string) {
@@ -632,6 +647,18 @@ function googleThinkingBudgetMax(apiId: string) {
   return 24_576
 }
 
+// GLM 5.2+ exposes `reasoning_effort` (max/xhigh/high/medium/low/minimal/none).
+// Earlier GLM models (4.5/4.6/4.7/5/5.1) only support `thinking: {type:"enabled"}`
+// and 400 on `reasoning_effort`, so they stay excluded from variants.
+// https://docs.z.ai/guides/capabilities/thinking
+const GLM_52_PLUS_RE = /glm-5\.(?:[2-9]|\d{2,})(?:[.-]|$)/
+// `reasoningEffort` is the AI SDK providerOptions key. For direct zai/zhipuai
+// (`@ai-sdk/openai-compatible`) it becomes the upstream `reasoning_effort`
+// body field; for Vercel AI Gateway (`@ai-sdk/gateway`) it is routed under
+// `providerOptions.zai.reasoningEffort` and passed through to zai upstream.
+// GLM's native `max` tier is exposed on both paths.
+const GLM_EFFORTS = ["max", "xhigh", "high", "medium", "low", "minimal", "none"]
+
 export function variants(model: Provider.Model): Record<string, Record<string, any>> {
   if (!model.capabilities.reasoning) return {}
 
@@ -643,14 +670,23 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
     id.includes("deepseek-r1") ||
     id.includes("deepseek-v3") ||
     id.includes("minimax") ||
-    id.includes("glm") ||
+    (id.includes("glm") && !GLM_52_PLUS_RE.test(id)) ||
     id.includes("kimi") ||
     id.includes("k2p") ||
     id.includes("big-pickle")
   )
     return {}
 
+  // GLM 5.2+: expose reasoning_effort variants. The model's own default is
+  // `max`, so leaving no variant selected still yields max-effort reasoning.
+  if (id.includes("glm") && GLM_52_PLUS_RE.test(id)) {
+    return Object.fromEntries(GLM_EFFORTS.map((effort) => [effort, { reasoningEffort: effort }]))
+  }
+
   // see: https://docs.x.ai/docs/guides/reasoning#control-how-hard-the-model-thinks
+  if (id.includes("grok-4.5") && model.api.npm === "@ai-sdk/gateway") {
+    return Object.fromEntries(WIDELY_SUPPORTED_EFFORTS.map((effort) => [effort, { reasoningEffort: effort }]))
+  }
   if (id.includes("grok") && id.includes("grok-3-mini")) {
     if (model.api.npm === "@openrouter/ai-sdk-provider") {
       return {
@@ -671,7 +707,7 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
       return Object.fromEntries(
         (id.includes("gpt") ? openaiCompatibleReasoningEfforts(id) : OPENAI_EFFORTS).map((effort) => [
           effort,
-          { reasoning: { effort } },
+          { reasoning: { effort: openaiWireReasoningEffort(effort) } },
         ]),
       )
 
@@ -684,7 +720,9 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
       // models that support it.
       if (model.api.id.startsWith("openai/")) {
         const efforts = openaiReasoningEfforts(model.api.id, model.release_date)
-        return Object.fromEntries(efforts.map((effort) => [effort, { reasoningEffort: effort }]))
+        return Object.fromEntries(
+          efforts.map((effort) => [effort, { reasoningEffort: openaiWireReasoningEffort(effort) }]),
+        )
       }
       return Object.fromEntries(WIDELY_SUPPORTED_EFFORTS.map((effort) => [effort, { reasoningEffort: effort }]))
     }
@@ -750,7 +788,10 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
         )
       }
       return Object.fromEntries(
-        openaiCompatibleReasoningEfforts(model.api.id).map((effort) => [effort, { reasoningEffort: effort }]),
+        openaiCompatibleReasoningEfforts(model.api.id).map((effort) => [
+          effort,
+          { reasoningEffort: openaiWireReasoningEffort(effort) },
+        ]),
       )
 
     case "@ai-sdk/github-copilot":
@@ -819,7 +860,7 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
         efforts.map((effort) => [
           effort,
           {
-            reasoningEffort: effort,
+            reasoningEffort: openaiWireReasoningEffort(effort),
             reasoningSummary: "auto",
             include: INCLUDE_ENCRYPTED_REASONING,
           },

@@ -562,6 +562,24 @@ describe("OpenAI Responses route", () => {
     }),
   )
 
+  it.effect("maps max reasoning effort to Responses options", () =>
+    Effect.gen(function* () {
+      const prepared = yield* LLMClient.prepare<OpenAIResponses.OpenAIResponsesBody>(
+        LLM.request({
+          model: OpenAI.configure({ baseURL: "https://api.openai.test/v1/", apiKey: "test" }).model("gpt-5.6-sol"),
+          prompt: "think deeply",
+          providerOptions: {
+            openai: {
+              reasoningEffort: "max",
+            },
+          },
+        }),
+      )
+
+      expect(prepared.body.reasoning).toEqual({ effort: "max", summary: "auto" })
+    }),
+  )
+
   it.effect("accepts the full ResponseIncludable union", () =>
     Effect.gen(function* () {
       const prepared = yield* LLMClient.prepare<OpenAIResponses.OpenAIResponsesBody>(

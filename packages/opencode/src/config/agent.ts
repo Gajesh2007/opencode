@@ -51,7 +51,7 @@ const AgentSchema = Schema.StructWithRest(
     variant: Schema.optional(Schema.String).annotate({
       description: "Default model variant for this agent (applies only when using the agent's configured model).",
     }),
-    effort: Schema.optional(Schema.Literals(["low", "medium", "high", "xhigh", "max"])).annotate({
+    effort: Schema.optional(Schema.Literals(["low", "medium", "high", "xhigh", "max", "ultra"])).annotate({
       description: "Reasoning effort ladder; sets the model variant when no explicit variant is given.",
     }),
     temperature: Schema.optional(Schema.Finite),
