@@ -593,6 +593,12 @@ export function isUltraVariant(model: Provider.Model, variant: string | undefine
   return false
 }
 
+export function supportsReasoningMode(model: Provider.Model, mode: string | undefined): boolean {
+  if ((mode !== "standard" && mode !== "pro") || !model.capabilities.reasoning) return false
+  if (model.api.npm !== "@ai-sdk/gateway") return false
+  return gpt56ReasoningEfforts(model.api.id, false) !== undefined
+}
+
 function openaiWireReasoningEffort(effort: string) {
   // Ultra is an opencode/Codex-style user-facing mode. OpenAI's inference
   // boundary still expects `max`; proactive multi-agent orchestration is owned

@@ -124,6 +124,18 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
   const mcpCommand = withCategory(language.t("command.category.mcp"))
   const agentCommand = withCategory(language.t("command.category.agent"))
   const permissionsCommand = withCategory(language.t("command.category.permissions"))
+  const supportsProReasoning = () => {
+    const model = local.model.current()
+    if (!model?.capabilities.reasoning || model.api.npm !== "@ai-sdk/gateway") return false
+    return [
+      "openai/gpt-5.6-sol",
+      "openai/gpt-5-6-sol",
+      "openai/gpt-5.6-terra",
+      "openai/gpt-5-6-terra",
+      "openai/gpt-5.6-luna",
+      "openai/gpt-5-6-luna",
+    ].includes(model.api.id.toLowerCase())
+  }
 
   const isAutoAcceptActive = () => {
     const sessionID = params.id
@@ -525,6 +537,24 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
       description: language.t("command.model.variant.cycle.description"),
       keybind: "shift+mod+d",
       onSelect: () => local.model.variant.cycle(),
+    }),
+    modelCommand({
+      id: "model.reasoning.pro",
+      title:
+        local.model.reasoningMode.current() === "pro"
+          ? language.t("command.model.reasoning.pro.disable")
+          : language.t("command.model.reasoning.pro.enable"),
+      description: language.t("command.model.reasoning.pro.description"),
+      slash: "pro",
+      disabled: !supportsProReasoning(),
+      onSelect: () => {
+        const enabled = local.model.reasoningMode.current() !== "pro"
+        local.model.reasoningMode.set(enabled ? "pro" : "standard")
+        showToast({
+          title: language.t(enabled ? "command.model.reasoning.pro.enable" : "command.model.reasoning.pro.disable"),
+          description: language.t("command.model.reasoning.pro.description"),
+        })
+      },
     }),
   ]
 

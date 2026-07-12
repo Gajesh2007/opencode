@@ -1,5 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, mock, test } from "bun:test"
 import type { Prompt } from "@/context/prompt"
+import type { FollowupDraft } from "./submit"
 
 let createPromptSubmit: typeof import("./submit").createPromptSubmit
 
@@ -11,7 +12,7 @@ const optimistic: Array<{
   sessionID?: string
   message: {
     agent: string
-    model: { providerID: string; modelID: string }
+    model: { providerID: string; modelID: string; reasoningMode?: "pro" }
     variant?: string
   }
 }> = []
@@ -24,6 +25,7 @@ const syncedDirectories: string[] = []
 let params: { id?: string } = {}
 let selected = "/repo/worktree-a"
 let variant: string | undefined
+let reasoningMode: "pro" | undefined
 
 const promptValue: Prompt = [{ type: "text", content: "ls", start: 0, end: 2 }]
 
@@ -83,6 +85,7 @@ beforeAll(async () => {
       model: {
         current: () => ({ id: "model", provider: { id: "provider" } }),
         variant: { current: () => variant },
+        reasoningMode: { current: () => reasoningMode },
       },
       agent: {
         current: () => ({ name: "agent" }),
@@ -213,6 +216,7 @@ beforeEach(() => {
   syncedDirectories.length = 0
   selected = "/repo/worktree-a"
   variant = undefined
+  reasoningMode = undefined
   for (const key of Object.keys(storedSessions)) delete storedSessions[key]
 })
 
@@ -281,9 +285,10 @@ describe("prompt submit worktree selection", () => {
     expect(enabledAutoAccept).toEqual([{ sessionID: "session-1", directory: "/repo/worktree-a" }])
   })
 
-  test("includes the selected variant on optimistic prompts", async () => {
+  test("includes the selected variant and Pro mode on optimistic prompts", async () => {
     params = { id: "session-1" }
     variant = "high"
+    reasoningMode = "pro"
 
     const submit = createPromptSubmit({
       info: () => ({ id: "session-1" }),
@@ -310,9 +315,42 @@ describe("prompt submit worktree selection", () => {
     expect(optimistic[0]).toMatchObject({
       message: {
         agent: "agent",
-        model: { providerID: "provider", modelID: "model", variant: "high" },
+        model: { providerID: "provider", modelID: "model", variant: "high", reasoningMode: "pro" },
       },
     })
+  })
+
+  test("captures Pro mode when queueing a follow-up", async () => {
+    params = { id: "session-1" }
+    variant = "high"
+    reasoningMode = "pro"
+    let queued: FollowupDraft | undefined
+
+    const submit = createPromptSubmit({
+      info: () => ({ id: "session-1" }),
+      imageAttachments: () => [],
+      commentCount: () => 0,
+      autoAccept: () => false,
+      mode: () => "normal",
+      working: () => true,
+      editor: () => undefined,
+      queueScroll: () => undefined,
+      promptLength: (value) => value.reduce((sum, part) => sum + ("content" in part ? part.content.length : 0), 0),
+      addToHistory: () => undefined,
+      resetHistoryNavigation: () => undefined,
+      setMode: () => undefined,
+      setPopover: () => undefined,
+      shouldQueue: () => true,
+      onQueue: (draft) => {
+        queued = draft
+      },
+      onSubmit: () => undefined,
+    })
+
+    await submit.handleSubmit({ preventDefault: () => undefined } as unknown as Event)
+
+    expect(queued).toMatchObject({ variant: "high", reasoningMode: "pro" })
+    expect(optimistic).toHaveLength(0)
   })
 
   test("seeds new sessions before optimistic prompts are added", async () => {

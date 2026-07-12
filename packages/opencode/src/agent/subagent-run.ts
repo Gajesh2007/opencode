@@ -10,8 +10,9 @@ import { MessageV2 } from "@/session/message-v2"
 import type { SessionPrompt } from "@/session/prompt"
 import { SessionID } from "@/session/schema"
 import { Session } from "@/session/session"
+import { SessionStatus } from "@/session/status"
 import type { Tool } from "@/tool/tool"
-import { Cause, Context, Effect, Exit, Layer, Option, Schedule } from "effect"
+import { Cause, Context, Effect, Exit, Layer, Option, Schedule, Scope } from "effect"
 
 const TASK_NAME = /^[a-z0-9_]+$/
 
@@ -57,6 +58,29 @@ export const layer = Layer.effect(
     const limit = yield* SubagentLimit.Service
     const plugin = yield* Plugin.Service
     const sessions = yield* Session.Service
+    const status = yield* SessionStatus.Service
+    const scope = yield* Scope.Scope
+
+    const resumeParent: (input: { ops: TaskPromptOps; parentSessionID: SessionID }) => Effect.Effect<void> = Effect.fn(
+      "SubagentRun.resumeParent",
+    )(function* (input) {
+      if (!(yield* collaboration.hasMail(input.parentSessionID))) return
+      if ((yield* status.get(input.parentSessionID)).type !== "idle") {
+        yield* Effect.sleep("300 millis")
+        return yield* resumeParent(input)
+      }
+      if (!(yield* collaboration.hasMail(input.parentSessionID))) return
+      const latest = yield* sessions
+        .findMessage(input.parentSessionID, (message) => message.info.role === "user")
+        .pipe(Effect.orDie)
+      if (Option.isNone(latest)) return
+      const mail = yield* collaboration.inbox({ sessionID: input.parentSessionID }).pipe(Effect.orDie)
+      if (!mail.some((message) => message.messageID === latest.value.info.id)) return
+      yield* input.ops.loop({ sessionID: input.parentSessionID }).pipe(Effect.ignore)
+    })
+
+    const notifyParent = (input: { ops: TaskPromptOps; parentSessionID: SessionID }) =>
+      resumeParent(input).pipe(Effect.ignore, Effect.forkIn(scope, { startImmediately: true }))
 
     const start = Effect.fn("SubagentRun.start")(function* (input: {
       context: Tool.Context
@@ -78,6 +102,7 @@ export const layer = Layer.effect(
         parentSessionId: input.parentSessionID,
         sessionId: input.childSessionID,
         taskPath: input.path,
+        background: true,
       }
       yield* input.context.metadata({ title: input.task, metadata })
       yield* background.start({
@@ -115,6 +140,9 @@ export const layer = Layer.effect(
                   const completed = yield* collaboration
                     .complete({ sessionID: input.childSessionID, error })
                     .pipe(Effect.exit)
+                  if (Exit.isSuccess(completed)) {
+                    yield* notifyParent({ ops: input.ops, parentSessionID: input.parentSessionID })
+                  }
                   if (Exit.isFailure(completed)) {
                     yield* collaboration.setStatus({
                       sessionID: input.childSessionID,
@@ -128,7 +156,10 @@ export const layer = Layer.effect(
                 const delivered = yield* collaboration
                   .complete({ sessionID: input.childSessionID, result: output })
                   .pipe(Effect.retry(Schedule.recurs(2)), Effect.exit)
-                if (Exit.isSuccess(delivered)) return output
+                if (Exit.isSuccess(delivered)) {
+                  yield* notifyParent({ ops: input.ops, parentSessionID: input.parentSessionID })
+                  return output
+                }
                 const error = `Child completed, but final answer delivery failed: ${errorText(Cause.squash(delivered.cause))}`
                 yield* collaboration.setStatus({
                   sessionID: input.childSessionID,
@@ -211,7 +242,7 @@ export const layer = Layer.effect(
         parentAgent,
         subagent: selected,
       })
-      const child = yield* input.forkTurns === "none"
+      const child = yield* input.forkTurns === undefined || input.forkTurns === "none"
         ? sessions.create({
             parentID: input.context.sessionID,
             title: `[agent] ${taskName}`,

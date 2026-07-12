@@ -161,6 +161,8 @@ describe("tool.registry", () => {
       expect(spawnAgent?.description).toContain("recursively use spawn_agent")
       expect(spawnAgent?.description).toContain("four total concurrency slots")
       expect(spawnAgent?.description).toContain("explicit denies win")
+      expect(spawnAgent?.description).toContain('defaults to `"none"`')
+      expect(spawnAgent?.description).not.toContain('`"all"` (the default)')
     }),
   )
 

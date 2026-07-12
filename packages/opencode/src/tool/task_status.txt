@@ -1,9 +1,9 @@
-Poll the status of a background subagent task launched with the task tool.
+Read the status and output of a subagent launched with `task` or `spawn_agent`.
 
-Use this for tasks started with `task(background=true)`.
+Use this for background tasks and collaboration agents. Completed output remains readable by session id even after its completion message has been delivered to the parent.
 
 Parameters:
-- `task_id` (required): the task session id returned by the task tool
+- `task_id` (required): the task session id returned by `task` or `spawn_agent`
 - `wait` (optional): when true, wait for completion
 - `timeout_ms` (optional): max wait duration in milliseconds when `wait=true`
 

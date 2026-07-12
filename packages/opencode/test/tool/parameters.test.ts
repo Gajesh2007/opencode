@@ -20,6 +20,7 @@ import { Parameters as Question } from "../../src/tool/question"
 import { Parameters as Read } from "../../src/tool/read"
 import { Parameters as Shell } from "../../src/tool/shell"
 import { Parameters as Skill } from "../../src/tool/skill"
+import { Parameters as SpawnAgent } from "../../src/tool/spawn_agent"
 import { Parameters as Task } from "../../src/tool/task"
 import { Parameters as Todo } from "../../src/tool/todo"
 import { Parameters as WebFetch } from "../../src/tool/webfetch"
@@ -52,6 +53,13 @@ describe("tool parameters", () => {
     test("webfetch", () => expect(toJsonSchema(WebFetch)).toMatchSnapshot())
     test("websearch", () => expect(toJsonSchema(WebSearch)).toMatchSnapshot())
     test("write", () => expect(toJsonSchema(Write)).toMatchSnapshot())
+
+    test("spawn_agent defaults to a fresh child session", () => {
+      const forkTurns = toJsonSchema(SpawnAgent).properties?.fork_turns
+      if (!forkTurns || typeof forkTurns !== "object") throw new Error("fork_turns schema is missing")
+      expect(Reflect.get(forkTurns, "default")).toBe("none")
+      expect(Reflect.get(forkTurns, "anyOf")).toContainEqual({ type: "string", enum: ["none", "all"] })
+    })
 
     test("inlines named child schemas for provider compatibility", () => {
       const schema = toJsonSchema(Question)

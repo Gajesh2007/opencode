@@ -432,6 +432,7 @@ export type UserMessage = {
     providerID: string
     modelID: string
     variant?: string
+    reasoningMode?: "standard" | "pro"
     serviceTier?: string
     upstream?: string
   }
@@ -6430,6 +6431,7 @@ export type SessionPromptData = {
     format?: OutputFormat
     system?: string
     variant?: string
+    reasoningMode?: "standard" | "pro"
     serviceTier?: string
     upstream?: string
     parts: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
@@ -6780,6 +6782,7 @@ export type SessionPromptAsyncData = {
     format?: OutputFormat
     system?: string
     variant?: string
+    reasoningMode?: "standard" | "pro"
     serviceTier?: string
     upstream?: string
     parts: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
@@ -6824,6 +6827,7 @@ export type SessionCommandData = {
     arguments: string
     command: string
     variant?: string
+    reasoningMode?: "standard" | "pro"
     serviceTier?: string
     upstream?: string
     parts?: Array<{

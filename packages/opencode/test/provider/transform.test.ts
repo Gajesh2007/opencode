@@ -494,6 +494,33 @@ describe("ProviderTransform.providerOptions", () => {
     })
   })
 
+  test("routes GPT-5.6 Pro mode under the OpenAI Gateway namespace", () => {
+    const model = createModel({
+      providerID: "vercel",
+      api: {
+        id: "openai/gpt-5.6-sol",
+        url: "https://ai-gateway.vercel.sh/v3/ai",
+        npm: "@ai-sdk/gateway",
+      },
+    })
+
+    expect(
+      ProviderTransform.providerOptions(model, {
+        gateway: { only: ["openai"] },
+        reasoningEffort: "high",
+        reasoningMode: "pro",
+      }),
+    ).toEqual({
+      gateway: { only: ["openai"] },
+      openai: { reasoningEffort: "high", reasoningMode: "pro" },
+    })
+    expect(ProviderTransform.supportsReasoningMode(model, "pro")).toBe(true)
+    expect(ProviderTransform.supportsReasoningMode(model, "standard")).toBe(true)
+    expect(
+      ProviderTransform.supportsReasoningMode({ ...model, api: { ...model.api, npm: "@ai-sdk/openai" } }, "pro"),
+    ).toBe(false)
+  })
+
   test("falls back to gateway key when gateway api id is unscoped", () => {
     const model = createModel({
       id: "anthropic/claude-sonnet-4",

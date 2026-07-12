@@ -12,7 +12,7 @@ const DEFAULT_TIMEOUT = 60_000
 const POLL_MS = 300
 
 const Parameters = Schema.Struct({
-  task_id: SessionID.annotate({ description: "The task_id returned by the task tool" }),
+  task_id: SessionID.annotate({ description: "The task or session id returned by task or spawn_agent" }),
   wait: Schema.optional(Schema.Boolean).annotate({
     description: "When true, wait until the task reaches a terminal state or timeout",
   }),

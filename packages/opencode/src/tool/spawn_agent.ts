@@ -12,9 +12,10 @@ export const Parameters = Schema.Struct({
   message: Schema.String.check(Schema.isNonEmpty(), Schema.isMaxLength(MAX_MAILBOX_PAYLOAD_CHARS)).annotate({
     description: `A complete, concrete task for an independent child agent (maximum ${MAX_MAILBOX_PAYLOAD_CHARS.toLocaleString()} characters).`,
   }),
-  fork_turns: Schema.optional(Schema.Union([Schema.Literals(["all", "none"]), PositiveInt])).annotate({
+  fork_turns: Schema.optional(Schema.Union([Schema.Literals(["none", "all"]), PositiveInt])).annotate({
     description:
-      "Context to give the child: 'all' (default), 'none' for a fresh session, or a positive integer for the latest user turns.",
+      "Context to give the child: 'none' (default) for a fresh session, 'all' for the complete conversation, or a positive integer for the latest user turns.",
+    default: "none",
   }),
   agent_type: Schema.optional(Schema.String).annotate({
     description: "Optional agent type. By default the child uses the current agent identity.",
@@ -24,6 +25,10 @@ export const Parameters = Schema.Struct({
 type Metadata = {
   task_path: string
   session_id: string
+  taskPath: string
+  sessionId: string
+  parentSessionId: string
+  background: true
 }
 
 export const SpawnAgentTool = Tool.define(
@@ -45,8 +50,15 @@ export const SpawnAgentTool = Tool.define(
           .pipe(
             Effect.map((result) => ({
               title: params.task_name,
-              metadata: { task_path: result.path, session_id: result.sessionID },
-              output: `task_path: ${result.path}\nsession_id: ${result.sessionID}\nstatus: pending`,
+              metadata: {
+                task_path: result.path,
+                session_id: result.sessionID,
+                taskPath: result.path,
+                sessionId: result.sessionID,
+                parentSessionId: ctx.sessionID,
+                background: true as const,
+              },
+              output: `task_path: ${result.path}\nsession_id: ${result.sessionID}\nstatus: pending\n\nUse task_status with task_id=${result.sessionID} to read this agent's output at any time.`,
             })),
             Effect.orDie,
           ),

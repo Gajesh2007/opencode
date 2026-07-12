@@ -324,6 +324,9 @@ const messageBase = {
   sessionID: SessionID,
 }
 
+export const ReasoningMode = Schema.Literals(["standard", "pro"])
+export type ReasoningMode = Schema.Schema.Type<typeof ReasoningMode>
+
 export const User = Schema.Struct({
   ...messageBase,
   role: Schema.Literal("user"),
@@ -343,6 +346,7 @@ export const User = Schema.Struct({
     providerID: ProviderID,
     modelID: ModelID,
     variant: Schema.optional(Schema.String),
+    reasoningMode: Schema.optional(ReasoningMode),
     serviceTier: Schema.optional(Schema.String),
     upstream: Schema.optional(Schema.String),
   }),

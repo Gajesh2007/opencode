@@ -727,6 +727,7 @@ export const layer = Layer.effect(
               .pipe(Effect.catchIf(Provider.ModelNotFoundError.isInstance, () => Effect.succeed(undefined)))
           : undefined
       const variant = input.variant ?? (ag.variant && full?.variants?.[ag.variant] ? ag.variant : undefined)
+      const reasoningMode = input.reasoningMode
       const serviceTier = input.serviceTier && input.serviceTier !== "default" ? input.serviceTier : undefined
       const upstream = input.upstream && input.upstream !== "default" ? input.upstream : undefined
 
@@ -741,6 +742,7 @@ export const layer = Layer.effect(
           providerID: model.providerID,
           modelID: model.modelID,
           variant,
+          reasoningMode,
           serviceTier,
           upstream,
         },
@@ -1740,6 +1742,7 @@ export const layer = Layer.effect(
         agent: userAgent,
         parts,
         variant: input.variant,
+        reasoningMode: input.reasoningMode,
         serviceTier: input.serviceTier,
         upstream: input.upstream,
       })
@@ -1824,6 +1827,7 @@ export const PromptInput = Schema.Struct({
   format: Schema.optional(MessageV2.Format),
   system: Schema.optional(Schema.String),
   variant: Schema.optional(Schema.String),
+  reasoningMode: Schema.optional(MessageV2.ReasoningMode),
   serviceTier: Schema.optional(Schema.String),
   upstream: Schema.optional(Schema.String),
   parts: Schema.Array(
@@ -1858,6 +1862,7 @@ export const CommandInput = Schema.Struct({
   arguments: Schema.String,
   command: Schema.String,
   variant: Schema.optional(Schema.String),
+  reasoningMode: Schema.optional(MessageV2.ReasoningMode),
   serviceTier: Schema.optional(Schema.String),
   upstream: Schema.optional(Schema.String),
   // Inlined (no identifier annotation) to keep the original SDK output — the

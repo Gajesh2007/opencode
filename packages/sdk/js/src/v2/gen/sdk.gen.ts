@@ -3427,6 +3427,7 @@ export class Session2 extends HeyApiClient {
       format?: OutputFormat
       system?: string
       variant?: string
+      reasoningMode?: "standard" | "pro"
       serviceTier?: string
       upstream?: string
       parts?: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
@@ -3449,6 +3450,7 @@ export class Session2 extends HeyApiClient {
             { in: "body", key: "format" },
             { in: "body", key: "system" },
             { in: "body", key: "variant" },
+            { in: "body", key: "reasoningMode" },
             { in: "body", key: "serviceTier" },
             { in: "body", key: "upstream" },
             { in: "body", key: "parts" },
@@ -3786,6 +3788,7 @@ export class Session2 extends HeyApiClient {
       format?: OutputFormat
       system?: string
       variant?: string
+      reasoningMode?: "standard" | "pro"
       serviceTier?: string
       upstream?: string
       parts?: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
@@ -3808,6 +3811,7 @@ export class Session2 extends HeyApiClient {
             { in: "body", key: "format" },
             { in: "body", key: "system" },
             { in: "body", key: "variant" },
+            { in: "body", key: "reasoningMode" },
             { in: "body", key: "serviceTier" },
             { in: "body", key: "upstream" },
             { in: "body", key: "parts" },
@@ -3843,6 +3847,7 @@ export class Session2 extends HeyApiClient {
       arguments?: string
       command?: string
       variant?: string
+      reasoningMode?: "standard" | "pro"
       serviceTier?: string
       upstream?: string
       parts?: Array<{
@@ -3870,6 +3875,7 @@ export class Session2 extends HeyApiClient {
             { in: "body", key: "arguments" },
             { in: "body", key: "command" },
             { in: "body", key: "variant" },
+            { in: "body", key: "reasoningMode" },
             { in: "body", key: "serviceTier" },
             { in: "body", key: "upstream" },
             { in: "body", key: "parts" },

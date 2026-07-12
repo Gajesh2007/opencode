@@ -138,6 +138,20 @@ const appBindingCommands = [
   "app.toggle.session_directory_filter",
 ] as const
 
+function supportsProReasoning(
+  model: { api: { id: string; npm: string }; capabilities: { reasoning: boolean } } | undefined,
+) {
+  if (!model?.capabilities.reasoning || model.api.npm !== "@ai-sdk/gateway") return false
+  return [
+    "openai/gpt-5.6-sol",
+    "openai/gpt-5-6-sol",
+    "openai/gpt-5.6-terra",
+    "openai/gpt-5-6-terra",
+    "openai/gpt-5.6-luna",
+    "openai/gpt-5-6-luna",
+  ].includes(model.api.id.toLowerCase())
+}
+
 function rendererConfig(_config: TuiConfig.Resolved): CliRendererConfig {
   const mouseEnabled = !Flag.OPENCODE_DISABLE_MOUSE && (_config.mouse ?? true)
 
@@ -472,6 +486,12 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
     if (workspace?.type !== "worktree" || !workspace.directory) return
     return workspace
   })
+  const proSessionID = createMemo(() => (route.data.type === "session" ? route.data.sessionID : undefined))
+  const proAvailable = createMemo(() => {
+    const current = local.model.current()
+    if (!current) return false
+    return supportsProReasoning(sync.data.provider.find((x) => x.id === current.providerID)?.models[current.modelID])
+  })
   const appCommands = createMemo(() =>
     [
       {
@@ -656,6 +676,22 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
         slashName: "variants",
         run: () => {
           dialog.replace(() => <DialogVariant />)
+        },
+      },
+      {
+        name: "reasoning.pro.toggle",
+        title:
+          local.session.reasoningMode(proSessionID()) === "pro"
+            ? "Disable Pro reasoning"
+            : "Enable Pro reasoning",
+        category: "Agent",
+        hidden: !proAvailable(),
+        slashName: "pro",
+        run: () => {
+          const sessionID = proSessionID()
+          const enabled = local.session.reasoningMode(sessionID) !== "pro"
+          local.session.setReasoningMode(sessionID, enabled ? "pro" : "standard")
+          toast.show({ message: `Pro reasoning ${enabled ? "enabled" : "disabled"}`, variant: "info" })
         },
       },
       {

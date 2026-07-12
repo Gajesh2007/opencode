@@ -81,6 +81,10 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     !input.small && input.model.variants && input.user.model.variant
       ? input.model.variants[input.user.model.variant]
       : {}
+  const reasoningMode =
+    !input.small && ProviderTransform.supportsReasoningMode(input.model, input.user.model.reasoningMode)
+      ? { reasoningMode: input.user.model.reasoningMode }
+      : {}
   // serviceTier entries may carry a `headers` field for headers the provider
   // requires alongside the body change (e.g. anthropic-beta for fast mode).
   // The @ai-sdk/anthropic provider currently auto-adds the fast-mode beta
@@ -134,16 +138,15 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     !input.small && responsesContinuation && input.previousResponseId
       ? { openai: { previousResponseId: input.previousResponseId } }
       : {}
-  const options = mergeOptions(
-    mergeOptions(
-      mergeOptions(
-        mergeOptions(mergeOptions(mergeOptions(base, input.model.options), input.agent.options), variant),
-        tierOptions,
-      ),
-      upstreamOptions,
-    ),
+  const options = [
+    input.model.options,
+    input.agent.options,
+    variant,
+    reasoningMode,
+    tierOptions,
+    upstreamOptions,
     previousResponseOptions,
-  )
+  ].reduce<Record<string, any>>((result, item) => mergeOptions(result, item), base)
   if (isOpenaiOauth) options.instructions = system.join("\n")
 
   const messages =

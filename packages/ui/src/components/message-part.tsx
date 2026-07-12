@@ -393,15 +393,16 @@ export function getToolInfo(
         title: webSearchProviderLabel(metadata?.provider),
         subtitle: input.query,
       }
-    case "task": {
+    case "task":
+    case "spawn_agent":
+    case "followup_task": {
+      const agentType = input.subagent_type ?? input.agent_type
       const type =
-        typeof input.subagent_type === "string" && input.subagent_type
-          ? input.subagent_type[0]!.toUpperCase() + input.subagent_type.slice(1)
-          : undefined
+        typeof agentType === "string" && agentType ? agentType[0]!.toUpperCase() + agentType.slice(1) : undefined
       return {
         icon: "task",
         title: agentTitle(i18n, type),
-        subtitle: input.description,
+        subtitle: input.description ?? input.task_name,
       }
     }
     case "bash":
@@ -488,17 +489,25 @@ function taskSession(
 ) {
   const parentID = currentSession(path)
   if (!parentID) return
-  const description = typeof input.description === "string" ? input.description : ""
-  const agent = taskAgent(input.subagent_type, agents).name
+  const description =
+    typeof input.description === "string"
+      ? input.description
+      : typeof input.task_name === "string"
+        ? input.task_name
+        : ""
+  const agent = taskAgent(input.subagent_type ?? input.agent_type, agents).name
   return (sessions ?? [])
     .filter((session) => session.parentID === parentID && !session.time?.archived)
-    .filter((session) => (description ? session.title.startsWith(description) : true))
-    .filter((session) => (agent ? session.title.includes(`@${agent}`) : true))
+    .filter((session) =>
+      description ? session.title.startsWith(description) || session.title === `[agent] ${description}` : true,
+    )
+    .filter((session) => (agent ? session.agent === agent || session.title.includes(`@${agent}`) : true))
     .sort((a, b) => (b.time.created ?? 0) - (a.time.created ?? 0))[0]?.id
 }
 
 const CONTEXT_GROUP_TOOLS = new Set(["read", "glob", "grep", "list"])
 const HIDDEN_TOOLS = new Set(["todowrite"])
+const AGENT_TASK_TOOLS = new Set(["task", "spawn_agent", "followup_task"])
 
 function list<T>(value: T[] | undefined | null, fallback: T[]) {
   if (Array.isArray(value)) return value
@@ -1360,17 +1369,17 @@ PART_MAPPING["tool"] = function ToolPartDisplay(props) {
   // @ts-expect-error
   const partMetadata = () => part().state?.metadata ?? emptyMetadata
   const taskId = createMemo(() => {
-    if (part().tool !== "task") return
-    const value = partMetadata().sessionId
+    if (!AGENT_TASK_TOOLS.has(part().tool)) return
+    const value = partMetadata().sessionId ?? partMetadata().session_id
     if (typeof value === "string" && value) return value
   })
   const taskHref = createMemo(() => {
-    if (part().tool !== "task") return
+    if (!AGENT_TASK_TOOLS.has(part().tool)) return
     return sessionLink(taskId(), useLocation().pathname, data.sessionHref)
   })
   const taskSubtitle = createMemo(() => {
-    if (part().tool !== "task") return undefined
-    const value = input().description
+    if (!AGENT_TASK_TOOLS.has(part().tool)) return undefined
+    const value = input().description ?? input().task_name
     if (typeof value === "string" && value) return value
     return taskId()
   })
@@ -1760,90 +1769,97 @@ ToolRegistry.register({
   },
 })
 
-ToolRegistry.register({
-  name: "task",
-  render(props) {
-    const data = useData()
-    const i18n = useI18n()
-    const location = useLocation()
-    const childSessionId = createMemo(() => {
-      const value = props.metadata.sessionId
-      if (typeof value === "string" && value) return value
-      return taskSession(props.input, location.pathname, data.store.session, data.store.agent)
-    })
-    const agent = createMemo(() => taskAgent(props.input.subagent_type, data.store.agent))
-    const title = createMemo(() => agent().name ?? i18n.t("ui.tool.agent.default"))
-    const tone = createMemo(() => agent().color)
-    const subtitle = createMemo(() => {
-      const value =
-        typeof props.input.description === "string" && props.input.description
-          ? props.input.description
+function AgentTaskTool(props: ToolProps) {
+  const data = useData()
+  const i18n = useI18n()
+  const location = useLocation()
+  const childSessionId = createMemo(() => {
+    const value = props.metadata.sessionId ?? props.metadata.session_id
+    if (typeof value === "string" && value) return value
+    return taskSession(props.input, location.pathname, data.store.session, data.store.agent)
+  })
+  const agent = createMemo(() => taskAgent(props.input.subagent_type ?? props.input.agent_type, data.store.agent))
+  const title = createMemo(() => agent().name ?? i18n.t("ui.tool.agent.default"))
+  const tone = createMemo(() => agent().color)
+  const subtitle = createMemo(() => {
+    const value =
+      typeof props.input.description === "string" && props.input.description
+        ? props.input.description
+        : typeof props.input.task_name === "string" && props.input.task_name
+          ? props.input.task_name
           : childSessionId()
-      if (!value) return value
-      if (props.metadata.background === true) return `${value} (background)`
-      return value
-    })
-    const running = createMemo(() => props.status === "pending" || props.status === "running")
+    if (!value) return value
+    if (props.metadata.background === true || props.tool === "spawn_agent") return `${value} (background)`
+    return value
+  })
+  const running = createMemo(() => {
+    if (props.status === "pending" || props.status === "running") return true
+    const status = data.store.session_status[childSessionId() ?? ""]
+    return status?.type === "busy" || status?.type === "retry"
+  })
 
-    const href = createMemo(() => sessionLink(childSessionId(), location.pathname, data.sessionHref))
-    const clickable = createMemo(() => !!(childSessionId() && (data.navigateToSession || href())))
+  const href = createMemo(() => sessionLink(childSessionId(), location.pathname, data.sessionHref))
+  const clickable = createMemo(() => !!(childSessionId() && (data.navigateToSession || href())))
 
-    const open = () => {
-      const id = childSessionId()
-      if (!id) return
-      if (data.navigateToSession) {
-        data.navigateToSession(id)
-        return
-      }
-      const value = href()
-      if (value) window.location.assign(value)
+  const open = () => {
+    const id = childSessionId()
+    if (!id) return
+    if (data.navigateToSession) {
+      data.navigateToSession(id)
+      return
     }
+    const value = href()
+    if (value) window.location.assign(value)
+  }
 
-    const navigate = (event: MouseEvent) => {
-      if (!data.navigateToSession) return
-      if (event.button !== 0 || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
-      event.preventDefault()
-      open()
-    }
+  const navigate = (event: MouseEvent) => {
+    if (!data.navigateToSession) return
+    if (event.button !== 0 || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
+    event.preventDefault()
+    open()
+  }
 
-    const trigger = () => (
-      <div data-component="task-tool-card">
-        <div data-slot="basic-tool-tool-info-structured">
-          <div data-slot="basic-tool-tool-info-main">
-            <Show when={running()}>
-              <span data-component="task-tool-spinner" style={{ color: tone() ?? "var(--icon-interactive-base)" }}>
-                <Spinner />
-              </span>
-            </Show>
-            <span data-component="task-tool-title" style={{ color: tone() ?? "var(--text-strong)" }}>
-              {title()}
+  const trigger = () => (
+    <div data-component="task-tool-card">
+      <div data-slot="basic-tool-tool-info-structured">
+        <div data-slot="basic-tool-tool-info-main">
+          <Show when={running()}>
+            <span data-component="task-tool-spinner" style={{ color: tone() ?? "var(--icon-interactive-base)" }}>
+              <Spinner />
             </span>
-            <Show when={subtitle()}>
-              <span data-slot="basic-tool-tool-subtitle">{subtitle()}</span>
-            </Show>
-          </div>
+          </Show>
+          <span data-component="task-tool-title" style={{ color: tone() ?? "var(--text-strong)" }}>
+            {title()}
+          </span>
+          <Show when={subtitle()}>
+            <span data-slot="basic-tool-tool-subtitle">{subtitle()}</span>
+          </Show>
         </div>
-        <Show when={clickable()}>
-          <div data-component="task-tool-action">
-            <Icon name="square-arrow-top-right" size="small" />
-          </div>
-        </Show>
       </div>
-    )
+      <Show when={clickable()}>
+        <div data-component="task-tool-action">
+          <Icon name="square-arrow-top-right" size="small" />
+        </div>
+      </Show>
+    </div>
+  )
 
-    return (
-      <BasicTool
-        icon="task"
-        status={props.status}
-        trigger={trigger()}
-        hideDetails
-        triggerHref={href()}
-        clickable={clickable()}
-        onTriggerClick={navigate}
-      />
-    )
-  },
-})
+  return (
+    <BasicTool
+      icon="task"
+      status={props.status}
+      trigger={trigger()}
+      hideDetails
+      triggerHref={href()}
+      clickable={clickable()}
+      onTriggerClick={navigate}
+    />
+  )
+}
+
+ToolRegistry.register({ name: "task", render: AgentTaskTool })
+ToolRegistry.register({ name: "spawn_agent", render: AgentTaskTool })
+ToolRegistry.register({ name: "followup_task", render: AgentTaskTool })
 
 ToolRegistry.register({
   name: "bash",

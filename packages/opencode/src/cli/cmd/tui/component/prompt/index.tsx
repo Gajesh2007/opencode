@@ -380,7 +380,7 @@ export function Prompt(props: PromptProps) {
     ),
   )
 
-  // Initialize agent/model/variant from last user message when session changes
+  // Initialize agent and model controls from the last user message when the session changes.
   let syncedSessionID: string | undefined
   createEffect(() => {
     const sessionID = props.sessionID
@@ -399,6 +399,7 @@ export function Prompt(props: PromptProps) {
         if (msg.model) {
           local.model.set(msg.model)
           local.model.variant.set(msg.model.variant)
+          local.session.setReasoningMode(sessionID, msg.model.reasoningMode)
         }
       }
     }
@@ -1091,7 +1092,9 @@ export function Prompt(props: PromptProps) {
       }
 
       sessionID = res.data.id
+      local.session.promoteReasoningMode(sessionID)
     }
+    const reasoningMode = local.session.reasoningMode(sessionID)
 
     const messageID = MessageID.ascending()
     let inputText = store.prompt.input
@@ -1170,6 +1173,7 @@ export function Prompt(props: PromptProps) {
         model: `${selectedModel.providerID}/${selectedModel.modelID}`,
         messageID,
         variant,
+        reasoningMode,
         serviceTier,
         upstream,
         parts: nonTextParts
@@ -1188,6 +1192,7 @@ export function Prompt(props: PromptProps) {
           agent: agent.name,
           model: selectedModel,
           variant,
+          reasoningMode,
           serviceTier,
           upstream,
           parts: [

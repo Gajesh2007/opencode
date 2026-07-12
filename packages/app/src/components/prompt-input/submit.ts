@@ -34,6 +34,7 @@ export type FollowupDraft = {
   agent: string
   model: { providerID: string; modelID: string }
   variant?: string
+  reasoningMode?: "standard" | "pro"
 }
 
 type FollowupSendInput = {
@@ -88,6 +89,7 @@ export async function sendFollowupDraft(input: FollowupSendInput) {
         agent: input.draft.agent,
         model: `${input.draft.model.providerID}/${input.draft.model.modelID}`,
         variant: input.draft.variant,
+        reasoningMode: input.draft.reasoningMode,
         parts: images.map((attachment) => ({
           id: Identifier.ascending("part"),
           type: "file" as const,
@@ -120,7 +122,7 @@ export async function sendFollowupDraft(input: FollowupSendInput) {
     role: "user",
     time: { created: Date.now() },
     agent: input.draft.agent,
-    model: { ...input.draft.model, variant: input.draft.variant },
+    model: { ...input.draft.model, variant: input.draft.variant, reasoningMode: input.draft.reasoningMode },
   }
 
   const add = () =>
@@ -159,6 +161,7 @@ export async function sendFollowupDraft(input: FollowupSendInput) {
       messageID,
       parts: requestParts,
       variant: input.draft.variant,
+      reasoningMode: input.draft.reasoningMode,
     })
     return true
   } catch (err) {
@@ -302,6 +305,7 @@ export function createPromptSubmit(input: PromptSubmitInput) {
     const currentModel = local.model.current()
     const currentAgent = local.agent.current()
     const variant = local.model.variant.current()
+    const reasoningMode = local.model.reasoningMode.current()
     if (!currentModel || !currentAgent) {
       showToast({
         title: language.t("prompt.toast.modelAgentRequired.title"),
@@ -403,6 +407,7 @@ export function createPromptSubmit(input: PromptSubmitInput) {
       agent,
       model,
       variant,
+      reasoningMode,
     }
 
     const clearInput = () => {
@@ -466,6 +471,7 @@ export function createPromptSubmit(input: PromptSubmitInput) {
             agent,
             model: `${model.providerID}/${model.modelID}`,
             variant,
+            reasoningMode,
             parts: images.map((attachment) => ({
               id: Identifier.ascending("part"),
               type: "file" as const,

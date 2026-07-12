@@ -518,12 +518,15 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
     })
 
     const session = iife(() => {
+      const draftReasoningMode = "__draft__"
       const [sessionStore, setSessionStore] = createStore<{
         ready: boolean
         pinned: string[]
+        reasoningMode: Record<string, "standard" | "pro" | undefined>
       }>({
         ready: false,
         pinned: [],
+        reasoningMode: {},
       })
 
       const filePath = path.join(Global.Path.state, "session.json")
@@ -539,12 +542,16 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         state.pending = false
         void Filesystem.writeJson(filePath, {
           pinned: sessionStore.pinned,
+          reasoningMode: sessionStore.reasoningMode,
         })
       }
 
       Filesystem.readJson(filePath)
         .then((x: any) => {
           if (Array.isArray(x.pinned)) setSessionStore("pinned", x.pinned)
+          if (typeof x.reasoningMode === "object" && x.reasoningMode !== null) {
+            setSessionStore("reasoningMode", x.reasoningMode)
+          }
         })
         .catch(() => {})
         .finally(() => {
@@ -568,6 +575,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
               sessionStore.pinned.filter((x) => x !== sessionID),
             )
           }
+          setSessionStore("reasoningMode", sessionID, undefined)
           save()
         })
       }
@@ -586,6 +594,18 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         slots,
         isPinned(sessionID: string) {
           return sessionStore.pinned.includes(sessionID)
+        },
+        reasoningMode(sessionID?: string) {
+          return sessionStore.reasoningMode[sessionID ?? draftReasoningMode]
+        },
+        setReasoningMode(sessionID: string | undefined, value: "standard" | "pro" | undefined) {
+          setSessionStore("reasoningMode", sessionID ?? draftReasoningMode, value)
+          save()
+        },
+        promoteReasoningMode(sessionID: string) {
+          setSessionStore("reasoningMode", sessionID, sessionStore.reasoningMode[draftReasoningMode])
+          setSessionStore("reasoningMode", draftReasoningMode, undefined)
+          save()
         },
         togglePin(sessionID: string) {
           batch(() => {

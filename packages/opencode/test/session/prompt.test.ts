@@ -595,6 +595,7 @@ it.instance("drains collaboration wake records without duplicating persisted mai
       model: ref,
       agent: "build",
       variant: "ultra",
+      reasoningMode: "pro",
       serviceTier: "priority",
       upstream: "origin",
       noReply: true,
@@ -624,7 +625,7 @@ it.instance("drains collaboration wake records without duplicating persisted mai
     expect(mailbox[0]?.info).toMatchObject({
       role: "user",
       agent: "build",
-      model: { ...ref, variant: "ultra", serviceTier: "priority", upstream: "origin" },
+      model: { ...ref, variant: "ultra", reasoningMode: "pro", serviceTier: "priority", upstream: "origin" },
     })
     expect(yield* collaboration.hasMail(chat.id)).toBe(false)
     expect(JSON.stringify((yield* llm.inputs)[0])).toContain("found the relevant file")

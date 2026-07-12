@@ -10,12 +10,18 @@ import { cycleModelVariant, getConfiguredAgentVariant, resolveModelVariant } fro
 import { useSDK } from "./sdk"
 import { useSync } from "./sync"
 
-export type ModelKey = { providerID: string; modelID: string; variant?: string }
+export type ModelKey = {
+  providerID: string
+  modelID: string
+  variant?: string
+  reasoningMode?: "standard" | "pro"
+}
 
 type State = {
   agent?: string
   model?: ModelKey
   variant?: string | null
+  reasoningMode?: "standard" | "pro"
 }
 
 type Saved = {
@@ -196,6 +202,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
             agent: item.name,
             model: item.model ?? prev?.model,
             variant: item.variant ?? prev?.variant,
+            reasoningMode: prev?.reasoningMode,
           } satisfies State
           const session = id()
           if (session) {
@@ -249,6 +256,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         agent: agent.current()?.name,
         model: model ? { providerID: model.provider.id, modelID: model.id } : undefined,
         variant: selected(),
+        reasoningMode: scope()?.reasoningMode,
       } satisfies State
     }
 
@@ -357,6 +365,14 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           )
         },
       },
+      reasoningMode: {
+        current() {
+          return scope()?.reasoningMode
+        },
+        set(value: "standard" | "pro" | undefined) {
+          write({ reasoningMode: value })
+        },
+      },
     }
 
     const result = {
@@ -391,6 +407,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
             agent: msg.agent,
             model: msg.model,
             variant: msg.model?.variant ?? null,
+            reasoningMode: msg.model?.reasoningMode,
           })
         },
       },

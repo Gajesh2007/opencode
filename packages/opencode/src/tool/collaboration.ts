@@ -34,6 +34,10 @@ const ListParameters = Schema.Struct({
 type Metadata = {
   task_path?: string
   session_id?: string
+  taskPath?: string
+  sessionId?: string
+  parentSessionId?: string
+  background?: boolean
   status?: string
   root_session_id?: string
   count?: number
@@ -51,7 +55,15 @@ export const FollowupTaskTool = Tool.define(
         run.followup({ context: ctx, target: params.target, message: params.message }).pipe(
           Effect.map((result) => ({
             title: `follow up ${result.path}`,
-            metadata: { task_path: result.path, session_id: result.sessionID, status: "pending" },
+            metadata: {
+              task_path: result.path,
+              session_id: result.sessionID,
+              taskPath: result.path,
+              sessionId: result.sessionID,
+              parentSessionId: ctx.sessionID,
+              background: true,
+              status: "pending",
+            },
             output: `task_path: ${result.path}\nsession_id: ${result.sessionID}\nstatus: pending`,
           })),
           Effect.orDie,
@@ -140,7 +152,8 @@ export const ListAgentsTool = Tool.define(
   Effect.gen(function* () {
     const collaboration = yield* Collaboration.Service
     return {
-      description: "List collaboration agents with canonical paths, status, and their most recent task.",
+      description:
+        "List collaboration agents with canonical paths, session ids, status, and their most recent task. Use task_status with a session id to read that agent's output.",
       parameters: ListParameters,
       execute: (params, ctx) =>
         Effect.gen(function* () {

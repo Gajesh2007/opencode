@@ -1497,7 +1497,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
           )
         }}
       </For>
-      <Show when={props.parts.some((x) => x.type === "tool" && x.tool === "task")}>
+      <Show when={props.parts.some((x) => x.type === "tool" && ["task", "spawn_agent"].includes(x.tool))}>
         <box paddingTop={1} paddingLeft={3}>
           <text fg={theme.text}>
             {childShortcut()}
@@ -1727,7 +1727,7 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
         <Match when={props.part.tool === "edit"}>
           <Edit {...toolprops} />
         </Match>
-        <Match when={props.part.tool === "task"}>
+        <Match when={["task", "spawn_agent", "followup_task"].includes(props.part.tool)}>
           <Task {...toolprops} />
         </Match>
         <Match when={props.part.tool === "apply_patch"}>
@@ -2122,13 +2122,24 @@ function Task(props: ToolProps<typeof TaskTool>) {
   const { navigate } = useRoute()
   const sync = useSync()
   const local = useLocal()
+  const taskInput = () =>
+    props.input as typeof props.input & {
+      task_name?: string
+      agent_type?: string
+    }
+  const taskMetadata = () =>
+    props.metadata as typeof props.metadata & {
+      session_id?: string
+    }
+  const sessionID = () => props.metadata.sessionId ?? taskMetadata().session_id
+  const description = () => props.input.description ?? taskInput().task_name
+  const agentType = () => props.input.subagent_type ?? taskInput().agent_type
 
   onMount(() => {
-    if (props.metadata.sessionId && !sync.data.message[props.metadata.sessionId]?.length)
-      void sync.session.sync(props.metadata.sessionId)
+    if (sessionID() && !sync.data.message[sessionID()!]?.length) void sync.session.sync(sessionID()!)
   })
 
-  const messages = createMemo(() => sync.data.message[props.metadata.sessionId ?? ""] ?? [])
+  const messages = createMemo(() => sync.data.message[sessionID() ?? ""] ?? [])
 
   const tools = createMemo(() => {
     return messages().flatMap((msg) =>
@@ -2142,7 +2153,11 @@ function Task(props: ToolProps<typeof TaskTool>) {
     tools().findLast((x) => (x.state.status === "running" || x.state.status === "completed") && x.state.title),
   )
 
-  const isRunning = createMemo(() => props.part.state.status === "running")
+  const isRunning = createMemo(() => {
+    if (props.part.state.status === "running") return true
+    const child = sync.data.session_status?.[sessionID() ?? ""]
+    return child?.type === "busy" || child?.type === "retry"
+  })
 
   const duration = createMemo(() => {
     const first = messages().find((x) => x.role === "user")?.time.created
@@ -2160,10 +2175,12 @@ function Task(props: ToolProps<typeof TaskTool>) {
   })
 
   const content = createMemo(() => {
-    if (!props.input.description) return ""
-    const description =
-      props.metadata.background === true ? `${props.input.description} (background)` : props.input.description
-    let content = [`${Locale.titlecase(props.input.subagent_type ?? "General")} Task — ${description}`]
+    if (!description()) return ""
+    const label =
+      props.metadata.background === true || props.tool === "spawn_agent"
+        ? `${description()} (background)`
+        : description()
+    let content = [`${Locale.titlecase(agentType() ?? "General")} Task — ${label}`]
 
     if (isRunning() && tools().length > 0) {
       // content[0] += ` · ${tools().length} toolcalls`
@@ -2187,14 +2204,14 @@ function Task(props: ToolProps<typeof TaskTool>) {
   return (
     <InlineTool
       icon="│"
-      iconColor={local.agent.color(props.input.subagent_type ?? "")}
+      iconColor={local.agent.color(agentType() ?? "")}
       spinner={isRunning()}
-      complete={props.input.description}
+      complete={description()}
       pending="Delegating..."
       part={props.part}
       onClick={() => {
-        if (props.metadata.sessionId) {
-          navigate({ type: "session", sessionID: props.metadata.sessionId })
+        if (sessionID()) {
+          navigate({ type: "session", sessionID: sessionID()! })
         }
       }}
     >

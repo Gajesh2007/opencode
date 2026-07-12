@@ -286,6 +286,7 @@ describe("SessionPrompt input schemas", () => {
     const decode = decodeUnknown(SessionPrompt.PromptInput)
     const expected = {
       sessionID,
+      reasoningMode: "pro" as const,
       parts: [
         { type: "text" as const, text: "hello" },
         { type: "file" as const, mime: "image/png", url: "data:image/png;base64,AAAA" },
@@ -296,6 +297,8 @@ describe("SessionPrompt input schemas", () => {
     expect(decoded.parts).toHaveLength(2)
     expect(decoded.parts[0]).toMatchObject({ type: "text", text: "hello" })
     expect(decoded.parts[1]).toMatchObject({ type: "file", mime: "image/png" })
+    expect(decoded.reasoningMode).toBe("pro")
+    expect(() => decode({ ...expected, reasoningMode: "turbo" })).toThrow()
   })
 
   test("PromptInput rejects unknown part type", () => {
@@ -313,8 +316,10 @@ describe("SessionPrompt input schemas", () => {
       sessionID,
       arguments: "--flag",
       command: "deploy",
+      reasoningMode: "pro" as const,
     }
     const input: unknown = expected
     expect(decode(input)).toEqual(expected)
+    expect(() => decode({ ...expected, reasoningMode: "turbo" })).toThrow()
   })
 })

@@ -14,6 +14,7 @@ import { MessageV2 } from "@/session/message-v2"
 import type { SessionPrompt } from "@/session/prompt"
 import { MessageID, PartID } from "@/session/schema"
 import { Session } from "@/session/session"
+import { SessionStatus } from "@/session/status"
 import type { Tool } from "@/tool/tool"
 import { Parameters as SpawnAgentParameters } from "@/tool/spawn_agent"
 import { ProviderID, ModelID } from "@/provider/schema"
@@ -34,6 +35,7 @@ const dependencies = Layer.mergeAll(
   Config.defaultLayer,
   Plugin.defaultLayer,
   Session.defaultLayer,
+  SessionStatus.defaultLayer,
   SubagentLimit.defaultLayer,
   RuntimeFlags.layer({}),
 )
@@ -198,7 +200,7 @@ describe("agent.subagent-run", () => {
     }),
   )
 
-  it.instance("forks the current context, runs in the background, and sends its final answer to its parent", () =>
+  it.instance("starts fresh by default, runs in the background, and resumes its parent with the final answer", () =>
     Effect.gen(function* () {
       const background = yield* BackgroundJob.Service
       const collaboration = yield* Collaboration.Service
@@ -208,6 +210,7 @@ describe("agent.subagent-run", () => {
       const seeded = yield* seed()
       const prompts: SessionPrompt.PromptInput[] = []
       const metadata: Record<string, unknown>[] = []
+      let parentLoops = 0
       const ops = {
         cancel: () => Effect.void,
         resolvePromptParts: (text: string) => Effect.succeed([{ type: "text" as const, text }]),
@@ -218,7 +221,10 @@ describe("agent.subagent-run", () => {
             return reply(input, "cache key is missing the provider")
           }),
         loop: (input: SessionPrompt.LoopInput) =>
-          Effect.succeed(reply({ sessionID: input.sessionID, parts: [] }, "unused")),
+          Effect.sync(() => {
+            parentLoops++
+            return reply({ sessionID: input.sessionID, parts: [] }, "unused")
+          }),
       }
       const result = yield* run.run({
         context: context({
@@ -236,11 +242,7 @@ describe("agent.subagent-run", () => {
 
       expect(result.path).toBe("/root/inspect_cache")
       expect((yield* sessions.get(result.sessionID)).parentID).toBe(seeded.parent.id)
-      expect((yield* sessions.messages({ sessionID: result.sessionID })).map((message) => message.info.role)).toEqual([
-        "user",
-        "assistant",
-        "user",
-      ])
+      expect(yield* sessions.messages({ sessionID: result.sessionID })).toEqual([])
       expect((yield* background.get(result.sessionID))?.metadata).toMatchObject({
         parentSessionId: seeded.parent.id,
         sessionId: result.sessionID,
@@ -262,6 +264,10 @@ describe("agent.subagent-run", () => {
       expect(prompt.upstream).toBe("origin")
 
       yield* Deferred.succeed(release, undefined)
+      yield* pollWithTimeout(
+        Effect.sync(() => (parentLoops === 1 ? parentLoops : undefined)),
+        "parent did not resume for the child final answer",
+      )
       yield* pollWithTimeout(
         collaboration.inbox({ sessionID: seeded.parent.id }).pipe(Effect.map((messages) => messages[0])),
         "child final answer was not queued",
@@ -415,6 +421,7 @@ describe("agent.subagent-run", () => {
         context: context({ sessionID: seeded.parent.id, messageID: seeded.assistant.id, ops }),
         taskName: "parent",
         message: "Delegate this work.",
+        forkTurns: "all",
       })
       const parentUser = (yield* sessions.messages({ sessionID: parent.sessionID })).findLast(
         (message) => message.info.role === "user",
@@ -486,6 +493,7 @@ describe("agent.subagent-run", () => {
         context: context({ sessionID: seeded.parent.id, messageID: seeded.assistant.id, ops }),
         taskName: "parent",
         message: "Delegate this work.",
+        forkTurns: "all",
       })
       const parentUser = (yield* sessions.messages({ sessionID: parent.sessionID })).findLast(
         (message) => message.info.role === "user",
@@ -539,6 +547,7 @@ describe("agent.subagent-run", () => {
         context: context({ sessionID: seeded.parent.id, messageID: seeded.assistant.id, ops }),
         taskName: "inspect",
         message: "Inspect the cache.",
+        forkTurns: "all",
       })
       yield* pollWithTimeout(
         collaboration
