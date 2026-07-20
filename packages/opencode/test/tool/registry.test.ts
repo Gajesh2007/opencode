@@ -162,6 +162,8 @@ describe("tool.registry", () => {
       expect(spawnAgent?.description).toContain("four total concurrency slots")
       expect(spawnAgent?.description).toContain("explicit denies win")
       expect(spawnAgent?.description).toContain('defaults to `"none"`')
+      expect(spawnAgent?.description).toContain("sufficient context in `message`")
+      expect(spawnAgent?.description).toContain("recursive subchat loops")
       expect(spawnAgent?.description).not.toContain('`"all"` (the default)')
     }),
   )

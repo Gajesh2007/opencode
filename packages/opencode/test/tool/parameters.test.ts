@@ -59,6 +59,8 @@ describe("tool parameters", () => {
       if (!forkTurns || typeof forkTurns !== "object") throw new Error("fork_turns schema is missing")
       expect(Reflect.get(forkTurns, "default")).toBe("none")
       expect(Reflect.get(forkTurns, "anyOf")).toContainEqual({ type: "string", enum: ["none", "all"] })
+      expect(Reflect.get(forkTurns, "description")).toContain("Prefer a complete message over 'all'")
+      expect(Reflect.get(forkTurns, "description")).toContain("recursive subchat loops")
     })
 
     test("inlines named child schemas for provider compatibility", () => {

@@ -14,7 +14,7 @@ export const Parameters = Schema.Struct({
   }),
   fork_turns: Schema.optional(Schema.Union([Schema.Literals(["none", "all"]), PositiveInt])).annotate({
     description:
-      "Context to give the child: 'none' (default) for a fresh session, 'all' for the complete conversation, or a positive integer for the latest user turns.",
+      "Context to give the child: 'none' (default) for a fresh session, 'all' for the complete conversation, or a positive integer for the latest user turns. Prefer a complete message over 'all', which copies all chat history and can encourage recursive subchat loops.",
     default: "none",
   }),
   agent_type: Schema.optional(Schema.String).annotate({
