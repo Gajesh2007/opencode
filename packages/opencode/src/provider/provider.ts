@@ -155,6 +155,15 @@ function selectAzureLanguageModel(sdk: any, modelID: string, useChat: boolean) {
 }
 
 function custom(dep: CustomDep): Record<string, CustomLoader> {
+  const openai = () =>
+    Effect.succeed({
+      autoload: false,
+      async getModel(sdk: any, modelID: string, _options?: Record<string, any>) {
+        return sdk.responses(modelID)
+      },
+      options: {},
+    })
+
   return {
     anthropic: () =>
       Effect.succeed({
@@ -188,14 +197,8 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         options: ok ? {} : { apiKey: "public" },
       }
     }),
-    openai: () =>
-      Effect.succeed({
-        autoload: false,
-        async getModel(sdk: any, modelID: string, _options?: Record<string, any>) {
-          return sdk.responses(modelID)
-        },
-        options: {},
-      }),
+    openai,
+    "openai-codex": openai,
     xai: () =>
       Effect.succeed({
         autoload: false,
@@ -1163,6 +1166,21 @@ export function fromModelsDevProvider(provider: ModelsDev.Provider): Info {
   }
 }
 
+export function withSyntheticProviders(providers: Record<string, ModelsDev.Provider>) {
+  const openai = providers[ProviderID.openai]
+  if (!openai) return providers
+  const codex = providers[ProviderID.openaiCodex] ?? {
+    ...openai,
+    id: ProviderID.openaiCodex,
+    env: [],
+  }
+  return {
+    ...providers,
+    [ProviderID.openai]: { ...openai, name: "OpenAI API" },
+    [ProviderID.openaiCodex]: { ...codex, name: "Codex subscription", env: [] },
+  }
+}
+
 function suggestionModelIDs(provider: Info | undefined, enableExperimentalModels: boolean) {
   if (!provider) return []
   return Object.keys(provider.models).filter((id) => {
@@ -1211,7 +1229,7 @@ export const layer = Layer.effect(
         using _ = log.time("state")
         const bridge = yield* EffectBridge.make()
         const cfg = yield* config.get()
-        const modelsDev = yield* modelsDevSvc.get()
+        const modelsDev = withSyntheticProviders(yield* modelsDevSvc.get())
         const catalog = mapValues(modelsDev, fromModelsDevProvider)
         const database = mapValues(catalog, toPublicInfo)
 
@@ -1253,9 +1271,24 @@ export const layer = Layer.effect(
         const plugins = yield* plugin.list()
 
         // now read config providers - includes any modifications from plugin config() hook
-        const configProviders = Object.entries(cfg.provider ?? {})
+        const envs = yield* env.all()
+        const auths = yield* auth.all().pipe(Effect.orDie)
+        const hasOpenAIAPI =
+          auths[ProviderID.openai]?.type === "api" ||
+          database[ProviderID.openai]?.env.some((item) => envs[item]) ||
+          typeof cfg.provider?.[ProviderID.openai]?.options?.apiKey === "string"
+        const migrateLegacyOpenAI = auths[ProviderID.openaiCodex]?.type === "oauth" && !hasOpenAIAPI
+        const configuredProviders = { ...(cfg.provider ?? {}) }
+        // Before the provider split, OpenAI config and allowlist entries also applied to Codex OAuth.
+        if (migrateLegacyOpenAI && configuredProviders[ProviderID.openai]) {
+          configuredProviders[ProviderID.openaiCodex] ??= configuredProviders[ProviderID.openai]
+          delete configuredProviders[ProviderID.openai]
+        }
+        const configProviders = Object.entries(configuredProviders)
         const disabled = new Set(cfg.disabled_providers ?? [])
         const enabled = cfg.enabled_providers ? new Set(cfg.enabled_providers) : null
+        if (migrateLegacyOpenAI && disabled.has(ProviderID.openai)) disabled.add(ProviderID.openaiCodex)
+        if (migrateLegacyOpenAI && enabled?.has(ProviderID.openai)) enabled.add(ProviderID.openaiCodex)
 
         function isProviderAllowed(providerID: ProviderID): boolean {
           if (enabled && !enabled.has(providerID)) return false
@@ -1399,7 +1432,6 @@ export const layer = Layer.effect(
         }
 
         // load env
-        const envs = yield* env.all()
         for (const [id, provider] of Object.entries(database)) {
           const providerID = ProviderID.make(id)
           if (disabled.has(providerID)) continue
@@ -1412,7 +1444,6 @@ export const layer = Layer.effect(
         }
 
         // load apikeys
-        const auths = yield* auth.all().pipe(Effect.orDie)
         for (const [id, provider] of Object.entries(auths)) {
           const providerID = ProviderID.make(id)
           if (disabled.has(providerID)) continue
@@ -1497,7 +1528,7 @@ export const layer = Layer.effect(
             continue
           }
 
-          const configProvider = cfg.provider?.[providerID]
+          const configProvider = configuredProviders[providerID]
 
           for (const [modelID, model] of Object.entries(provider.models)) {
             model.api.id = model.api.id ?? model.id ?? modelID
@@ -1506,6 +1537,7 @@ export const layer = Layer.effect(
               // built-in providers below, but custom providers may support them.
               (modelID === "gpt-5-chat-latest" &&
                 (providerID === ProviderID.openai ||
+                  providerID === ProviderID.openaiCodex ||
                   providerID === ProviderID.githubCopilot ||
                   providerID === ProviderID.openrouter)) ||
               (providerID === ProviderID.openrouter && modelID === "openai/gpt-5-chat")
@@ -1587,6 +1619,14 @@ export const layer = Layer.effect(
         }
       }),
     )
+
+    function resolveProvider(s: State, providerID: ProviderID) {
+      const direct = s.providers[providerID]
+      if (providerID !== ProviderID.openai) return direct
+      if (direct?.key || typeof direct?.options.apiKey === "string") return direct
+      // Old sessions persist openai/model IDs even after their OAuth credential migrates.
+      return s.providers[ProviderID.openaiCodex] ?? direct
+    }
 
     const list = Effect.fn("Provider.list")(() => InstanceState.use(state, (s) => s.providers))
 
@@ -1746,12 +1786,12 @@ export const layer = Layer.effect(
     }
 
     const getProvider = Effect.fn("Provider.getProvider")((providerID: ProviderID) =>
-      InstanceState.use(state, (s) => s.providers[providerID]),
+      InstanceState.use(state, (s) => resolveProvider(s, providerID)),
     )
 
     const getModel = Effect.fn("Provider.getModel")(function* (providerID: ProviderID, modelID: ModelID) {
       const s = yield* InstanceState.get(state)
-      const provider = s.providers[providerID]
+      const provider = resolveProvider(s, providerID)
       if (!provider) {
         const catalogProvider = s.catalog[providerID]
         const suggestions = catalogProvider
@@ -1801,11 +1841,11 @@ export const layer = Layer.effect(
 
     const closest = Effect.fn("Provider.closest")(function* (providerID: ProviderID, query: string[]) {
       const s = yield* InstanceState.get(state)
-      const provider = s.providers[providerID]
+      const provider = resolveProvider(s, providerID)
       if (!provider) return undefined
       for (const item of query) {
         for (const modelID of Object.keys(provider.models)) {
-          if (modelID.includes(item)) return { providerID, modelID }
+          if (modelID.includes(item)) return { providerID: provider.id, modelID }
         }
       }
       return undefined

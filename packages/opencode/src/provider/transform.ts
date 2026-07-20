@@ -1294,7 +1294,7 @@ export function options(input: {
     }
   }
 
-  if (input.model.providerID === "openai" || input.providerOptions?.setCacheKey) {
+  if (["openai", "openai-codex"].includes(input.model.providerID) || input.providerOptions?.setCacheKey) {
     result["promptCacheKey"] = input.sessionID
   }
 

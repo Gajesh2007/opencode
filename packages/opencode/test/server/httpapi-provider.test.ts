@@ -274,6 +274,29 @@ function setEnvScoped(key: string, value: string) {
 }
 
 describe("provider HttpApi", () => {
+  it.instance(
+    "lists OpenAI API and Codex subscription as separate auth providers",
+    Effect.gen(function* () {
+      const instance = yield* TestInstance
+      const headers = { "x-opencode-directory": instance.directory }
+      const providerResponse = yield* Effect.promise(() => Promise.resolve(app().request("/provider", { headers })))
+      const authResponse = yield* Effect.promise(() => Promise.resolve(app().request("/provider/auth", { headers })))
+      const providers = yield* Effect.promise(() => providerResponse.json())
+      const methods = yield* Effect.promise(() => authResponse.json())
+
+      expect(providerResponse.status).toBe(200)
+      expect(authResponse.status).toBe(200)
+      expect(providerByID(providers, "all", "openai")).toMatchObject({ name: "OpenAI API" })
+      expect(providerByID(providers, "all", "openai-codex")).toMatchObject({ name: "Codex subscription" })
+      expect(methods.openai).toBeUndefined()
+      expect(methods["openai-codex"]).toEqual([
+        expect.objectContaining({ type: "oauth" }),
+        expect.objectContaining({ type: "oauth" }),
+      ])
+    }),
+    projectOptions,
+  )
+
   it.instance.skip(
     "returns public v2 provider not found errors",
     Effect.gen(function* () {

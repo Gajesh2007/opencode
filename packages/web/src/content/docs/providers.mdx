@@ -1600,22 +1600,21 @@ To use Ollama Cloud with OpenCode:
 
 ### OpenAI
 
-We recommend signing up for [ChatGPT Plus or Pro](https://chatgpt.com/pricing).
+You can connect with a [ChatGPT Plus or Pro](https://chatgpt.com/pricing) subscription or an OpenAI API key. These are separate providers so you can keep both connected and switch between them.
 
-1. Once you've signed up, run the `/connect` command and select OpenAI.
+1. For a ChatGPT subscription, run the `/connect` command and select **Codex subscription**.
 
    ```txt
    /connect
    ```
 
-2. Here you can select the **ChatGPT Plus/Pro** option and it'll open your browser
-   and ask you to authenticate.
+2. Select the browser login option and authenticate with ChatGPT.
 
    ```txt
-   ┌ Select auth method
+   ┌ Login method
    │
-   │ ChatGPT Plus/Pro
-   │ Manually enter API Key
+   │ ChatGPT Pro/Plus (browser)
+   │ ChatGPT Pro/Plus (headless)
    └
    ```
 
@@ -1627,7 +1626,7 @@ We recommend signing up for [ChatGPT Plus or Pro](https://chatgpt.com/pricing).
 
 ##### Using API keys
 
-If you already have an API key, you can select **Manually enter API Key** and paste it in your terminal.
+If you already have an API key, run `/connect`, select **OpenAI API**, and paste the key in your terminal. Connecting it does not replace your Codex subscription credentials.
 
 ---
 

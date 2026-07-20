@@ -2,6 +2,7 @@ import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import * as Log from "@opencode-ai/core/util/log"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { OAUTH_DUMMY_KEY } from "../auth"
+import { ProviderID } from "../provider/schema"
 import os from "os"
 import { setTimeout as sleep } from "node:timers/promises"
 import { createServer } from "http"
@@ -374,10 +375,8 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
 
   return {
     provider: {
-      id: "openai",
-      async models(provider, ctx) {
-        if (ctx.auth?.type !== "oauth") return provider.models
-
+      id: ProviderID.openaiCodex,
+      async models(provider) {
         return Object.fromEntries(
           Object.entries(provider.models)
             .filter(([, model]) => {
@@ -407,7 +406,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
       },
     },
     auth: {
-      provider: "openai",
+      provider: ProviderID.openaiCodex,
       async loader(getAuth) {
         const auth = await getAuth()
         if (auth.type !== "oauth") return {}
@@ -449,7 +448,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
                   .then(async (tokens) => {
                     const accountId = extractAccountId(tokens) || authWithAccount.accountId
                     await input.client.auth.set({
-                      path: { id: "openai" },
+                      path: { id: ProviderID.openaiCodex },
                       body: {
                         type: "oauth",
                         refresh: tokens.refresh_token,
@@ -628,20 +627,16 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
             }
           },
         },
-        {
-          label: "Manually enter API Key",
-          type: "api",
-        },
       ],
     },
     "chat.headers": async (input, output) => {
-      if (input.model.providerID !== "openai") return
+      if (input.model.providerID !== ProviderID.openaiCodex) return
       output.headers.originator = "opencode"
       output.headers["User-Agent"] = `opencode/${InstallationVersion} (${os.platform()} ${os.release()}; ${os.arch()})`
       output.headers.session_id = input.sessionID
     },
     "chat.params": async (input, output) => {
-      if (input.model.providerID !== "openai") return
+      if (input.model.providerID !== ProviderID.openaiCodex) return
       // Match codex cli
       output.maxOutputTokens = undefined
     },

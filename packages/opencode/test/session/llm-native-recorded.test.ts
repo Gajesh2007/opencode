@@ -41,6 +41,7 @@ type RecordedScenario = {
   readonly id: string
   readonly name: string
   readonly providerID: ProviderID
+  readonly fixtureProviderID?: ProviderID
   readonly modelID: string
   readonly cassette: string
   readonly protocol: string
@@ -134,8 +135,9 @@ const RECORDED_SCENARIOS = [
   },
   {
     id: "openai-oauth",
-    name: "OpenAI OAuth",
-    providerID: ProviderID.openai,
+    name: "Codex subscription",
+    providerID: ProviderID.openaiCodex,
+    fixtureProviderID: ProviderID.openai,
     modelID: "gpt-5.5",
     cassette: "session/native-openai-oauth-tool-loop",
     protocol: "openai-responses",
@@ -146,9 +148,9 @@ const RECORDED_SCENARIOS = [
     stableID: "openai-oauth",
     config: (model) =>
       providerConfig({
-        providerID: ProviderID.openai,
-        name: "OpenAI",
-        env: ["OPENAI_API_KEY"],
+        providerID: ProviderID.openaiCodex,
+        name: "Codex subscription",
+        env: [],
         npm: "@ai-sdk/openai",
         api: "https://api.openai.com/v1",
         model,
@@ -416,7 +418,9 @@ const toolRoundtrip = (
 const driveToolLoop = (scenario: RecordedScenario) =>
   Effect.gen(function* () {
     const test = yield* TestInstance
-    const model = yield* Effect.promise(() => loadFixture(scenario.providerID, scenario.modelID))
+    const model = yield* Effect.promise(() =>
+      loadFixture(scenario.fixtureProviderID ?? scenario.providerID, scenario.modelID),
+    )
     yield* writeConfig(test.directory, scenario, model)
 
     const stableID = scenario.stableID ?? scenario.providerID

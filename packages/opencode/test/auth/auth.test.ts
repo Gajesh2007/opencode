@@ -10,6 +10,25 @@ const node = CrossSpawnSpawner.defaultLayer
 const it = testEffect(Layer.mergeAll(Auth.defaultLayer, node))
 
 describe("Auth", () => {
+  it.live("moves persisted OpenAI OAuth credentials to Codex subscription", () => {
+    const previous = process.env.OPENCODE_AUTH_CONTENT
+    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({
+      openai: { type: "oauth", refresh: "refresh", access: "access", expires: 1 },
+    })
+    return Effect.gen(function* () {
+      const data = yield* (yield* Auth.Service).all()
+      expect(data.openai).toBeUndefined()
+      expect(data["openai-codex"]).toMatchObject({ type: "oauth", refresh: "refresh" })
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          if (previous === undefined) delete process.env.OPENCODE_AUTH_CONTENT
+          else process.env.OPENCODE_AUTH_CONTENT = previous
+        }),
+      ),
+    )
+  })
+
   it.live("set normalizes trailing slashes in keys", () =>
     provideTmpdirInstance(() =>
       Effect.gen(function* () {

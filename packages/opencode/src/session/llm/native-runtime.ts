@@ -1,5 +1,6 @@
 import type { Auth } from "@/auth"
 import type { Provider } from "@/provider/provider"
+import { ProviderID } from "@/provider/schema"
 import { ProviderTransform } from "@/provider/transform"
 import { errorMessage } from "@/util/error"
 import { isRecord } from "@/util/record"
@@ -44,12 +45,17 @@ function statusWithFetch(
   fetch: typeof globalThis.fetch | undefined,
 ): RuntimeStatus {
   const providerID = input.model.providerID
-  if (providerID !== "openai" && providerID !== "anthropic" && !providerID.startsWith("opencode"))
+  if (
+    providerID !== ProviderID.openai &&
+    providerID !== ProviderID.openaiCodex &&
+    providerID !== ProviderID.anthropic &&
+    !providerID.startsWith("opencode")
+  )
     return { type: "unsupported", reason: "provider is not openai, opencode, or anthropic" }
   const npm = input.model.api.npm
   if (npm !== "@ai-sdk/openai" && npm !== "@ai-sdk/openai-compatible" && npm !== "@ai-sdk/anthropic")
     return { type: "unsupported", reason: "provider package is not OpenAI, OpenAI-compatible, or Anthropic" }
-  if (input.auth?.type === "oauth" && !(input.provider.id === "openai" && fetch)) {
+  if (input.auth?.type === "oauth" && !(input.provider.id === ProviderID.openaiCodex && fetch)) {
     return { type: "unsupported", reason: "OAuth auth requires a provider fetch override" }
   }
 
@@ -116,6 +122,8 @@ export function stream(input: StreamInput): StreamResult {
 // explicitly assert OpenAI stays on AI SDK / native-HTTP. Keep this opt-in
 // until those tests are updated to model the new default.
 function resolveTransport(input: Pick<StreamInput, "model" | "provider">): "websocket" | undefined {
+  // Codex authentication and endpoint rewriting live in the HTTP fetch override.
+  if (input.provider.id === ProviderID.openaiCodex) return undefined
   const fromModel = input.model.options?.transport
   if (fromModel === "websocket") return "websocket"
   const fromProvider = input.provider.options?.transport
@@ -124,7 +132,7 @@ function resolveTransport(input: Pick<StreamInput, "model" | "provider">): "webs
 }
 
 function providerFetch(input: Pick<StreamInput, "provider" | "auth">): typeof globalThis.fetch | undefined {
-  if (input.provider.id !== "openai" || input.auth?.type !== "oauth") return undefined
+  if (input.provider.id !== ProviderID.openaiCodex || input.auth?.type !== "oauth") return undefined
   const value: unknown = input.provider.options.fetch
   if (typeof value !== "function") return undefined
   return value as typeof globalThis.fetch

@@ -419,15 +419,19 @@ describe("session.llm-native.request", () => {
     ).toEqual({ type: "unsupported", reason: "provider is not openai, opencode, or anthropic" })
     expect(
       LLMNativeRuntime.status({
-        model: baseModel,
-        provider: providerInfo,
+        model: { ...baseModel, providerID: ProviderID.openaiCodex },
+        provider: { ...providerInfo, id: ProviderID.openaiCodex },
         auth: { type: "oauth", refresh: "refresh", access: "access", expires: 1 },
       }),
     ).toEqual({ type: "unsupported", reason: "OAuth auth requires a provider fetch override" })
     expect(
       LLMNativeRuntime.status({
-        model: baseModel,
-        provider: { ...providerInfo, options: { apiKey: OAUTH_DUMMY_KEY, fetch: async () => new Response() } },
+        model: { ...baseModel, providerID: ProviderID.openaiCodex },
+        provider: {
+          ...providerInfo,
+          id: ProviderID.openaiCodex,
+          options: { apiKey: OAUTH_DUMMY_KEY, fetch: async () => new Response() },
+        },
         auth: { type: "oauth", refresh: "refresh", access: "access", expires: 1 },
       }),
     ).toMatchObject({ type: "supported", apiKey: OAUTH_DUMMY_KEY })
@@ -664,8 +668,12 @@ describe("session.llm-native.request", () => {
 
       const llmClient = yield* LLMClient.Service
       const native = LLMNativeRuntime.stream({
-        model: baseModel,
-        provider: { ...providerInfo, options: { apiKey: OAUTH_DUMMY_KEY, fetch: customFetch } },
+        model: { ...baseModel, providerID: ProviderID.openaiCodex },
+        provider: {
+          ...providerInfo,
+          id: ProviderID.openaiCodex,
+          options: { apiKey: OAUTH_DUMMY_KEY, fetch: customFetch, transport: "websocket" },
+        },
         auth: { type: "oauth", refresh: "refresh", access: "access", expires: Date.now() + 60_000 },
         llmClient,
         messages: [{ role: "user", content: "hello" }],

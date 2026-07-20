@@ -10,6 +10,14 @@ const file = path.join(Global.Path.data, "auth.json")
 
 const fail = (message: string) => (cause: unknown) => new AuthError({ message, cause })
 
+function migrateOpenAIOAuth(data: Record<string, Info>) {
+  if (data.openai?.type !== "oauth") return data
+  const migrated = { ...data }
+  migrated["openai-codex"] ??= migrated.openai
+  delete migrated.openai
+  return migrated
+}
+
 export class Oauth extends Schema.Class<Oauth>("OAuth")({
   type: Schema.Literal("oauth"),
   refresh: Schema.String,
@@ -57,12 +65,12 @@ export const layer = Layer.effect(
     const all = Effect.fn("Auth.all")(function* () {
       if (process.env.OPENCODE_AUTH_CONTENT) {
         try {
-          return JSON.parse(process.env.OPENCODE_AUTH_CONTENT)
+          return migrateOpenAIOAuth(JSON.parse(process.env.OPENCODE_AUTH_CONTENT))
         } catch (err) {}
       }
 
       const data = (yield* fsys.readJson(file).pipe(Effect.orElseSucceed(() => ({})))) as Record<string, unknown>
-      return Record.filterMap(data, (value) => Result.fromOption(decode(value), () => undefined))
+      return migrateOpenAIOAuth(Record.filterMap(data, (value) => Result.fromOption(decode(value), () => undefined)))
     })
 
     const get = Effect.fn("Auth.get")(function* (providerID: string) {

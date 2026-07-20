@@ -14,6 +14,7 @@ import { Plugin } from "../../plugin"
 import type { Hooks } from "@opencode-ai/plugin"
 import { Process } from "@/util/process"
 import { errorMessage } from "@/util/error"
+import { Provider } from "@/provider/provider"
 import { text } from "node:stream/consumers"
 import { Effect, Option } from "effect"
 
@@ -260,7 +261,7 @@ export const ProvidersListCommand = effectCmd({
     const displayPath = authPath.startsWith(homedir) ? authPath.replace(homedir, "~") : authPath
     yield* Prompt.intro(`Credentials ${UI.Style.TEXT_DIM}${displayPath}`)
     const results = Object.entries(yield* Effect.orDie(authSvc.all()))
-    const database = yield* modelsDev.get()
+    const database = Provider.withSyntheticProviders(yield* modelsDev.get())
 
     for (const [providerID, result] of results) {
       const name = database[providerID]?.name || providerID
@@ -358,7 +359,7 @@ export const ProvidersLoginCommand = effectCmd({
     const disabled = new Set(config.disabled_providers ?? [])
     const enabled = config.enabled_providers ? new Set(config.enabled_providers) : undefined
 
-    const allProviders = yield* modelsDev.get()
+    const allProviders = Provider.withSyntheticProviders(yield* modelsDev.get())
     const providers: Record<string, (typeof allProviders)[string]> = {}
     for (const [key, value] of Object.entries(allProviders)) {
       if ((enabled ? enabled.has(key) : true) && !disabled.has(key)) providers[key] = value
@@ -368,11 +369,12 @@ export const ProvidersLoginCommand = effectCmd({
     const priority: Record<string, number> = {
       opencode: 0,
       openai: 1,
-      "github-copilot": 2,
-      google: 3,
-      anthropic: 4,
-      openrouter: 5,
-      vercel: 6,
+      "openai-codex": 2,
+      "github-copilot": 3,
+      google: 4,
+      anthropic: 5,
+      openrouter: 6,
+      vercel: 7,
     }
     const pluginProviders = resolvePluginProviders({
       hooks,
@@ -394,7 +396,8 @@ export const ProvidersLoginCommand = effectCmd({
           value: x.id,
           hint: {
             opencode: "recommended",
-            openai: "ChatGPT Plus/Pro or API key",
+            openai: "API key",
+            "openai-codex": "ChatGPT Plus/Pro",
           }[x.id],
         })),
       ),
@@ -501,7 +504,7 @@ export const ProvidersLogoutCommand = effectCmd({
       yield* Prompt.log.error("No credentials found")
       return
     }
-    const database = yield* modelsDev.get()
+    const database = Provider.withSyntheticProviders(yield* modelsDev.get())
     const selected = yield* Prompt.select({
       message: "Select provider",
       options: credentials.map(([key, value]) => ({

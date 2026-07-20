@@ -645,7 +645,7 @@ export const layer = Layer.effect(
 
         // TODO: clean this up so provider specific logic doesnt bleed over
         const authInfo = yield* auth.get(model.providerID).pipe(Effect.orDie)
-        const isOpenaiOauth = model.providerID === "openai" && authInfo?.type === "oauth"
+        const isOpenaiOauth = model.providerID === ProviderID.openaiCodex && authInfo?.type === "oauth"
 
         const params = {
           experimental_telemetry: {

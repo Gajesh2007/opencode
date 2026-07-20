@@ -112,6 +112,60 @@ it.instance("provider loaded from env variable", () =>
   }),
 )
 
+it.instance("OpenAI API and Codex subscription can be connected simultaneously", () =>
+  Effect.gen(function* () {
+    yield* setProcessEnv("OPENAI_API_KEY", "test-api-key")
+    yield* setProcessEnv(
+      "OPENCODE_AUTH_CONTENT",
+      JSON.stringify({
+        openai: { type: "oauth", refresh: "refresh", access: "access", expires: Date.now() + 60_000 },
+      }),
+    )
+    const providers = yield* list
+    expect(providers[ProviderID.openai]).toMatchObject({ name: "OpenAI API", source: "env" })
+    expect(providers[ProviderID.openaiCodex]).toMatchObject({ name: "Codex subscription" })
+    expect(providers[ProviderID.openai].models["gpt-5.2"].cost.input).toBeGreaterThan(0)
+    expect(providers[ProviderID.openaiCodex].models["gpt-5.2"].cost.input).toBe(0)
+  }),
+)
+
+it.instance("legacy OpenAI OAuth model references resolve through Codex subscription", () =>
+  Effect.gen(function* () {
+    yield* remove("OPENAI_API_KEY")
+    yield* setProcessEnv(
+      "OPENCODE_AUTH_CONTENT",
+      JSON.stringify({
+        openai: { type: "oauth", refresh: "refresh", access: "access", expires: Date.now() + 60_000 },
+      }),
+    )
+    const model = yield* Provider.use.getModel(ProviderID.openai, ModelID.make("gpt-5.2"))
+    expect(model.providerID).toBe(ProviderID.openaiCodex)
+    expect((yield* Provider.use.getProvider(ProviderID.openai)).id).toBe(ProviderID.openaiCodex)
+  }),
+)
+
+it.instance(
+  "legacy OpenAI OAuth provider config migrates to Codex subscription",
+  Effect.gen(function* () {
+    yield* remove("OPENAI_API_KEY")
+    yield* setProcessEnv(
+      "OPENCODE_AUTH_CONTENT",
+      JSON.stringify({
+        openai: { type: "oauth", refresh: "refresh", access: "access", expires: Date.now() + 60_000 },
+      }),
+    )
+    const providers = yield* list
+    expect(providers[ProviderID.openai]).toBeUndefined()
+    expect(providers[ProviderID.openaiCodex].options.timeout).toBe(45_000)
+  }),
+  {
+    config: {
+      enabled_providers: ["openai"],
+      provider: { openai: { options: { timeout: 45_000 } } },
+    },
+  },
+)
+
 it.instance(
   "provider loaded from config with apiKey option",
   Effect.gen(function* () {

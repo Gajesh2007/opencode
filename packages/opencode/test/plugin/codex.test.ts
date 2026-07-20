@@ -14,6 +14,14 @@ function createTestJwt(payload: object): string {
 }
 
 describe("plugin.codex", () => {
+  test("registers OAuth only for the Codex subscription provider", async () => {
+    const hooks = await CodexAuthPlugin({} as never)
+    expect(hooks.provider?.id).toBe("openai-codex")
+    expect(hooks.auth?.provider).toBe("openai-codex")
+    expect(hooks.auth?.methods).toHaveLength(2)
+    expect(hooks.auth?.methods.every((method) => method.type === "oauth")).toBe(true)
+  })
+
   describe("parseJwtClaims", () => {
     test("parses valid JWT with claims", () => {
       const payload = { email: "test@example.com", chatgpt_account_id: "acc-123" }
@@ -130,6 +138,7 @@ describe("plugin.codex", () => {
       expires: 0,
     }
     const authUpdates: Array<{
+      path: { id: string }
       body: { refresh: string; access: string; expires: number; accountId?: string }
     }> = []
     let resolveRefresh: (() => void) | undefined
@@ -171,7 +180,10 @@ describe("plugin.codex", () => {
       {
         client: {
           auth: {
-            async set(input: { body: { refresh: string; access: string; expires: number; accountId?: string } }) {
+            async set(input: {
+              path: { id: string }
+              body: { refresh: string; access: string; expires: number; accountId?: string }
+            }) {
               authUpdates.push(input)
               auth = {
                 type: "oauth",
@@ -210,6 +222,7 @@ describe("plugin.codex", () => {
 
     expect(refreshRequests).toBe(1)
     expect(authUpdates).toHaveLength(1)
+    expect(authUpdates[0]?.path.id).toBe("openai-codex")
     expect(authUpdates[0]?.body.refresh).toBe("refresh-new")
     expect(authUpdates[0]?.body.access).toBe("access-new")
     expect(authUpdates[0]?.body.accountId).toBe("acc-123")
