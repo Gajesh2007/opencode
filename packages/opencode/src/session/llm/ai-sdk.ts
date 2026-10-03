@@ -6,6 +6,11 @@ import { errorMessage } from "@/util/error"
 type Result = Awaited<ReturnType<typeof streamText>>
 type AISDKEvent = Result["fullStream"] extends AsyncIterable<infer T> ? T : never
 
+export function fullStream(result: Pick<Result, "fullStream"> & { takeFullStream?: () => Result["fullStream"] }) {
+  // Existing processes can still have the unpatched package loaded until restart.
+  return result.takeFullStream ? result.takeFullStream() : result.fullStream
+}
+
 export function adapterState() {
   return {
     step: 0,

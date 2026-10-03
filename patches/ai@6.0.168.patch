@@ -1,0 +1,206 @@
+diff --git a/dist/index.d.mts b/dist/index.d.mts
+index cc97c84ca445ed006853383c2b774bdbe971afad..e5e8734f73f75158618cdca7aacdec017500e09f 100644
+--- a/dist/index.d.mts
++++ b/dist/index.d.mts
+@@ -2537,6 +2537,16 @@ interface StreamTextResult<TOOLS extends ToolSet, OUTPUT extends Output> {
+      * Only errors that stop the stream, such as network errors, are thrown.
+      */
+     readonly fullStream: AsyncIterableStream<TextStreamPart<TOOLS>>;
++    /**
++     * Transfer the full stream to a single consumer without retaining a tee branch.
++     * Must be called before accessing any stream or auto-consuming aggregate getter.
++     * Subsequent stream access (including another take) throws. The owner must drain
++     * or cancel the returned stream. Provider IO and abort behavior are unchanged.
++     * Aggregate results and callbacks are unchanged, but aggregate getters and
++     * consumeStream no longer drive consumption after transfer. Await aggregates
++     * only while the owner is draining, or after it has completed.
++     */
++    takeFullStream(): AsyncIterableStream<TextStreamPart<TOOLS>>;
+     /**
+      * A stream of partial outputs. It uses the `output` specification.
+      *
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+index cc97c84ca445ed006853383c2b774bdbe971afad..e5e8734f73f75158618cdca7aacdec017500e09f 100644
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -2537,6 +2537,16 @@ interface StreamTextResult<TOOLS extends ToolSet, OUTPUT extends Output> {
+      * Only errors that stop the stream, such as network errors, are thrown.
+      */
+     readonly fullStream: AsyncIterableStream<TextStreamPart<TOOLS>>;
++    /**
++     * Transfer the full stream to a single consumer without retaining a tee branch.
++     * Must be called before accessing any stream or auto-consuming aggregate getter.
++     * Subsequent stream access (including another take) throws. The owner must drain
++     * or cancel the returned stream. Provider IO and abort behavior are unchanged.
++     * Aggregate results and callbacks are unchanged, but aggregate getters and
++     * consumeStream no longer drive consumption after transfer. Await aggregates
++     * only while the owner is draining, or after it has completed.
++     */
++    takeFullStream(): AsyncIterableStream<TextStreamPart<TOOLS>>;
+     /**
+      * A stream of partial outputs. It uses the `output` specification.
+      *
+diff --git a/dist/index.js b/dist/index.js
+index 205ee983f9fbab6082de904bf221a6e54438d74f..8cc256cbdd607e1e4dabaab0ae34a27a6ea7b9f7 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -7746,6 +7746,10 @@ var DefaultStreamTextResult = class {
+    * However, the LLM results are expected to be small enough to not cause issues.
+    */
+   teeStream() {
++    if (this.streamOwnership === "exclusive") {
++      throw new Error("The full stream has been exclusively taken.");
++    }
++    this.streamOwnership = "shared";
+     const [stream1, stream2] = this.baseStream.tee();
+     this.baseStream = stream2;
+     return stream1;
+@@ -7774,7 +7778,25 @@ var DefaultStreamTextResult = class {
+       )
+     );
+   }
++  takeFullStream() {
++    if (this.streamOwnership != null) {
++      throw new Error("The stream has already been accessed.");
++    }
++    this.streamOwnership = "exclusive";
++    const stream = this.baseStream;
++    this.baseStream = new ReadableStream({ start: (controller) => controller.close() });
++    return createAsyncIterableStream(
++      stream.pipeThrough(
++        new TransformStream({
++          transform({ part }, controller) {
++            controller.enqueue(part);
++          }
++        })
++      )
++    );
++  }
+   async consumeStream(options) {
++    if (this.streamOwnership === "exclusive") return;
+     var _a21;
+     try {
+       await consumeStream({
+diff --git a/dist/index.mjs b/dist/index.mjs
+index 4fb9b6bf01965a7d2d0d19e975d76fa517b790fb..dfc5ad1b8675d6c2b2061b3174e8953339b1d6cb 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -7668,6 +7668,10 @@ var DefaultStreamTextResult = class {
+    * However, the LLM results are expected to be small enough to not cause issues.
+    */
+   teeStream() {
++    if (this.streamOwnership === "exclusive") {
++      throw new Error("The full stream has been exclusively taken.");
++    }
++    this.streamOwnership = "shared";
+     const [stream1, stream2] = this.baseStream.tee();
+     this.baseStream = stream2;
+     return stream1;
+@@ -7696,7 +7700,25 @@ var DefaultStreamTextResult = class {
+       )
+     );
+   }
++  takeFullStream() {
++    if (this.streamOwnership != null) {
++      throw new Error("The stream has already been accessed.");
++    }
++    this.streamOwnership = "exclusive";
++    const stream = this.baseStream;
++    this.baseStream = new ReadableStream({ start: (controller) => controller.close() });
++    return createAsyncIterableStream(
++      stream.pipeThrough(
++        new TransformStream({
++          transform({ part }, controller) {
++            controller.enqueue(part);
++          }
++        })
++      )
++    );
++  }
+   async consumeStream(options) {
++    if (this.streamOwnership === "exclusive") return;
+     var _a21;
+     try {
+       await consumeStream({
+diff --git a/src/generate-text/stream-text-result.ts b/src/generate-text/stream-text-result.ts
+index bc2840be90f1a0911cbc5cbf2e3fa73c660d4e49..8c1b949cfefe36f3a8d2dfd84509e394ef838387 100644
+--- a/src/generate-text/stream-text-result.ts
++++ b/src/generate-text/stream-text-result.ts
+@@ -287,6 +287,17 @@ export interface StreamTextResult<
+    */
+   readonly fullStream: AsyncIterableStream<TextStreamPart<TOOLS>>;
+-
++
++  /**
++   * Transfer the full stream to a single consumer without retaining a tee branch.
++   * Must be called before accessing any stream or auto-consuming aggregate getter.
++   * Subsequent stream access (including another take) throws. The owner must drain
++   * or cancel the returned stream. Provider IO and abort behavior are unchanged.
++   * Aggregate results and callbacks are unchanged, but aggregate getters and
++   * consumeStream no longer drive consumption after transfer. Await aggregates
++   * only while the owner is draining, or after it has completed.
++   */
++  takeFullStream(): AsyncIterableStream<TextStreamPart<TOOLS>>;
++
+   /**
+    * A stream of partial outputs. It uses the `output` specification.
+    *
+diff --git a/src/generate-text/stream-text.ts b/src/generate-text/stream-text.ts
+index 3a74929d8e71f6a9957da73cfb8b1b054b5330d7..41eb25a217677ee9407c17909b2eb2c5a61d9c3a 100644
+--- a/src/generate-text/stream-text.ts
++++ b/src/generate-text/stream-text.ts
+@@ -711,6 +711,8 @@ class DefaultStreamTextResult<
+     EnrichedStreamPart<TOOLS, InferPartialOutput<OUTPUT>>
+   >;
+-
++
++  private streamOwnership: 'shared' | 'exclusive' | undefined;
++
+   private outputSpecification: OUTPUT | undefined;
+-
++
+   private includeRawChunks: boolean;
+@@ -2270,6 +2272,10 @@ class DefaultStreamTextResult<
+    * However, the LLM results are expected to be small enough to not cause issues.
+    */
+   private teeStream() {
++    if (this.streamOwnership === 'exclusive') {
++      throw new Error('The full stream has been exclusively taken.');
++    }
++    this.streamOwnership = 'shared';
+     const [stream1, stream2] = this.baseStream.tee();
+     this.baseStream = stream2;
+     return stream1;
+@@ -2307,7 +2313,31 @@ class DefaultStreamTextResult<
+     );
+   }
+-
++
++  takeFullStream(): AsyncIterableStream<TextStreamPart<TOOLS>> {
++    if (this.streamOwnership != null) {
++      throw new Error('The stream has already been accessed.');
++    }
++    this.streamOwnership = 'exclusive';
++    const stream = this.baseStream;
++    // Transfer ownership instead of retaining an unread tee branch.
++    this.baseStream = new ReadableStream({ start: controller => controller.close() });
++    return createAsyncIterableStream(
++      stream.pipeThrough(
++        new TransformStream<
++          EnrichedStreamPart<TOOLS, InferPartialOutput<OUTPUT>>,
++          TextStreamPart<TOOLS>
++        >({
++          transform({ part }, controller) {
++            controller.enqueue(part);
++          },
++        }),
++      ),
++    );
++  }
++
+   async consumeStream(options?: ConsumeStreamOptions): Promise<void> {
++    // Aggregate promises still resolve, but only the exclusive owner drives IO.
++    if (this.streamOwnership === 'exclusive') return;
+     try {
+       await consumeStream({
+         stream: this.fullStream,

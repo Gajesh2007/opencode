@@ -28,7 +28,7 @@ import type {
   ToolFileContent,
   ToolTextContent,
 } from "@opencode-ai/sdk/v2"
-import { createEffect, createMemo, createSignal, For, Match, Show, Switch } from "solid-js"
+import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js"
 import { collapseToolOutput } from "../../util/collapse-tool-output"
 import { parseToolInput } from "../../util/tool-input"
 import { ToolCode } from "../../component/tool-code"
@@ -47,6 +47,7 @@ function View(props: { api: TuiPluginApi; sessionID: string }) {
   const sync = useSyncV2()
   const dimensions = useTerminalDimensions()
   const { theme, syntax, subtleSyntax } = useTheme()
+  const [loadError, setLoadError] = createSignal<string>()
   const messages = createMemo(() => sync.data.messages[props.sessionID] ?? [])
   const renderedMessages = createMemo(() => messages().toReversed())
   const lastAssistant = createMemo(() => renderedMessages().findLast((message) => message.type === "assistant"))
@@ -56,7 +57,17 @@ function View(props: { api: TuiPluginApi; sessionID: string }) {
       .findLast((message) => message.type === "user")?.time.created
 
   createEffect(() => {
-    void sync.session.message.sync(props.sessionID)
+    const sessionID = props.sessionID
+    let disposed = false
+    setLoadError(undefined)
+    void sync.session.message.sync(sessionID).catch((error: unknown) => {
+      if (disposed) return
+      setLoadError(error instanceof Error ? error.message : String(error))
+    })
+    onCleanup(() => {
+      disposed = true
+      sync.session.message.release(sessionID)
+    })
   })
 
   useBindings(() => ({
@@ -85,7 +96,7 @@ function View(props: { api: TuiPluginApi; sessionID: string }) {
           >
             <box height={1} />
             <Show when={messages().length === 0}>
-              <MissingData label="Messages" detail="No v2 messages loaded from useSyncV2 yet." />
+              <MissingData label="Messages" detail={loadError() ?? "No v2 messages loaded from useSyncV2 yet."} />
             </Show>
             <For each={renderedMessages()}>
               {(message, index) => (

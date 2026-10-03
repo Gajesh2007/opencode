@@ -12,7 +12,7 @@ import { SessionID } from "@/session/schema"
 import { Session } from "@/session/session"
 import { SessionStatus } from "@/session/status"
 import type { Tool } from "@/tool/tool"
-import { Cause, Context, Effect, Exit, Layer, Option, Schedule, Scope } from "effect"
+import { Cause, Context, Effect, Exit, Layer, Option, References, Schedule, Scope } from "effect"
 
 const TASK_NAME = /^[a-z0-9_]+$/
 
@@ -61,6 +61,17 @@ export const layer = Layer.effect(
     const status = yield* SessionStatus.Service
     const scope = yield* Scope.Scope
 
+    // Instance-local service initialization also inherits the caller's diagnostic frames.
+    const detached = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+      Effect.gen(function* () {
+        return yield* effect.pipe(
+          Effect.provideService(
+            References.CurrentStackFrame,
+            BackgroundJob.snapshotStack(yield* References.CurrentStackFrame),
+          ),
+        )
+      })
+
     const resumeParent: (input: { ops: TaskPromptOps; parentSessionID: SessionID }) => Effect.Effect<void> = Effect.fn(
       "SubagentRun.resumeParent",
     )(function* (input) {
@@ -83,7 +94,6 @@ export const layer = Layer.effect(
       resumeParent(input).pipe(Effect.ignore, Effect.forkIn(scope, { startImmediately: true }))
 
     const start = Effect.fn("SubagentRun.start")(function* (input: {
-      context: Tool.Context
       ops: TaskPromptOps
       childSessionID: SessionID
       parentSessionID: SessionID
@@ -104,7 +114,6 @@ export const layer = Layer.effect(
         taskPath: input.path,
         background: true,
       }
-      yield* input.context.metadata({ title: input.task, metadata })
       yield* background.start({
         id: input.childSessionID,
         type: input.type,
@@ -266,8 +275,16 @@ export const layer = Layer.effect(
         taskName,
         lastTask: message,
       })
+      yield* input.context.metadata({
+        title: taskName,
+        metadata: {
+          parentSessionId: input.context.sessionID,
+          sessionId: child.id,
+          taskPath: registered.path,
+          background: true,
+        },
+      })
       yield* start({
-        context: input.context,
         ops,
         childSessionID: child.id,
         parentSessionID: input.context.sessionID,
@@ -282,7 +299,7 @@ export const layer = Layer.effect(
         type: "spawn_agent",
       })
       return { path: registered.path, sessionID: child.id }
-    })
+    }, detached)
 
     const followup = Effect.fn("SubagentRun.followup")(function* (input: FollowupInput) {
       const message = input.message.trim()
@@ -328,33 +345,45 @@ export const layer = Layer.effect(
       const claim = yield* collaboration.claimFollowup({ sessionID: target.sessionID, lastTask: message })
       if (!claim) return yield* Effect.fail(new Error(`Agent ${target.path} is already running.`))
 
-      yield* start({
-        context: input.context,
-        ops,
-        childSessionID: target.sessionID,
-        parentSessionID,
-        path: target.path,
-        agent: selected,
-        task: target.taskName,
-        message,
-        model,
-        variant: userModel?.variant ?? child.model?.variant,
-        serviceTier: userModel?.serviceTier,
-        upstream: userModel?.upstream,
-        type: "followup_task",
-      }).pipe(
-        Effect.onExit((exit) =>
-          Exit.isFailure(exit)
-            ? collaboration.setStatus({
-                sessionID: target.sessionID,
-                status: claim.previousStatus,
-                lastTask: claim.previousLastTask,
-              })
-            : Effect.void,
-        ),
-      )
+      yield* input.context
+        .metadata({
+          title: target.taskName,
+          metadata: {
+            parentSessionId: parentSessionID,
+            sessionId: target.sessionID,
+            taskPath: target.path,
+            background: true,
+          },
+        })
+        .pipe(
+          Effect.andThen(
+            start({
+              ops,
+              childSessionID: target.sessionID,
+              parentSessionID,
+              path: target.path,
+              agent: selected,
+              task: target.taskName,
+              message,
+              model,
+              variant: userModel?.variant ?? child.model?.variant,
+              serviceTier: userModel?.serviceTier,
+              upstream: userModel?.upstream,
+              type: "followup_task",
+            }),
+          ),
+          Effect.onExit((exit) =>
+            Exit.isFailure(exit)
+              ? collaboration.setStatus({
+                  sessionID: target.sessionID,
+                  status: claim.previousStatus,
+                  lastTask: claim.previousLastTask,
+                })
+              : Effect.void,
+          ),
+        )
       return { path: target.path, sessionID: target.sessionID }
-    })
+    }, detached)
 
     return Service.of({
       run: (input) =>

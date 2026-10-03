@@ -139,6 +139,63 @@ function context(input: {
 }
 
 describe("agent.subagent-run", () => {
+  it.instance(
+    "does not retain the tool context while a child waits for a permit",
+    () =>
+      Effect.gen(function* () {
+        const run = yield* SubagentRun.Service
+        const jobs = yield* BackgroundJob.Service
+        const limit = yield* SubagentLimit.Service
+        const seeded = yield* seed()
+        const ops = {
+          cancel: () => Effect.void,
+          resolvePromptParts: (text: string) => Effect.succeed([{ type: "text" as const, text }]),
+          prompt: (input: SessionPrompt.PromptInput) => Effect.succeed(reply(input, "done")),
+          loop: (input: SessionPrompt.LoopInput) =>
+            Effect.succeed(reply({ sessionID: input.sessionID, parts: [] }, "unused")),
+        }
+        const entered = yield* Deferred.make<void>()
+        const release = yield* Deferred.make<void>()
+        const blocker = yield* limit
+          .withPermit(Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))))
+          .pipe(Effect.forkScoped)
+        yield* Deferred.await(entered)
+        const refs: WeakRef<Tool.Context>[] = []
+        for (let index = 0; index < 8; index++) {
+          yield* Effect.suspend(() => {
+            const ctx: Tool.Context = {
+              sessionID: seeded.parent.id,
+              messageID: seeded.assistant.id,
+              agent: "build",
+              abort: new AbortController().signal,
+              extra: { promptOps: ops },
+              messages: [reply({ sessionID: seeded.parent.id, parts: [] }, "fixture-owned history".repeat(10_000))],
+              metadata: () => Effect.void,
+              ask: () => Effect.void,
+            }
+            refs.push(new WeakRef(ctx))
+            return run
+              .run({ context: ctx, taskName: `queued_context_${index}`, message: "fixture task" })
+              .pipe(Effect.asVoid)
+          })
+        }
+        const queued = (yield* jobs.list()).filter((job) => job.status === "running").map((job) => job.id)
+        expect(queued).toHaveLength(8)
+        yield* Effect.promise(async () => {
+          for (let index = 0; index < 5; index++) {
+            Bun.gc(true)
+            await new Promise((resolve) => setTimeout(resolve, 10))
+          }
+          Bun.gc(true)
+          expect(refs.filter((ref) => ref.deref())).toHaveLength(0)
+        })
+        yield* Deferred.succeed(release, undefined)
+        yield* Fiber.join(blocker)
+        for (const id of queued) expect((yield* jobs.wait({ id })).info?.output).toBe("done")
+      }),
+    { config: { experimental: { subagent_concurrency: 1 } } },
+  )
+
   it.instance("inherits nested spawn_agent ask, deny, and allow rules", () =>
     Effect.gen(function* () {
       const agents = yield* Agent.Service

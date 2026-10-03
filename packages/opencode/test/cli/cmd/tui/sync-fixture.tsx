@@ -7,6 +7,7 @@ import { KVProvider, useKV } from "../../../../src/cli/cmd/tui/context/kv"
 import { ProjectProvider, useProject } from "../../../../src/cli/cmd/tui/context/project"
 import { SDKProvider, type EventSource } from "../../../../src/cli/cmd/tui/context/sdk"
 import { SyncProvider, useSync } from "../../../../src/cli/cmd/tui/context/sync"
+import { SyncProviderV2, useSyncV2 } from "../../../../src/cli/cmd/tui/context/sync-v2"
 import type { GlobalEvent } from "@opencode-ai/sdk/v2"
 
 export const worktree = "/tmp/opencode"
@@ -103,6 +104,7 @@ export async function mount(override?: FetchHandler) {
   const calls = createFetch(override)
   const events = createEventSource()
   let sync!: ReturnType<typeof useSync>
+  let syncV2!: ReturnType<typeof useSyncV2>
   let project!: ReturnType<typeof useProject>
   let kv!: ReturnType<typeof useKV>
   let done!: () => void
@@ -112,8 +114,10 @@ export async function mount(override?: FetchHandler) {
 
   function Probe() {
     const ctx: Ctx = { kv: useKV(), project: useProject(), sync: useSync() }
+    const v2 = useSyncV2()
     onMount(() => {
       sync = ctx.sync
+      syncV2 = v2
       project = ctx.project
       kv = ctx.kv
       done()
@@ -128,7 +132,9 @@ export async function mount(override?: FetchHandler) {
           <SDKProvider url="http://test" directory={directory} fetch={calls.fetch} events={events.source}>
             <ProjectProvider>
               <SyncProvider>
-                <Probe />
+                <SyncProviderV2>
+                  <Probe />
+                </SyncProviderV2>
               </SyncProvider>
             </ProjectProvider>
           </SDKProvider>
@@ -139,5 +145,5 @@ export async function mount(override?: FetchHandler) {
 
   await ready
   await wait(() => sync.status === "complete")
-  return { app, emit: events.emit, kv, project, sync, session: calls.session }
+  return { app, emit: events.emit, kv, project, sync, syncV2, session: calls.session }
 }

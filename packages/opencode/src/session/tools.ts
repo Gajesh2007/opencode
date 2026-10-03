@@ -215,7 +215,6 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               sessionID: ctx.sessionID,
               messageID: input.processor.message.id,
             })),
-            content: result.content,
           }
           if (opts.abortSignal?.aborted) {
             yield* input.processor.completeToolCall(opts.toolCallId, output)

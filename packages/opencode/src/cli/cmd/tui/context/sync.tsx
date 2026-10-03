@@ -113,6 +113,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     const kv = useKV()
 
     const fullSyncedSessions = new Set<string>()
+    const syncingSessions = new Map<string, object>()
 
     function sessionListQuery(): { scope?: "project"; path?: string } {
       if (!kv.get("session_directory_filter_enabled", true)) return { scope: "project" }
@@ -219,6 +220,24 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           break
 
         case "session.deleted": {
+          const sessionID = event.properties.info.id
+          fullSyncedSessions.delete(sessionID)
+          syncingSessions.delete(sessionID)
+          setStore(
+            produce((draft) => {
+              for (const message of draft.message[sessionID] ?? []) delete draft.part[message.id]
+              // Parts can arrive before their message info.
+              for (const [messageID, parts] of Object.entries(draft.part)) {
+                if (parts.some((part) => part.sessionID === sessionID)) delete draft.part[messageID]
+              }
+              delete draft.message[sessionID]
+              delete draft.todo[sessionID]
+              delete draft.session_diff[sessionID]
+              delete draft.session_status[sessionID]
+              delete draft.permission[sessionID]
+              delete draft.question[sessionID]
+            }),
+          )
           const result = Binary.search(store.session, event.properties.info.id, (s) => s.id)
           if (result.found) {
             setStore(
@@ -291,7 +310,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         }
         case "message.removed": {
           const messages = store.message[event.properties.sessionID]
-          const result = Binary.search(messages, event.properties.messageID, (m) => m.id)
+          const result = Binary.search(messages ?? [], event.properties.messageID, (m) => m.id)
           if (result.found) {
             setStore(
               "message",
@@ -301,6 +320,12 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
               }),
             )
           }
+          setStore(
+            "part",
+            produce((draft) => {
+              delete draft[event.properties.messageID]
+            }),
+          )
           break
         }
         case "message.part.updated": {
@@ -350,7 +375,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
 
         case "message.part.removed": {
           const parts = store.part[event.properties.messageID]
-          const result = Binary.search(parts, event.properties.partID, (p) => p.id)
+          const result = Binary.search(parts ?? [], event.properties.partID, (p) => p.id)
           if (result.found) {
             setStore(
               "part",
@@ -526,18 +551,26 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         },
         async sync(sessionID: string) {
           if (fullSyncedSessions.has(sessionID)) return
+          const generation = {}
+          syncingSessions.set(sessionID, generation)
           const [session, messages, todo, diff] = await Promise.all([
             sdk.client.session.get({ sessionID }, { throwOnError: true }),
             sdk.client.session.messages({ sessionID, limit: 100 }),
             sdk.client.session.todo({ sessionID }),
             sdk.client.session.diff({ sessionID }),
-          ])
+          ]).catch((error: unknown) => {
+            if (syncingSessions.get(sessionID) === generation) syncingSessions.delete(sessionID)
+            throw error
+          })
+          if (syncingSessions.get(sessionID) !== generation) return
+          syncingSessions.delete(sessionID)
           setStore(
             produce((draft) => {
               const match = Binary.search(draft.session, sessionID, (s) => s.id)
               if (match.found) draft.session[match.index] = session.data!
               if (!match.found) draft.session.splice(match.index, 0, session.data!)
               draft.todo[sessionID] = todo.data ?? []
+              for (const message of draft.message[sessionID] ?? []) delete draft.part[message.id]
               const infos: (typeof draft.message)[string] = []
               for (const message of messages.data ?? []) {
                 infos.push(message.info)

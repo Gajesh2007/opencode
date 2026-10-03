@@ -128,7 +128,7 @@ const cancelBackgroundJobs = Effect.fn("SessionRunState.cancelBackgroundJobs")(f
   background: BackgroundJob.Interface,
   sessionID: SessionID,
 ) {
-  const jobs = yield* background.list()
+  const jobs = yield* background.list({ includeOutput: false })
   const pending = new Set<string>([sessionID])
   // Every session id touched (the target + descendant subtask sessions), so the caller
   // can cancel their runners too.

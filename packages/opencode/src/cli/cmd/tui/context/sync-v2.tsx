@@ -60,6 +60,8 @@ export const { use: useSyncV2, provider: SyncProviderV2 } = createSimpleContext(
 
     const event = useEvent()
     const sdk = useSDK()
+    let activeSessionID: string | undefined
+    let generation = 0
 
     function update(sessionID: string, fn: (messages: SessionMessage[]) => void) {
       setStore(
@@ -71,6 +73,14 @@ export const { use: useSyncV2, provider: SyncProviderV2 } = createSimpleContext(
     }
 
     event.subscribe((event) => {
+      if (event.type === "session.deleted" && event.properties.info.id === activeSessionID) {
+        release(event.properties.info.id)
+        return
+      }
+      // Only the debug view consumes this projection. Unopened sessions load
+      // their persisted message snapshot when selected, not every live transcript.
+      if (!event.type.startsWith("session.next.")) return
+      if (!("sessionID" in event.properties) || event.properties.sessionID !== activeSessionID) return
       switch (event.type) {
         case "session.next.prompted": {
           update(event.properties.sessionID, (draft) => {
@@ -285,14 +295,35 @@ export const { use: useSyncV2, provider: SyncProviderV2 } = createSimpleContext(
       }
     })
 
+    function release(sessionID: string) {
+      if (activeSessionID !== sessionID) return
+      activeSessionID = undefined
+      generation++
+      setStore("messages", reconcile({}))
+    }
+
     const result = {
       data: store,
       session: {
         message: {
           async sync(sessionID: string) {
-            const response = await sdk.client.v2.session.messages({ sessionID })
+            if (activeSessionID !== sessionID) {
+              activeSessionID = sessionID
+              setStore("messages", reconcile({}))
+            }
+            const current = ++generation
+            const response = await sdk.client.v2.session
+              .messages({ sessionID }, { throwOnError: true })
+              .catch((error: unknown) => {
+                if (current === generation) release(sessionID)
+                throw error
+              })
+            if (current !== generation) return
+            // Preserve snapshot-wins loading: partial deltas are not materialized
+            // in this API. Final text/tool events remain authoritative after loading.
             setStore("messages", sessionID, reconcile(response.data?.items ?? []))
           },
+          release,
           fromSession(sessionID: string) {
             const messages = store.messages[sessionID]
             if (!messages) return []

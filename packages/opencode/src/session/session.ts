@@ -1032,7 +1032,7 @@ const cancelBackgroundJobs = Effect.fn("Session.cancelBackgroundJobs")(function*
   background: BackgroundJob.Interface,
   sessionID: SessionID,
 ) {
-  const jobs = yield* background.list()
+  const jobs = yield* background.list({ includeOutput: false })
   yield* Effect.forEach(
     jobs.filter((job) => {
       if (job.status !== "running") return false

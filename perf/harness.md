@@ -7,6 +7,11 @@ Run benchmarks separately from builds and other tests to reduce scheduling noise
 
 ## Results
 
+For the follow-up investigation, see [Memory Retention](./memory-retention.md).
+It reports JSC heap and external counters separately because they can overlap.
+The historical native rows below used their summed counters as a comparison
+score; those sums should not be interpreted as independent physical RAM bytes.
+
 | Workload                                                        |                 Before |            After | Meaning                                                                    |
 | --------------------------------------------------------------- | ---------------------: | ---------------: | -------------------------------------------------------------------------- |
 | Native single-round streaming, 32 MiB response                  |              66.28 MiB |         0.73 MiB | Retained JSC heap plus external memory at text completion, after forced GC |
