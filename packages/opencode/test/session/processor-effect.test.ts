@@ -1,7 +1,7 @@
 import { NodeFileSystem } from "@effect/platform-node"
 import { expect } from "bun:test"
 import { tool } from "ai"
-import { Cause, Effect, Exit, Fiber, Layer } from "effect"
+import { Cause, Context, Deferred, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
 import path from "path"
 import z from "zod"
 import type { Agent } from "../../src/agent/agent"
@@ -30,6 +30,10 @@ import { raw, reply, TestLLMServer } from "../lib/llm-server"
 import { SyncEvent } from "@/sync"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
+import { SessionEvent } from "@opencode-ai/core/session-event"
+import { LLM as NativeLLM, LLMEvent, Usage, tool as nativeTool } from "@opencode-ai/llm"
+import * as OpenAI from "@opencode-ai/llm/providers/openai"
+import { ToolRuntime } from "../../../llm/src/tool-runtime"
 
 void Log.init({ print: false })
 
@@ -541,6 +545,85 @@ it.live("session.processor effect tests stop after token overflow requests compa
   ),
 )
 
+it.live("session.processor does not prefetch native tool execution past compaction", () =>
+  provideTmpdirServer(
+    ({ dir }) =>
+      Effect.gen(function* () {
+        const { session, provider } = yield* boot()
+        const snapshot = yield* Snapshot.Service
+        let executions = 0
+        const processors = yield* Layer.build(
+          SessionProcessor.layer.pipe(
+            Layer.fresh,
+            Layer.provide(summary),
+            Layer.provide(Image.defaultLayer),
+            Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
+          ),
+        ).pipe(
+          Effect.map((services) => Context.get(services, SessionProcessor.Service)),
+          Effect.provideService(Snapshot.Service, {
+            ...snapshot,
+            // Leave time for a prefetched pull to dispatch tools while the
+            // step-finish handler is still deciding whether to compact.
+            track: () => Effect.sleep("30 millis").pipe(Effect.andThen(snapshot.track())),
+          }),
+          Effect.provideService(LLM.Service, {
+            stream: () =>
+              ToolRuntime.stream({
+                request: NativeLLM.request({
+                  model: OpenAI.configure({ apiKey: "test" }).chat("test-model"),
+                  prompt: "Run the tool",
+                }),
+                tools: {
+                  counted: nativeTool({
+                    description: "Count tool executions",
+                    parameters: Schema.Struct({}),
+                    success: Schema.String,
+                    execute: () =>
+                      Effect.sync(() => {
+                        executions++
+                        return "executed"
+                      }),
+                  }),
+                },
+                stream: () =>
+                  Stream.make(LLMEvent.toolCall({ id: "call_counted", name: "counted", input: {} })).pipe(
+                    Stream.concat(
+                      Stream.make(
+                        LLMEvent.stepFinish({
+                          index: 0,
+                          reason: "tool-calls",
+                          usage: new Usage({ inputTokens: 100 }),
+                        }),
+                      ),
+                    ),
+                  ),
+              }),
+          }),
+        )
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "compact")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const base = yield* provider.getModel(ref.providerID, ref.modelID)
+        const mdl = { ...base, limit: { context: 20, output: 10 } }
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+        const result = yield* handle.process({
+          user: parent,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "compact" }],
+          tools: {},
+        })
+        expect(msg.error).toBeUndefined()
+        expect(result).toBe("compact")
+        expect(executions).toBe(0)
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
 it.live("session.processor effect tests capture reasoning from http mock", () =>
   provideTmpdirServer(
     ({ dir, llm }) =>
@@ -596,12 +679,8 @@ it.live("session.processor effect tests coalesce small text deltas into batched 
         const { processors, session, provider } = yield* boot()
         const bus = yield* Bus.Service
 
-        // 10 small deltas, each 2 chars (20 chars total — well below the
-        // 64-byte coalescing threshold). Without coalescing, the per-delta
-        // path would publish 10 separate PartDelta events; with coalescing
-        // we expect at most 1-2 (every delta accumulates into one bucket
-        // that flushes at cleanup, plus the part-updated PartUpdated event
-        // emitted on text-end is not counted here).
+        // 10 small deltas, each 2 chars, stay below the 64-character threshold.
+        // Timer flushes may split the burst, but it should still be coalesced.
         let chain = reply()
         for (let i = 0; i < 10; i++) chain = chain.text("ab")
         yield* llm.push(chain.stop())
@@ -648,17 +727,370 @@ it.live("session.processor effect tests coalesce small text deltas into batched 
         expect(value).toBe("continue")
         expect(text?.text).toBe("ab".repeat(10))
 
-        // Coalescing: all 10 small deltas fit in one bucket and flush at
-        // cleanup. Allow up to 2 PartDelta events for safety (a split would
-        // only happen if cleanup ran before the final text-delta queued —
-        // not the case here, but the threshold is conservative).
-        expect(partDeltaEvents.length).toBeLessThanOrEqual(2)
+        // The first delta is immediate; the rest can batch until a timer or end.
+        expect(partDeltaEvents[0]?.delta).toBe("ab")
+        expect(partDeltaEvents.length).toBeLessThan(10)
 
         // The accumulated delta text matches the part's text exactly.
         const sameTarget = partDeltaEvents.every((e) => e.partID === text?.id)
         expect(sameTarget).toBe(true)
         const concatenated = partDeltaEvents.map((e) => e.delta).join("")
         expect(concatenated).toBe("ab".repeat(10))
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
+for (const kind of ["text", "reasoning", "tool"] as const) {
+  it.live(`session.processor bounds delayed ${kind} delta publication latency`, () =>
+    provideTmpdirServer(
+      ({ dir, llm }) =>
+        Effect.gen(function* () {
+          const { session, provider } = yield* boot()
+          const bus = yield* Bus.Service
+          const upstream = yield* LLM.Service
+          const received = yield* Deferred.make<void>()
+          const gate = defer<void>()
+          yield* Effect.addFinalizer(() => Effect.sync(() => gate.resolve()))
+          const arrivals: number[] = []
+          const publications: { delta: string; time: number }[] = []
+          const finish = { time: Infinity }
+          // Observe real, decoded HTTP events immediately before the processor,
+          // rather than benchmarking a copy of its batching implementation.
+          const processors = yield* Layer.build(
+            SessionProcessor.layer.pipe(
+              Layer.fresh,
+              Layer.provide(summary),
+              Layer.provide(Image.defaultLayer),
+              Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
+            ),
+          ).pipe(
+            Effect.map((services) => Context.get(services, SessionProcessor.Service)),
+            Effect.provideService(LLM.Service, {
+              ...upstream,
+              stream: (input) =>
+                upstream.stream(input).pipe(
+                  Stream.tap((event) =>
+                    Effect.gen(function* () {
+                      if (
+                        event.type !== "text-delta" &&
+                        event.type !== "reasoning-delta" &&
+                        event.type !== "tool-input-delta"
+                      )
+                        return
+                      if (!event.text) return
+                      arrivals.push(performance.now())
+                      if (arrivals.length === 3) yield* Deferred.succeed(received, undefined)
+                    }),
+                  ),
+                ),
+            }),
+          )
+          const chat = yield* session.create({})
+          const parent = yield* user(chat.id, "stream")
+          const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+          const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+          const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+          yield* (yield* bus.subscribe(MessageV2.Event.PartDelta)).pipe(
+            Stream.runForEach((event) =>
+              Effect.sync(() => {
+                if (event.properties.messageID === msg.id)
+                  publications.push({ delta: event.properties.delta, time: performance.now() })
+              }),
+            ),
+            Effect.forkScoped,
+          )
+          yield* llm.push(
+            raw({
+              head: ["a", "b", "c"].map((text, index) => ({
+                id: "chatcmpl-test",
+                object: "chat.completion.chunk",
+                choices: [
+                  {
+                    delta:
+                      kind === "text"
+                        ? { content: text }
+                        : kind === "reasoning"
+                          ? { reasoning_content: text }
+                          : {
+                              tool_calls: [
+                                {
+                                  index: 0,
+                                  ...(index === 0 ? { id: "call_latency", type: "function" } : {}),
+                                  function: { ...(index === 0 ? { name: "test" } : {}), arguments: text },
+                                },
+                              ],
+                            },
+                  },
+                ],
+              })),
+              wait: gate.promise,
+              tail: [
+                {
+                  id: "chatcmpl-test",
+                  object: "chat.completion.chunk",
+                  choices: [{ delta: {}, finish_reason: "stop" }],
+                },
+              ],
+            }),
+          )
+          yield* Deferred.await(received).pipe(
+            Effect.andThen(Effect.sleep("120 millis")),
+            Effect.andThen(
+              Effect.sync(() => {
+                finish.time = performance.now()
+                gate.resolve()
+              }),
+            ),
+            Effect.forkScoped,
+          )
+          const start = performance.now()
+          yield* handle.process({
+            user: parent,
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [{ role: "user", content: "stream" }],
+            tools: {},
+          })
+          yield* waitFor(
+            Effect.sync(() => (publications.map((event) => event.delta).join("") === "abc" ? true : undefined)),
+            "timed out waiting for delta publications",
+          )
+          const delays = publications.flatMap((event) => [...event.delta].map(() => event.time))
+          expect(arrivals).toHaveLength(3)
+          expect(publications.map((event) => event.delta).join("")).toBe("abc")
+          const first = delays[0] - arrivals[0]
+          const stalled = Math.max(...arrivals.slice(1).map((time, index) => delays[index + 1] - time))
+          if (process.env.OPENCODE_TEST_DELTA_LATENCY)
+            console.log(
+              `delta latency ${kind}: first=${first.toFixed(2)}ms stalled_max=${stalled.toFixed(2)}ms process_to_first=${(delays[0] - start).toFixed(2)}ms`,
+            )
+          expect(publications[0].delta).toBe("a")
+          // Even under live-clock scheduling delays, publication must not wait
+          // for more provider output. Keep the exact timings as measurements.
+          expect(delays.every((time) => time < finish.time)).toBe(true)
+        }),
+      { config: (url) => providerCfg(url) },
+    ),
+  )
+}
+
+it.live("session.processor streams coalesced tool input before replacing it with parsed input", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        const bus = yield* Bus.Service
+        const events = yield* EventV2Bridge.Service
+        const gate = defer<void>()
+        yield* Effect.addFinalizer(() => Effect.sync(() => gate.resolve()))
+        const input = { code: 'const text = "hello";\n'.repeat(6) }
+        const source = JSON.stringify({ ...input, ignored: true })
+        const chunks = Array.from({ length: Math.ceil(source.length / 8) }, (_, i) => ({
+          id: "chatcmpl-test",
+          object: "chat.completion.chunk",
+          choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: source.slice(i * 8, i * 8 + 8) } }] } }],
+        }))
+        yield* llm.push(
+          raw({
+            head: [
+              {
+                id: "chatcmpl-test",
+                object: "chat.completion.chunk",
+                choices: [
+                  {
+                    delta: {
+                      tool_calls: [
+                        { index: 0, id: "call_code", type: "function", function: { name: "code", arguments: "" } },
+                      ],
+                    },
+                  },
+                ],
+              },
+              ...chunks.slice(0, 8),
+            ],
+            wait: gate.promise,
+            tail: [
+              ...chunks.slice(8),
+              {
+                id: "chatcmpl-test",
+                object: "chat.completion.chunk",
+                choices: [{ delta: {}, finish_reason: "tool_calls" }],
+                usage: { prompt_tokens: 10, completion_tokens: 71, total_tokens: 81 },
+              },
+            ],
+          }),
+        )
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "write code")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+        const deltas: { partID: string; field: string; delta: string }[] = []
+        const states: Schema.Schema.Type<typeof MessageV2.ToolState>[] = []
+        const order: string[] = []
+        const v2: SessionEvent.Event[] = []
+        const off = yield* bus.subscribeAllCallback((event: { type: string; properties: unknown }) => {
+          if (
+            event.type === MessageV2.Event.PartDelta.type &&
+            Schema.is(MessageV2.Event.PartDelta.properties)(event.properties)
+          ) {
+            if (event.properties.messageID !== msg.id) return
+            deltas.push(event.properties)
+            order.push("delta")
+            return
+          }
+          if (
+            event.type !== MessageV2.Event.PartUpdated.type ||
+            !Schema.is(MessageV2.Event.PartUpdated.properties)(event.properties)
+          )
+            return
+          const part = event.properties.part
+          if (part.messageID !== msg.id || part.type !== "tool") return
+          states.push(part.state)
+          order.push(part.state.status)
+        })
+        const offV2 = yield* events.sync((event) =>
+          Effect.sync(() => {
+            if (Schema.is(SessionEvent.All)(event) && event.data.sessionID === chat.id) v2.push(event)
+          }),
+        )
+        yield* Effect.addFinalizer(() => Effect.sync(off))
+        yield* Effect.addFinalizer(() => offV2)
+
+        const run = yield* handle
+          .process({
+            user: parent,
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [{ role: "user", content: "write code" }],
+            tools: {
+              code: tool({
+                description: "Write code",
+                inputSchema: z.object({ code: z.string() }),
+                execute: async () => ({ title: "Code", metadata: {}, output: "tool output is not an input delta" }),
+              }),
+            },
+          })
+          .pipe(Effect.forkChild)
+
+        yield* waitFor(
+          Effect.sync(() => deltas[0]),
+          "timed out waiting for live tool input",
+        )
+        expect(deltas[0]?.delta).toBe(source.slice(0, 8))
+        expect(states).toEqual([{ status: "pending", input: {}, raw: "" }])
+        const pending = MessageV2.parts(msg.id).find((part) => part.type === "tool")
+        expect(pending?.state).toEqual({ status: "pending", input: {}, raw: "" })
+        gate.resolve()
+
+        expect(yield* Fiber.join(run)).toBe("continue")
+        yield* waitFor(
+          Effect.sync(() => states.find((state) => state.status === "completed")),
+          "tool did not complete",
+        )
+        const call = MessageV2.parts(msg.id).find((part) => part.type === "tool")
+        if (!call) throw new Error("missing tool part")
+        const batches = deltas.map((event) => event.delta)
+        expect(batches.join("")).toBe(source)
+        expect(batches.length).toBeLessThan(chunks.length)
+        expect(batches.some((delta) => delta.length === 64)).toBe(true)
+        expect(batches.every((delta) => delta.length <= 64)).toBe(true)
+        expect(deltas).toEqual(
+          batches.map((delta) => ({
+            sessionID: chat.id,
+            messageID: msg.id,
+            partID: call.id,
+            field: "state.raw",
+            delta,
+          })),
+        )
+        expect(order).toEqual(["pending", ...batches.map(() => "delta"), "pending", "running", "completed"])
+        expect(states[1]).toEqual({ status: "pending", input: {}, raw: source })
+        expect(call.state.status).toBe("completed")
+        expect(call.state.input).toEqual(input)
+        expect(call.state).not.toHaveProperty("raw")
+        expect(msg.tokens.output).toBe(71)
+        expect(
+          v2.filter((event) => event.type === SessionEvent.Tool.Input.Delta.type).map((event) => event.data.delta),
+        ).toEqual(batches)
+        expect(v2.find((event) => event.type === SessionEvent.Tool.Input.Ended.type)?.data.text).toBe(source)
+        expect(
+          v2
+            .filter(
+              (event) =>
+                event.type.startsWith("session.next.tool.input.") || event.type === SessionEvent.Tool.Called.type,
+            )
+            .map((event) => event.type),
+        ).toEqual([
+          SessionEvent.Tool.Input.Started.type,
+          ...batches.map(() => SessionEvent.Tool.Input.Delta.type),
+          SessionEvent.Tool.Input.Ended.type,
+          SessionEvent.Tool.Called.type,
+        ])
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
+it.live("session.processor preserves tool metadata changed during input-end publication", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        const events = yield* EventV2Bridge.Service
+        yield* llm.tool("lookup", { query: "test" })
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "tool")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+        const states: MessageV2.ToolPart["state"][] = []
+        const off = yield* events.sync((event) =>
+          Effect.gen(function* () {
+            if (Schema.is(SessionEvent.Tool.Input.Ended)(event) && event.data.sessionID === chat.id) {
+              // A tool can report running metadata while the input-end handler yields.
+              yield* handle.updateToolCall(event.data.callID, (part) => ({
+                ...part,
+                state: {
+                  status: "running",
+                  input: { query: "test" },
+                  title: "Task started",
+                  metadata: { sessionId: "child-session" },
+                  time: { start: Date.now() },
+                },
+              }))
+            }
+            if (Schema.is(SessionEvent.Tool.Called)(event) && event.data.sessionID === chat.id) {
+              const part = MessageV2.parts(msg.id).find((part) => part.type === "tool")
+              if (part) states.push(part.state)
+            }
+          }),
+        )
+        yield* Effect.addFinalizer(() => off)
+        yield* handle.process({
+          user: parent,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "tool" }],
+          tools: {
+            lookup: tool({
+              description: "Look up information",
+              inputSchema: z.object({ query: z.string() }),
+              execute: async () => ({ title: "Done", output: "result", metadata: {} }),
+            }),
+          },
+        })
+        expect(states).toMatchObject([
+          { status: "running", title: "Task started", metadata: { sessionId: "child-session" } },
+        ])
       }),
     { config: (url) => providerCfg(url) },
   ),
@@ -1021,13 +1453,35 @@ it.live("session.processor effect tests complete AI SDK tool calls when native f
   ),
 )
 
-it.live("session.processor effect tests mark pending tools as aborted on cleanup", () =>
+it.live("session.processor flushes and persists separate pending tool inputs on cancellation", () =>
   provideTmpdirServer(
     ({ dir, llm }) =>
       Effect.gen(function* () {
         const { processors, session, provider } = yield* boot()
+        const bus = yield* Bus.Service
+        const events = yield* EventV2Bridge.Service
+        const short = '{"cmd":"pw'
+        const long = '{"cmd":"' + "a".repeat(64)
+        const publishing = yield* Deferred.make<void>()
+        const release = yield* Deferred.make<void>()
+        yield* Effect.addFinalizer(() => Deferred.succeed(release, undefined))
 
-        yield* llm.toolHang("bash", { cmd: "pwd" })
+        yield* llm.push(
+          raw({
+            chunks: [
+              { index: 0, id: "call_short", type: "function", function: { name: "bash", arguments: "" } },
+              { index: 1, id: "call_long", type: "function", function: { name: "bash", arguments: "" } },
+              { index: 0, function: { arguments: short.slice(0, 1) } },
+              { index: 0, function: { arguments: short.slice(1) } },
+              { index: 1, function: { arguments: long } },
+            ].map((call) => ({
+              id: "chatcmpl-test",
+              object: "chat.completion.chunk",
+              choices: [{ delta: { tool_calls: [call] } }],
+            })),
+            hang: true,
+          }),
+        )
 
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "tool abort")
@@ -1038,6 +1492,28 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
           sessionID: chat.id,
           model: mdl,
         })
+        const deltas: { partID: string; field: string; delta: string }[] = []
+        const v2: (SessionEvent.Tool.Input.Delta | SessionEvent.Step.Failed)[] = []
+        const off = yield* bus.subscribeCallback(MessageV2.Event.PartDelta, (event) => {
+          if (event.properties.messageID === msg.id) deltas.push(event.properties)
+        })
+        const offV2 = yield* events.sync((event) =>
+          Effect.gen(function* () {
+            if (
+              (Schema.is(SessionEvent.Tool.Input.Delta)(event) || Schema.is(SessionEvent.Step.Failed)(event)) &&
+              event.data.sessionID === chat.id
+            ) {
+              // Cancel between the legacy and v2 publications of the same batch.
+              if (event.type === SessionEvent.Tool.Input.Delta.type && event.data.delta === long) {
+                yield* Deferred.succeed(publishing, undefined)
+                yield* Deferred.await(release)
+              }
+              v2.push(event)
+            }
+          }),
+        )
+        yield* Effect.addFinalizer(() => Effect.sync(off))
+        yield* Effect.addFinalizer(() => offV2)
 
         const run = yield* handle
           .process({
@@ -1059,21 +1535,65 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
           .pipe(Effect.forkChild)
 
         yield* llm.wait(1)
+        yield* Deferred.await(publishing)
         yield* waitFor(
-          Effect.sync(() => MessageV2.parts(msg.id).find((part): part is MessageV2.ToolPart => part.type === "tool")),
-          "timed out waiting for tool part",
+          Effect.sync(() => deltas.find((event) => event.delta === long)),
+          "timed out waiting for long tool input",
         )
-        yield* Fiber.interrupt(run)
+        expect(deltas[0]?.delta).toBe(short.slice(0, 1))
+        expect(
+          MessageV2.parts(msg.id)
+            .filter((part) => part.type === "tool")
+            .map((part) => part.state),
+        ).toEqual([
+          { status: "pending", input: {}, raw: "" },
+          { status: "pending", input: {}, raw: "" },
+        ])
+        const interrupted = yield* Fiber.interrupt(run).pipe(Effect.forkChild({ startImmediately: true }))
+        yield* Deferred.succeed(release, undefined)
+        yield* Fiber.join(interrupted)
 
         const exit = yield* Fiber.await(run)
         const parts = MessageV2.parts(msg.id)
-        const call = parts.find((part): part is MessageV2.ToolPart => part.type === "tool")
+        const calls = parts.filter((part) => part.type === "tool")
+        const call = calls.find((part) => part.callID === "call_short")
+        const other = calls.find((part) => part.callID === "call_long")
+        if (!call || !other) throw new Error("missing pending tool parts")
 
         expect(Exit.isFailure(exit)).toBe(true)
         if (Exit.isFailure(exit)) {
           expect(Cause.hasInterruptsOnly(exit.cause)).toBe(true)
         }
         expect(yield* llm.calls).toBe(1)
+        expect(deltas.every((event) => event.field === "state.raw")).toBe(true)
+        expect(
+          deltas
+            .filter((event) => event.partID === call.id)
+            .map((event) => event.delta)
+            .join(""),
+        ).toBe(short)
+        expect(
+          deltas
+            .filter((event) => event.partID === other.id)
+            .map((event) => event.delta)
+            .join(""),
+        ).toBe(long)
+        expect(
+          v2
+            .filter((event) => event.type === SessionEvent.Tool.Input.Delta.type)
+            .map((event) => [event.data.callID, event.data.delta]),
+        ).toEqual(deltas.map((event) => [event.partID === call.id ? "call_short" : "call_long", event.delta]))
+        expect(v2.map((event) => event.type)).toEqual([
+          ...deltas.map(() => SessionEvent.Tool.Input.Delta.type),
+          SessionEvent.Step.Failed.type,
+        ])
+        const count = deltas.length
+        yield* Effect.sleep("40 millis")
+        expect(deltas).toHaveLength(count)
+        expect(calls.map((part) => part.state)).toMatchObject([
+          { status: "error", input: {}, raw: short },
+          { status: "error", input: {}, raw: long },
+        ])
         expect(call?.state.status).toBe("error")
         if (call?.state.status === "error") {
           expect(call.state.error).toBe("Tool execution aborted")

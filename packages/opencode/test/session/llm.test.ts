@@ -70,11 +70,15 @@ const drainWith = (layer: Layer.Layer<LLM.Service>, input: LLM.StreamInput) =>
     )
   })
 
-function llmLayerWithExecutor(executor: Layer.Layer<RequestExecutor.Service>, flags: Partial<RuntimeFlags.Info> = {}) {
+function llmLayerWithExecutor(
+  executor: Layer.Layer<RequestExecutor.Service>,
+  flags: Partial<RuntimeFlags.Info> = {},
+  provider = Provider.defaultLayer,
+) {
   return LLM.layer.pipe(
     Layer.provide(Auth.defaultLayer),
     Layer.provide(Config.defaultLayer),
-    Layer.provide(Provider.defaultLayer),
+    Layer.provide(provider),
     Layer.provide(Plugin.defaultLayer),
     Layer.provide(LLMClient.layer.pipe(Layer.provide(Layer.mergeAll(executor, WebSocketExecutor.layer)))),
     Layer.provide(RuntimeFlags.layer(flags)),
@@ -1106,72 +1110,119 @@ describe("session.llm.stream", () => {
     { config: () => openAIConfig(loadFixture("openai", "gpt-5.2").model, `${state.server!.url.origin}/v1`) },
   )
 
-  it.instance(
-    "streams OpenAI through native runtime when opted in",
-    () =>
-      Effect.gen(function* () {
-        const model = loadFixture("openai", "gpt-5.2").model
-        const chunks = [
-          { type: "response.created", response: { id: "resp-native" } },
-          {
-            type: "response.output_item.added",
-            item: { type: "message", id: "item-native", status: "in_progress" },
-          },
-          { type: "response.output_text.delta", item_id: "item-native", delta: "Hello native" },
-          {
-            type: "response.completed",
-            response: {
-              incomplete_details: null,
-              usage: {
-                input_tokens: 1,
-                input_tokens_details: null,
-                output_tokens: 1,
-                output_tokens_details: null,
+  for (const eligible of [true, false]) {
+    it.instance(
+      eligible
+        ? "streams OpenAI through native runtime when opted in"
+        : "loads AI SDK once when native OpenAI is unsupported",
+      () =>
+        Effect.gen(function* () {
+          const model = loadFixture("openai", "gpt-5.2").model
+          const chunks = [
+            { type: "response.created", response: { id: "resp-native", created_at: 1, model: model.id } },
+            {
+              type: "response.output_item.added",
+              output_index: 0,
+              item: { type: "message", id: "item-native", status: "in_progress", role: "assistant", content: [] },
+            },
+            {
+              type: "response.content_part.added",
+              item_id: "item-native",
+              output_index: 0,
+              content_index: 0,
+              part: { type: "output_text", text: "", annotations: [] },
+            },
+            { type: "response.output_text.delta", item_id: "item-native", delta: "Hello native" },
+            {
+              type: "response.completed",
+              response: {
+                incomplete_details: null,
+                usage: {
+                  input_tokens: 1,
+                  input_tokens_details: null,
+                  output_tokens: 1,
+                  output_tokens_details: null,
+                },
               },
             },
-          },
-        ]
-        const request = waitRequest("/responses", createEventResponse(chunks, true))
+          ]
+          const request = waitRequest("/responses", createEventResponse(chunks, true))
 
-        const resolved = yield* Provider.use.getModel(ProviderID.openai, ModelID.make(model.id))
-        const sessionID = SessionID.make("session-test-native")
-        const agent = {
-          name: "test",
-          mode: "primary",
-          options: {},
-          permission: [{ permission: "*", pattern: "*", action: "allow" }],
-          temperature: 0.2,
-        } satisfies Agent.Info
+          const resolved = yield* Provider.use.getModel(ProviderID.openai, ModelID.make(model.id))
+          const sessionID = SessionID.make("session-test-native")
+          const agent = {
+            name: "test",
+            mode: "primary",
+            options: {},
+            permission: [{ permission: "*", pattern: "*", action: "allow" }],
+            temperature: 0.2,
+          } satisfies Agent.Info
 
-        yield* drainWith(llmLayerWithExecutor(RequestExecutor.defaultLayer, { experimentalNativeLlm: true }), {
-          user: {
-            id: MessageID.make("msg_user-native"),
-            sessionID,
-            role: "user",
-            time: { created: Date.now() },
-            agent: agent.name,
-            model: { providerID: ProviderID.make("openai"), modelID: resolved.id, variant: "high" },
-          } satisfies MessageV2.User,
-          sessionID,
-          model: resolved,
-          agent,
-          system: ["You are a helpful assistant."],
-          messages: [{ role: "user", content: "Hello" }],
-          tools: {},
-        })
+          const loads: number[] = []
+          const provider = Layer.effect(
+            Provider.Service,
+            Effect.gen(function* () {
+              const original = yield* Provider.Service
+              return Provider.Service.of({
+                ...original,
+                getProvider: (id) =>
+                  original.getProvider(id).pipe(
+                    Effect.map((provider) =>
+                      eligible
+                        ? provider
+                        : {
+                            ...provider,
+                            key: undefined,
+                            options: { ...provider.options, apiKey: undefined },
+                          },
+                    ),
+                  ),
+                getLanguage: (model) =>
+                  Effect.gen(function* () {
+                    const start = performance.now()
+                    const language = yield* original.getLanguage(model)
+                    loads.push(performance.now() - start)
+                    return language
+                  }),
+              })
+            }),
+          ).pipe(Layer.provide(Provider.defaultLayer))
+          yield* drainWith(
+            llmLayerWithExecutor(RequestExecutor.defaultLayer, { experimentalNativeLlm: true }, provider),
+            {
+              user: {
+                id: MessageID.make("msg_user-native"),
+                sessionID,
+                role: "user",
+                time: { created: Date.now() },
+                agent: agent.name,
+                model: { providerID: ProviderID.make("openai"), modelID: resolved.id, variant: "high" },
+              } satisfies MessageV2.User,
+              sessionID,
+              model: resolved,
+              agent,
+              system: ["You are a helpful assistant."],
+              messages: [{ role: "user", content: "Hello" }],
+              tools: {},
+            },
+          )
 
-        const capture = yield* Effect.promise(() => request)
-        expect(capture.url.pathname.endsWith("/responses")).toBe(true)
-        expect(capture.headers.get("Authorization")).toBe("Bearer test-openai-key")
-        expect(capture.body.model).toBe(model.id)
-        expect(capture.body.stream).toBe(true)
-        expect((capture.body.reasoning as { effort?: string } | undefined)?.effort).toBe("high")
-        expect(capture.body.include).toEqual(["reasoning.encrypted_content"])
-        expect(JSON.stringify(capture.body.input)).toContain("You are a helpful assistant.")
-        expect(capture.body.input).toContainEqual({ role: "user", content: [{ type: "input_text", text: "Hello" }] })
-      }),
-    { config: () => openAIConfig(loadFixture("openai", "gpt-5.2").model, `${state.server!.url.origin}/v1`) },
-  )
+          const capture = yield* Effect.promise(() => request)
+          expect(capture.url.pathname.endsWith("/responses")).toBe(true)
+          expect(capture.headers.get("Authorization")).toBe("Bearer test-openai-key")
+          expect(capture.body.model).toBe(model.id)
+          expect(capture.body.stream).toBe(true)
+          expect((capture.body.reasoning as { effort?: string } | undefined)?.effort).toBe("high")
+          expect(capture.body.include).toEqual(["reasoning.encrypted_content"])
+          expect(JSON.stringify(capture.body.input)).toContain("You are a helpful assistant.")
+          expect(capture.body.input).toContainEqual({ role: "user", content: [{ type: "input_text", text: "Hello" }] })
+          if (process.env.OPENCODE_BENCHMARK)
+            console.log(JSON.stringify({ benchmark: "native-sdk-loads", eligible, loads }))
+          expect(loads).toHaveLength(eligible ? 0 : 1)
+        }),
+      { config: () => openAIConfig(loadFixture("openai", "gpt-5.2").model, `${state.server!.url.origin}/v1`) },
+    )
+  }
 
   it.instance(
     "uses injected native request executor for tool calls",

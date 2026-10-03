@@ -1630,11 +1630,13 @@ export function Prompt(props: PromptProps) {
                               </span>
                             </text>
                           </Show>
-                          <Show when={streamingMetrics.active() && streamingMetrics.tps() > 0}>
+                          <Show
+                            when={streamingMetrics.active(props.sessionID) && streamingMetrics.tps(props.sessionID) > 0}
+                          >
                             <text fg={theme.textMuted}>·</text>
                             <text>
                               <span style={{ fg: theme.success, bold: true }}>
-                                ~{streamingMetrics.tps()} tok/s
+                                ~{streamingMetrics.tps(props.sessionID)} tok/s
                               </span>
                               <span style={{ fg: theme.textMuted }}> live</span>
                             </text>

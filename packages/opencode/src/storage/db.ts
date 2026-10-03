@@ -93,10 +93,11 @@ let client: Client | undefined
 let loaded = false
 
 export const Client = Object.assign(
-  (flags: DatabaseFlags = readRuntimeFlags()): Client => {
+  (flags?: DatabaseFlags): Client => {
     if (loaded) return client as Client
 
-    const dbPath = getPath(flags)
+    const config = flags ?? readRuntimeFlags()
+    const dbPath = getPath(config)
     log.info("opening database", { path: dbPath })
 
     const db = init(dbPath)
@@ -118,7 +119,7 @@ export const Client = Object.assign(
         count: entries.length,
         mode: typeof OPENCODE_MIGRATIONS !== "undefined" ? "bundled" : "dev",
       })
-      if (flags.skipMigrations) {
+      if (config.skipMigrations) {
         for (const item of entries) {
           item.sql = "select 1;"
         }
@@ -158,7 +159,8 @@ export function use<T>(callback: (trx: TxOrDb) => T): T {
   } catch (err) {
     if (err instanceof LocalContext.NotFound) {
       const effects: (() => void | Promise<void>)[] = []
-      const result = ctx.provide({ effects, tx: Client() }, () => callback(Client()))
+      const db = Client()
+      const result = ctx.provide({ effects, tx: db }, () => callback(db))
       for (const effect of effects) effect()
       return result
     }

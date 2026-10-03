@@ -1,6 +1,5 @@
-import { Effect, Stream } from "effect"
+import { Clock, Effect, Fiber, Stream, type FileSystem } from "effect"
 import os from "os"
-import { createWriteStream } from "node:fs"
 import * as Tool from "./tool"
 import path from "path"
 import * as Log from "@opencode-ai/core/util/log"
@@ -293,6 +292,7 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
       env,
       stdin: "ignore",
       detached: false,
+      forceKillAfter: "3 seconds",
     })
   }
 
@@ -302,6 +302,7 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
     env,
     stdin: "ignore",
     detached: process.platform !== "win32",
+    forceKillAfter: "3 seconds",
   })
 }
 const parser = lazy(async () => {
@@ -439,35 +440,11 @@ export const ShellTool = Tool.define(
       const list: Chunk[] = []
       let used = 0
       let file = ""
-      let sink: ReturnType<typeof createWriteStream> | undefined
+      let sink: FileSystem.File | undefined
       let cut = false
       let expired = false
       let aborted = false
-
-      const closeSink = Effect.fnUntraced(function* () {
-        const stream = sink
-        if (!stream) return
-        sink = undefined
-        if (stream.destroyed || stream.closed) return
-        yield* Effect.promise(
-          () =>
-            new Promise<void>((resolve) => {
-              let settled = false
-              const done = () => {
-                if (settled) return
-                settled = true
-                stream.off("close", done)
-                stream.off("error", done)
-                stream.off("finish", done)
-                resolve()
-              }
-              stream.once("close", done)
-              stream.once("error", done)
-              stream.once("finish", done)
-              stream.end(done)
-            }),
-        ).pipe(Effect.catch(() => Effect.void))
-      })
+      let published = 0
 
       yield* ctx.metadata({
         metadata: {
@@ -478,56 +455,65 @@ export const ShellTool = Tool.define(
 
       const code: number | null = yield* Effect.scoped(
         Effect.gen(function* () {
-          yield* Effect.addFinalizer(closeSink)
           const handle = yield* spawner.spawn(cmd(input.shell, input.command, input.cwd, input.env))
 
-          yield* Effect.forkScoped(
-            Stream.runForEach(Stream.decodeText(handle.all), (chunk) => {
-              const size = Buffer.byteLength(chunk, "utf-8")
-              list.push({ text: chunk, size })
-              used += size
-              while (used > keep && list.length > 1) {
-                const item = list.shift()
-                if (!item) break
-                used -= item.size
-                cut = true
-              }
-
-              last = preview(last + chunk)
-
-              if (file) {
-                sink?.write(chunk)
-              } else {
-                full += chunk
-                if (Buffer.byteLength(full, "utf-8") > limits.maxBytes) {
-                  return trunc.write(full).pipe(
-                    Effect.andThen((next) =>
-                      Effect.sync(() => {
-                        file = next
-                        cut = true
-                        sink = createWriteStream(next, { flags: "a" })
-                        full = ""
-                      }),
-                    ),
-                    Effect.andThen(
-                      ctx.metadata({
-                        metadata: {
-                          output: last,
-                          description: input.description,
-                        },
-                      }),
-                    ),
-                  )
+          const reader = yield* Effect.forkScoped(
+            Stream.runForEach(
+              Stream.decodeText(handle.all),
+              Effect.fnUntraced(function* (chunk) {
+                // A single read can contain megabytes. Bound the retained tail even then.
+                const suffix = chunk.slice(-keep)
+                const buf = Buffer.from(/^[\uDC00-\uDFFF]/.test(suffix) ? suffix.slice(1) : suffix, "utf-8")
+                let start = Math.max(0, buf.length - keep)
+                while (start < buf.length && (buf[start] & 0xc0) === 0x80) start++
+                const text = buf.subarray(start).toString("utf-8")
+                list.push({ text, size: buf.length - start })
+                used += buf.length - start
+                if (text !== chunk) cut = true
+                while (used > keep && list.length > 1) {
+                  const item = list.shift()
+                  if (!item) break
+                  used -= item.size
+                  cut = true
                 }
-              }
 
-              return ctx.metadata({
-                metadata: {
-                  output: last,
-                  description: input.description,
-                },
-              })
-            }),
+                last = chunk.length >= MAX_METADATA_LENGTH ? preview(chunk) : preview(last + chunk)
+
+                if (sink) {
+                  // Await each append instead of accumulating an unbounded writable queue.
+                  yield* sink.writeAll(Buffer.from(chunk, "utf-8"))
+                }
+                if (!file) {
+                  full += chunk
+                  if (Buffer.byteLength(full, "utf-8") > limits.maxBytes) {
+                    file = yield* trunc.write(full)
+                    cut = true
+                    full = ""
+                    sink = yield* fs.open(file, { flag: "a" })
+                  }
+                }
+
+                const now = yield* Clock.currentTimeMillis
+                if (published && now - published < 50) return
+                yield* ctx.metadata({
+                  metadata: {
+                    output: last,
+                    description: input.description,
+                  },
+                })
+                published = yield* Clock.currentTimeMillis
+              }),
+            ).pipe(
+              Effect.andThen(() =>
+                ctx.metadata({
+                  metadata: {
+                    output: last,
+                    description: input.description,
+                  },
+                }),
+              ),
+              Effect.scoped,
+            ),
           )
 
           const abort = Effect.callback<void>((resume) => {
@@ -539,18 +525,22 @@ export const ShellTool = Tool.define(
 
           const timeout = Effect.sleep(`${input.timeout + 100} millis`)
 
-          const exit = yield* Effect.raceAll([
-            handle.exitCode.pipe(Effect.map((code) => ({ kind: "exit" as const, code }))),
+          const exit = yield* Effect.raceAllFirst([
+            Effect.all([handle.exitCode, Fiber.join(reader)], { concurrency: 2 }).pipe(
+              Effect.map(([code]) => ({ kind: "exit" as const, code })),
+            ),
             abort.pipe(Effect.map(() => ({ kind: "abort" as const, code: null }))),
             timeout.pipe(Effect.map(() => ({ kind: "timeout" as const, code: null }))),
           ])
 
           if (exit.kind === "abort") {
             aborted = true
+            yield* Fiber.interrupt(reader)
             yield* handle.kill({ forceKillAfter: "3 seconds" }).pipe(Effect.orDie)
           }
           if (exit.kind === "timeout") {
             expired = true
+            yield* Fiber.interrupt(reader)
             yield* handle.kill({ forceKillAfter: "3 seconds" }).pipe(Effect.orDie)
           }
 

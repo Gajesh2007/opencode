@@ -8,6 +8,56 @@ import { Effect } from "effect"
 import { cliIt } from "../../lib/cli-process"
 
 describe("opencode run (non-interactive subprocess)", () => {
+  cliIt.concurrent(
+    "--yolo-forever warns that attach clients cannot change server permissions",
+    ({ opencode }) =>
+      Effect.gen(function* () {
+        for (const args of [
+          ["attach", "http://127.0.0.1:1", "--fork"],
+          ["run", "--attach", "http://127.0.0.1:1", "--demo"],
+        ]) {
+          // Invalid flag combinations stop before connecting to any server.
+          const result = yield* opencode.spawn([...args, "--yolo-forever"])
+          opencode.expectExit(result, 1)
+          expect(result.stderr).toContain("YOLO FOREVER is local only")
+          expect(result.stderr).toContain("attached server must start with --yolo-forever")
+          expect(result.stdout).not.toContain("Warning: YOLO FOREVER")
+        }
+      }),
+    60_000,
+  )
+
+  cliIt.concurrent(
+    "--yolo-forever reaches the local runtime and child tools without corrupting JSON output",
+    ({ llm, opencode }) =>
+      Effect.gen(function* () {
+        yield* llm.tool("bash", {
+          command: "printenv OPENCODE_YOLO_FOREVER",
+          description: "Read the inherited process flag",
+        })
+        yield* llm.text("inherited flag checked")
+        const result = yield* opencode.run("check the flag", {
+          format: "json",
+          extraArgs: ["--yolo-forever"],
+          env: { OPENCODE_PERMISSION: JSON.stringify({ bash: "deny" }) },
+        })
+        opencode.expectExit(result, 0)
+        expect(result.stderr).toContain("Warning: YOLO FOREVER")
+        expect(result.stderr).toContain("including explicit denies")
+        const events = opencode.parseJsonEvents(result.stdout)
+        expect(events).toContainEqual(
+          expect.objectContaining({
+            type: "tool_use",
+            part: expect.objectContaining({
+              tool: "bash",
+              state: expect.objectContaining({ status: "completed", output: expect.stringContaining("true") }),
+            }),
+          }),
+        )
+      }),
+    60_000,
+  )
+
   // Happy path: prompt completes, output reaches stdout, process exits 0.
   // If this fails, all the others likely will too — debug here first.
   cliIt.concurrent(

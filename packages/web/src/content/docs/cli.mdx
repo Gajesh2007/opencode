@@ -37,6 +37,8 @@ opencode [project]
 | <nobr><code>{"--prompt"}</code></nobr>      |       | Prompt to use                                                           |
 | <nobr><code>{"--model"}</code></nobr>       | `-m`  | Model to use in the form of provider/model                              |
 | <nobr><code>{"--agent"}</code></nobr>       |       | Agent to use                                                            |
+| <nobr><code>{"--dangerously-skip-permissions"}</code></nobr> | | Auto-approve permissions that are not explicitly denied (dangerous!)   |
+| <nobr><code>{"--yolo-forever"}</code></nobr> | | Bypass all app permissions, including explicit denies, for this process and its children (dangerous!) |
 | <nobr><code>{"--port"}</code></nobr>        |       | Port to listen on                                                       |
 | <nobr><code>{"--hostname"}</code></nobr>    |       | Hostname to listen on                                                   |
 | <nobr><code>{"--mdns"}</code></nobr>        |       | Enable mDNS discovery                                                   |
@@ -98,6 +100,8 @@ opencode agent list
 ### attach
 
 Attach a terminal to an already running OpenCode backend server started via `serve` or `web` commands.
+
+`--yolo-forever` on an attach client does not change the server's permissions. For full bypass, including explicit denies, start the server itself with `--yolo-forever`. See [permission bypass](#permission-bypass).
 
 ```bash
 opencode attach [url]
@@ -381,6 +385,7 @@ opencode run --attach http://localhost:4096 "Explain async/await in JavaScript"
 | <nobr><code>{"--variant"}</code></nobr>                      |       | Model variant (provider-specific reasoning effort)                         |
 | <nobr><code>{"--thinking"}</code></nobr>                     |       | Show thinking blocks                                                       |
 | <nobr><code>{"--dangerously-skip-permissions"}</code></nobr> |       | Auto-approve permissions that are not explicitly denied (dangerous!)       |
+| <nobr><code>{"--yolo-forever"}</code></nobr> | | Bypass all app permissions, including explicit denies, for this process and its children; with `--attach`, the server must also enable it |
 
 ---
 
@@ -669,6 +674,28 @@ The opencode CLI takes the following global flags.
 | <nobr><code>{"--print-logs"}</code></nobr> |       | Print logs to stderr                 |
 | <nobr><code>{"--log-level"}</code></nobr>  |       | Log level (DEBUG, INFO, WARN, ERROR) |
 | <nobr><code>{"--pure"}</code></nobr>       |       | Run without external plugins         |
+| <nobr><code>{"--dangerously-skip-permissions"}</code></nobr> | | Auto-approve permissions that are not explicitly denied (dangerous!) |
+| <nobr><code>{"--yolo-forever"}</code></nobr> | | Bypass all app permissions, including explicit denies, for this process and its children (dangerous!) |
+
+### Permission bypass
+
+`--yolo-forever` disables all OpenCode application permission checks, including explicit `deny` rules, external-directory checks, and repeated-tool permission prompts. It applies for the entire process lifetime and is inherited by child processes and agents. Disabled or unavailable tools, task budgets and recursion limits, model constraints, operating-system permissions, sandbox restrictions, and remote authentication still apply.
+
+The flag is supported by the default TUI, `run`, `serve`, `web`, `acp`, and `attach`. It changes no persistent configuration or saved permission rules. Start a new process without the flag or `OPENCODE_YOLO_FOREVER` to restore normal permission checks. An absent flag preserves the inherited environment setting; `--no-yolo-forever` or `--yolo-forever=false` explicitly disables it for the new process and its children.
+
+```bash
+opencode --yolo-forever
+opencode run --yolo-forever "Complete the task"
+opencode serve --yolo-forever
+```
+
+:::caution
+This mode allows destructive actions without approval, even when configuration explicitly denies them. Use it only in trusted environments. Secure servers with `OPENCODE_SERVER_PASSWORD` and restrict network access.
+:::
+
+`attach --yolo-forever` and `run --attach URL --yolo-forever` only enable the flag in the client process. They cannot override the remote server's permission configuration, and auto-accepting a prompt cannot bypass a server-side explicit deny. For full semantics, launch the remote server with `--yolo-forever` or `OPENCODE_YOLO_FOREVER=true`; there is no remote toggle for this mode.
+
+The existing weaker flags are unchanged: `--dangerously-skip-permissions` auto-approves requests that are not explicitly denied, while `--yolo` retains its external-directory prompt with a 30-second timeout and also respects explicit denies.
 
 ---
 
@@ -688,6 +715,8 @@ OpenCode can be configured using environment variables.
 | `OPENCODE_DISABLE_PRUNE`              | boolean | Disable pruning of old data                       |
 | `OPENCODE_DISABLE_TERMINAL_TITLE`     | boolean | Disable automatic terminal title updates          |
 | `OPENCODE_PERMISSION`                 | string  | Inlined json permissions config                   |
+| `OPENCODE_DANGEROUSLY_SKIP_PERMISSIONS`| boolean | Auto-approve permissions that are not explicitly denied |
+| `OPENCODE_YOLO_FOREVER`               | boolean | Bypass all app permission checks, including explicit denies, for this process and its children (`true` or `1`) |
 | `OPENCODE_DISABLE_DEFAULT_PLUGINS`    | boolean | Disable default plugins                           |
 | `OPENCODE_DISABLE_LSP_DOWNLOAD`       | boolean | Disable automatic LSP server downloads            |
 | `OPENCODE_ENABLE_EXPERIMENTAL_MODELS` | boolean | Enable experimental models                        |

@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { Effect } from "effect"
+import { Cause, Effect, Exit } from "effect"
 import * as Stream from "effect/Stream"
 import fs from "fs/promises"
 import os from "os"
@@ -49,6 +49,74 @@ const withRipgrepConfig = <A, E, R>(value: string, effect: Effect.Effect<A, E, R
   )
 
 describe("file.ripgrep", () => {
+  it.live("bounded file traversal does not drop paths and supports early termination", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdir((dir) =>
+        Effect.forEach(
+          Array.from({ length: 512 }, (_, i) => i),
+          (i) => write(path.join(dir, `file-${i}.txt`), ""),
+          { concurrency: 16, discard: true },
+        ),
+      )
+      const rg = yield* Ripgrep.Service
+      const first = yield* rg.files({ cwd: dir }).pipe(Stream.take(1), Stream.runCollect)
+      expect(first.length).toBe(1)
+      const all = yield* collectFiles({ cwd: dir })
+      expect(all.length).toBe(512)
+      expect(new Set(all).size).toBe(512)
+    }),
+  )
+
+  it.live("abort cancels traversal while a slow consumer backs up the queue", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdir((dir) =>
+        Effect.forEach(
+          Array.from({ length: 512 }, (_, i) => i),
+          (i) => write(path.join(dir, `file-${i}.txt`), ""),
+          { concurrency: 16, discard: true },
+        ),
+      )
+      const controller = new AbortController()
+      const reason = new Error("cancel file traversal")
+      const rg = yield* Ripgrep.Service
+      const result = yield* rg.files({ cwd: dir, signal: controller.signal }).pipe(
+        Stream.mapEffect(() =>
+          Effect.sleep("20 millis").pipe(Effect.tap(() => Effect.sync(() => controller.abort(reason)))),
+        ),
+        Stream.runCollect,
+        Effect.timeout("2 seconds"),
+        Effect.exit,
+      )
+      expect(Exit.isFailure(result)).toBe(true)
+      if (Exit.isFailure(result)) expect(Cause.squash(result.cause)).toBe(reason)
+    }),
+  )
+
+  it.live("pre-aborted traversal fails with the original cancellation reason", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdir()
+      const reason = new Error("already cancelled")
+      const result = yield* collectFiles({ cwd: dir, signal: AbortSignal.abort(reason) }).pipe(Effect.exit)
+      expect(Exit.isFailure(result)).toBe(true)
+      if (Exit.isFailure(result)) expect(Cause.squash(result.cause)).toBe(reason)
+    }),
+  )
+
+  it.live("streamed tree retains breadth-first ordering and truncation counts", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdir((dir) =>
+        Effect.gen(function* () {
+          for (const file of ["z/file.txt", "a/nested/file.txt", "a/other.txt", ".opencode/internal.txt", "root.txt"]) {
+            yield* mkdir(path.dirname(path.join(dir, file)))
+            yield* write(path.join(dir, file), "")
+          }
+        }),
+      )
+      expect(yield* Ripgrep.use.tree({ cwd: dir })).toBe("a\nz\na/nested")
+      expect(yield* Ripgrep.use.tree({ cwd: dir, limit: 2 })).toBe("a\nz\n[1 truncated]")
+    }),
+  )
+
   it.live("defaults to include hidden", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdir((dir) =>

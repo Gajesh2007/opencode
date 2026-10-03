@@ -1,5 +1,5 @@
 import { Image } from "@/image/image"
-import { Cause, Deferred, Effect, Exit, Layer, Context, Scope, Schema } from "effect"
+import { Cause, Deferred, Effect, Exit, Layer, Context, Scope, Schema, Semaphore } from "effect"
 import * as Stream from "effect/Stream"
 import { Agent } from "@/agent/agent"
 import { Bus } from "@/bus"
@@ -74,6 +74,7 @@ type ToolCall = {
   sessionID: MessageV2.ToolPart["sessionID"]
   done: Deferred.Deferred<void>
   inputEnded: boolean
+  raw: string
 }
 
 interface ProcessorContext extends Input {
@@ -144,51 +145,59 @@ export const layer = Layer.effect(
       // plus all wildcard PubSub fanout. The TUI's own SDK consumer already
       // batches stored mutations at ~60Hz (`tui/context/sdk.tsx`), so smaller
       // batches don't translate into smoother rendering — they just inflate
-      // bus traffic. We flush a pending bucket whenever:
-      //   1. its accumulated length crosses DELTA_FLUSH_THRESHOLD (so fast
-      //      streams stay perceptually live), or
-      //   2. any non-delta event arrives (so ordering relative to text-end /
-      //      tool-call / finish is preserved), or
-      //   3. processor cleanup runs (so nothing is left in-flight at end of
-      //      stream / interrupt).
-      // Each part has its own bucket keyed by partID so a text part and a
-      // reasoning part streaming concurrently don't share state.
+      // bus traffic. Publish each part's first delta immediately, then flush
+      // at 64 characters, a 16ms tick, or before a non-delta event / cleanup.
+      // Each part has its own bucket keyed by partID so text, reasoning, and
+      // tool input streaming concurrently don't share state.
       type PendingDelta = {
         sessionID: SessionID
         messageID: MessageID
         partID: PartID
-        field: "text"
         delta: string
-      }
+      } & ({ field: "text" } | { field: "state.raw"; callID: string })
       const pendingDeltas = new Map<string, PendingDelta>()
+      const publishedDeltas = new Set<string>()
       const DELTA_FLUSH_THRESHOLD = 64
 
       const flushDelta = Effect.fnUntraced(function* (partID: string) {
         const pending = pendingDeltas.get(partID)
         if (!pending) return
         pendingDeltas.delete(partID)
-        yield* session.updatePartDelta(pending)
-      })
+        yield* session.updatePartDelta({
+          sessionID: pending.sessionID,
+          messageID: pending.messageID,
+          partID: pending.partID,
+          field: pending.field,
+          delta: pending.delta,
+        })
+        // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
+        if (flags.experimentalEventSystem && pending.field === "state.raw") {
+          yield* events.publish(SessionEvent.Tool.Input.Delta, {
+            sessionID: pending.sessionID,
+            callID: pending.callID,
+            delta: pending.delta,
+            timestamp: DateTime.makeUnsafe(Date.now()),
+          })
+        }
+      }, Effect.uninterruptible)
 
       const flushAllDeltas = Effect.fnUntraced(function* () {
-        if (pendingDeltas.size === 0) return
-        const batches = Array.from(pendingDeltas.values())
-        pendingDeltas.clear()
-        for (const batch of batches) yield* session.updatePartDelta(batch)
+        for (const partID of pendingDeltas.keys()) yield* flushDelta(partID)
       })
 
       const queueDelta = Effect.fnUntraced(function* (input: PendingDelta) {
+        if (!input.delta) return
         const existing = pendingDeltas.get(input.partID)
         if (existing) {
           existing.delta += input.delta
           if (existing.delta.length >= DELTA_FLUSH_THRESHOLD) yield* flushDelta(input.partID)
           return
         }
-        if (input.delta.length >= DELTA_FLUSH_THRESHOLD) {
-          yield* session.updatePartDelta(input)
-          return
-        }
         pendingDeltas.set(input.partID, { ...input })
+        if (!publishedDeltas.has(input.partID) || input.delta.length >= DELTA_FLUSH_THRESHOLD) {
+          publishedDeltas.add(input.partID)
+          yield* flushDelta(input.partID)
+        }
       })
 
       const parse = (e: unknown) =>
@@ -343,6 +352,7 @@ export const layer = Layer.effect(
           messageID: part.messageID,
           sessionID: part.sessionID,
           inputEnded: false,
+          raw: "",
         }
         return { call: ctx.toolcalls[input.id], part }
       })
@@ -376,7 +386,12 @@ export const layer = Layer.effect(
         // Flush pending coalesced deltas before any non-delta event so the
         // subscriber sees the final batched text strictly before downstream
         // events (text-end / tool-call / finish) that may depend on it.
-        if (value.type !== "text-delta" && value.type !== "reasoning-delta" && pendingDeltas.size > 0) {
+        if (
+          value.type !== "text-delta" &&
+          value.type !== "reasoning-delta" &&
+          value.type !== "tool-input-delta" &&
+          pendingDeltas.size > 0
+        ) {
           yield* flushAllDeltas()
         }
         switch (value.type) {
@@ -434,23 +449,43 @@ export const layer = Layer.effect(
             yield* ensureToolCall(value)
             return
 
-          case "tool-input-delta":
-            // AI SDK emits a final `tool-call` with the parsed `input`; accumulating
-            // delta fragments into `state.raw` is redundant work for no current consumer.
+          case "tool-input-delta": {
+            const call = ctx.toolcalls[value.id]
+            if (!call || call.inputEnded || !value.text) return
+            call.raw += value.text
+            yield* queueDelta({
+              sessionID: call.sessionID,
+              messageID: call.messageID,
+              partID: call.partID,
+              field: "state.raw",
+              callID: value.id,
+              delta: value.text,
+            })
             return
+          }
 
           case "tool-input-end": {
             const toolCall = yield* ensureToolCall(value)
+            if (toolCall.call.inputEnded) return
+            toolCall.call.inputEnded = true
             // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
             if (flags.experimentalEventSystem) {
               yield* events.publish(SessionEvent.Tool.Input.Ended, {
                 sessionID: ctx.sessionID,
                 callID: value.id,
-                text: "",
+                text: toolCall.call.raw,
                 timestamp: DateTime.makeUnsafe(Date.now()),
               })
             }
-            ctx.toolcalls[value.id] = { ...toolCall.call, inputEnded: true }
+            // Publishing can yield to tool execution; do not overwrite a newer
+            // running state (including task metadata) with the pending snapshot.
+            const current = yield* readToolCall(value.id)
+            if (current?.part.state.status === "pending") {
+              yield* session.updatePart({
+                ...current.part,
+                state: { ...current.part.state, raw: toolCall.call.raw },
+              })
+            }
             return
           }
 
@@ -461,12 +496,13 @@ export const layer = Layer.effect(
             const toolCall = yield* ensureToolCall(value)
             const input = toolInput(value.input)
             if (!toolCall.call.inputEnded) {
+              toolCall.call.inputEnded = true
               // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
               if (flags.experimentalEventSystem) {
                 yield* events.publish(SessionEvent.Tool.Input.Ended, {
                   sessionID: ctx.sessionID,
                   callID: value.id,
-                  text: "",
+                  text: toolCall.call.raw || JSON.stringify(input),
                   timestamp: DateTime.makeUnsafe(Date.now()),
                 })
               }
@@ -836,6 +872,7 @@ export const layer = Layer.effect(
             ...part,
             state: {
               ...part.state,
+              ...(part.state.status === "pending" ? { raw: match.call.raw } : {}),
               status: "error",
               error: "Tool execution aborted",
               metadata: { ...metadata, interrupted: true },
@@ -850,6 +887,8 @@ export const layer = Layer.effect(
 
       const halt = Effect.fn("SessionProcessor.halt")(function* (e: unknown) {
         slog.error("process", { error: errorMessage(e), stack: e instanceof Error ? e.stack : undefined })
+        // V2 closes the active step on failure, so its input deltas must arrive first.
+        yield* flushAllDeltas()
         const error = parse(e)
         if (MessageV2.ContextOverflowError.isInstance(error)) {
           ctx.needsCompaction = true
@@ -888,13 +927,28 @@ export const layer = Layer.effect(
             ctx.reasoningMap = {}
             ctx.streamedAny = false
             ctx.preempted = false
+            publishedDeltas.clear()
             yield* status.set(ctx.sessionID, { type: "busy" })
             const stream = llm.stream(streamInput)
 
-            yield* stream.pipe(
-              Stream.tap((event) => handleEvent(event)),
-              Stream.takeUntil(() => ctx.needsCompaction || ctx.preempted),
-              Stream.runDrain,
+            yield* Effect.gen(function* () {
+              const lock = yield* Semaphore.make(1)
+              yield* Stream.tick("16 millis").pipe(
+                Stream.drop(1),
+                Stream.runForEach(() => lock.withPermit(flushAllDeltas())),
+                Effect.forkScoped,
+              )
+              // Keep provider pulls demand-driven: merging the timer into this
+              // stream can prefetch native tool execution past a stop boundary.
+              yield* stream.pipe(
+                Stream.tap((event) => lock.withPermit(handleEvent(event))),
+                Stream.takeUntil(() => ctx.needsCompaction || ctx.preempted),
+                Stream.runDrain,
+              )
+            }).pipe(
+              // Stop and join the timer before draining, retrying, or cleanup.
+              Effect.scoped,
+              Effect.ensuring(flushAllDeltas()),
             )
 
             // A provider/gateway sometimes ends a turn "successfully" (finish

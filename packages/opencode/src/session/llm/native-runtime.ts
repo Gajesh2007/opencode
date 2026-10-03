@@ -11,6 +11,9 @@ import { FetchHttpClient } from "effect/unstable/http"
 import { tool as nativeTool, ToolFailure, type JsonSchema, type LLMEvent } from "@opencode-ai/llm"
 import type { LLMClientShape } from "@opencode-ai/llm/route"
 import { LLMNative } from "./native-request"
+import * as Continuation from "./continuation"
+
+export const createContinuationState = Continuation.createContinuationState
 
 export type RuntimeStatus =
   | { readonly type: "supported"; readonly apiKey: string; readonly baseURL?: string }
@@ -20,6 +23,9 @@ export type StreamResult =
   | { readonly type: "unsupported"; readonly reason: string }
 
 type StreamInput = {
+  readonly continuation?: Continuation.ContinuationState
+  readonly sessionID?: string
+  readonly previousResponseId?: string
   readonly model: Provider.Model
   readonly provider: Provider.Info
   readonly auth: Auth.Info | undefined
@@ -84,23 +90,53 @@ export function stream(input: StreamInput): StreamResult {
   // OpenAI's official wire field names, so this is identity, not translation
   // — if a field ever needs to differ between the two surfaces, the
   // translation belongs here, not split across both packages.
-  const stream = input.llmClient.stream({
-    request: LLMNative.request({
-      model: input.model,
-      apiKey: current.apiKey,
-      baseURL: current.baseURL,
-      messages: ProviderTransform.message(input.messages, input.model, input.providerOptions ?? {}),
-      toolChoice: input.toolChoice,
-      temperature: input.temperature,
-      topP: input.topP,
-      topK: input.topK,
-      maxOutputTokens: input.maxOutputTokens,
-      providerOptions: ProviderTransform.providerOptions(input.model, input.providerOptions ?? {}),
-      headers: { ...providerHeaders(input.provider.options.headers), ...input.headers },
-      transport: resolveTransport(input),
-    }),
-    tools: nativeTools(input.tools, input),
+  const providerOptions = ProviderTransform.providerOptions(input.model, input.providerOptions ?? {})
+  if (providerOptions.openai) {
+    providerOptions.openai = { ...providerOptions.openai }
+    delete providerOptions.openai.previousResponseId
+  }
+  const request = LLMNative.request({
+    model: input.model,
+    apiKey: current.apiKey,
+    baseURL: current.baseURL,
+    messages: ProviderTransform.message(input.messages, input.model, input.providerOptions ?? {}),
+    toolChoice: input.toolChoice,
+    temperature: input.temperature,
+    topP: input.topP,
+    topK: input.topK,
+    maxOutputTokens: input.maxOutputTokens,
+    providerOptions,
+    headers: { ...providerHeaders(input.provider.options.headers), ...input.headers },
+    transport: resolveTransport(input),
   })
+  const tools = nativeTools(input.tools, input)
+  const run = (request: ReturnType<typeof LLMNative.request>) => input.llmClient.stream({ request, tools })
+  const enabled = (input.model.options.responsesContinuation ?? input.provider.options.responsesContinuation) === true
+  const stream =
+    enabled &&
+    input.continuation &&
+    input.sessionID &&
+    input.model.providerID === ProviderID.openai &&
+    input.model.api.npm === "@ai-sdk/openai"
+      ? Continuation.stream({
+          state: input.continuation,
+          sessionID: input.sessionID,
+          previousResponseId: input.previousResponseId,
+          owner: Continuation.fingerprint({
+            model: input.model.api,
+            provider: input.model.providerID,
+            apiKey: current.apiKey,
+            auth: input.auth,
+            baseURL: current.baseURL,
+            headers: request.model.route.defaults.headers,
+            transport: resolveTransport(input),
+            system: request.system,
+            instructions: request.providerOptions?.openai?.instructions,
+          }),
+          request,
+          run,
+        })
+      : run(request)
 
   return {
     ...current,

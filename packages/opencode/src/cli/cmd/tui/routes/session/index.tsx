@@ -96,6 +96,8 @@ import { SessionRetry } from "@/session/retry"
 import { getRevertDiffFiles } from "../../util/revert-diff"
 import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut, useOpencodeKeymap } from "../../keymap"
 import { PathFormatterProvider, usePathFormatter } from "../../context/path-format"
+import { parseFileToolInput } from "../../util/tool-input"
+import { ToolCode } from "../../component/tool-code"
 
 addDefaultParsers(parsers.parsers)
 
@@ -1669,6 +1671,11 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
 function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMessage }) {
   const ctx = use()
   const sync = useSync()
+  const parsedInput = createMemo(() =>
+    props.part.state.status === "pending" && ["write", "edit", "apply_patch"].includes(props.part.tool)
+      ? { ...props.part.state.input, ...parseFileToolInput(props.part.state.raw) }
+      : props.part.state.input,
+  )
 
   // Hide tool if showDetails is false and tool completed successfully
   const shouldHide = createMemo(() => {
@@ -1682,7 +1689,7 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
       return props.part.state.status === "pending" ? {} : (props.part.state.metadata ?? {})
     },
     get input() {
-      return props.part.state.input ?? {}
+      return parsedInput()
     },
     get output() {
       return props.part.state.status === "completed" ? props.part.state.output : undefined
@@ -2009,7 +2016,6 @@ function Shell(props: ToolProps<typeof ShellTool>) {
 }
 
 function Write(props: ToolProps<typeof WriteTool>) {
-  const { theme, syntax } = useTheme()
   const pathFormatter = usePathFormatter()
   const code = createMemo(() => {
     if (!props.input.content) return ""
@@ -2018,17 +2024,20 @@ function Write(props: ToolProps<typeof WriteTool>) {
 
   return (
     <Switch>
-      <Match when={props.metadata.diagnostics !== undefined}>
-        <BlockTool title={"# Wrote " + pathFormatter.format(props.input.filePath)} part={props.part}>
-          <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
-            <code
-              conceal={false}
-              fg={theme.text}
-              filetype={filetype(props.input.filePath!)}
-              syntaxStyle={syntax()}
-              content={code()}
-            />
-          </line_number>
+      <Match when={code() || props.metadata.diagnostics !== undefined}>
+        <BlockTool
+          title={
+            (props.part.state.status === "completed" ? "# Wrote " : "# Write ") +
+            pathFormatter.format(props.input.filePath)
+          }
+          part={props.part}
+          spinner={props.part.state.status === "pending" || props.part.state.status === "running"}
+        >
+          <ToolCode
+            content={code()}
+            filetype={filetype(props.input.filePath)}
+            streaming={props.part.state.status === "pending"}
+          />
           <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
         </BlockTool>
       </Match>
@@ -2450,6 +2459,19 @@ function Edit(props: ToolProps<typeof EditTool>) {
           <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
         </BlockTool>
       </Match>
+      <Match when={props.input.newString || props.input.oldString}>
+        <BlockTool
+          title={"# Edit " + pathFormatter.format(props.input.filePath)}
+          part={props.part}
+          spinner={props.part.state.status === "pending" || props.part.state.status === "running"}
+        >
+          <ToolCode
+            content={props.input.newString ?? props.input.oldString ?? ""}
+            filetype={ft()}
+            streaming={props.part.state.status === "pending"}
+          />
+        </BlockTool>
+      </Match>
       <Match when={true}>
         <InlineTool icon="←" pending="Preparing edit..." complete={props.input.filePath} part={props.part}>
           Edit {pathFormatter.format(props.input.filePath)} {input({ replaceAll: props.input.replaceAll })}
@@ -2525,6 +2547,19 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
             </BlockTool>
           )}
         </For>
+      </Match>
+      <Match when={props.input.patchText}>
+        <BlockTool
+          title="# Patch"
+          part={props.part}
+          spinner={props.part.state.status === "pending" || props.part.state.status === "running"}
+        >
+          <ToolCode
+            content={props.input.patchText ?? ""}
+            filetype="diff"
+            streaming={props.part.state.status === "pending"}
+          />
+        </BlockTool>
       </Match>
       <Match when={true}>
         <InlineTool icon="%" pending="Preparing patch..." complete={false} part={props.part}>

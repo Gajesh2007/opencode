@@ -30,6 +30,8 @@ import type {
 } from "@opencode-ai/sdk/v2"
 import { createEffect, createMemo, createSignal, For, Match, Show, Switch } from "solid-js"
 import { collapseToolOutput } from "../../util/collapse-tool-output"
+import { parseToolInput } from "../../util/tool-input"
+import { ToolCode } from "../../component/tool-code"
 
 const id = "internal:session-v2-debug"
 const route = "session.v2.messages"
@@ -311,13 +313,14 @@ function AssistantMessage(props: {
     return `${props.message.model.providerID}/${props.message.model.id}${variant}`
   })
   const final = createMemo(() => props.message.finish && !["tool-calls", "unknown"].includes(props.message.finish))
-  // Output tokens per second. Uses the same `duration` denominator as the
+  // Generated tokens per second, including reasoning and tool arguments.
+  // Uses the same `duration` denominator as the
   // displayed elapsed time, so the number reconciles with "Xs" next to it.
   // Hidden when we don't have output tokens or a finished duration yet
   // (streaming mid-flight) — otherwise we'd show a noisy TPS that climbs.
   const tps = createMemo(() => {
     const ms = duration()
-    const out = props.message.tokens?.output ?? 0
+    const out = (props.message.tokens?.output ?? 0) + (props.message.tokens?.reasoning ?? 0)
     if (!ms || out === 0 || !props.message.time.completed) return undefined
     return Math.round(out / (ms / 1000))
   })
@@ -338,7 +341,11 @@ function AssistantMessage(props: {
               />
             </Match>
             <Match when={part.type === "tool"}>
-              <AssistantTool part={part as SessionMessageAssistantTool} sessionID={props.sessionID} />
+              <AssistantTool
+                part={part as SessionMessageAssistantTool}
+                sessionID={props.sessionID}
+                completed={props.message.time.completed !== undefined}
+              />
             </Match>
           </Switch>
         )}
@@ -465,7 +472,7 @@ function CollapsedReasoningText(props: { title: string | null }) {
   )
 }
 
-function AssistantTool(props: { part: SessionMessageAssistantTool; sessionID: string }) {
+function AssistantTool(props: { part: SessionMessageAssistantTool; sessionID: string; completed: boolean }) {
   const input = createMemo(() => toolInputRecord(props.part.state.input))
   const toolprops = {
     get input() {
@@ -476,6 +483,9 @@ function AssistantTool(props: { part: SessionMessageAssistantTool; sessionID: st
     },
     get output() {
       return props.part.state.status === "pending" ? undefined : toolOutput(props.part.state.content)
+    },
+    get active() {
+      return !props.completed && (props.part.state.status === "pending" || props.part.state.status === "running")
     },
     sessionID: props.sessionID,
     part: props.part,
@@ -534,6 +544,7 @@ type ToolProps = {
   output?: string
   sessionID: string
   part: SessionMessageAssistantTool
+  active: boolean
 }
 
 function GenericTool(props: ToolProps) {
@@ -843,22 +854,21 @@ function WebSearch(props: ToolProps) {
 }
 
 function Write(props: ToolProps) {
-  const { theme, syntax } = useTheme()
   const filePath = createMemo(() => stringValue(props.input.filePath) ?? "")
   const content = createMemo(() => stringValue(props.input.content) ?? "")
   return (
     <Switch>
-      <Match when={content() && props.part.state.status === "completed"}>
-        <BlockTool title={"# Wrote " + normalizePath(filePath())} part={props.part}>
-          <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
-            <code
-              conceal={false}
-              fg={theme.text}
-              filetype={filetype(filePath())}
-              syntaxStyle={syntax()}
-              content={content()}
-            />
-          </line_number>
+      <Match when={content()}>
+        <BlockTool
+          title={(props.part.state.status === "completed" ? "# Wrote " : "# Write ") + normalizePath(filePath())}
+          part={props.part}
+          spinner={props.active}
+        >
+          <ToolCode
+            content={content()}
+            filetype={filetype(filePath())}
+            streaming={props.active && props.part.state.status === "pending"}
+          />
           <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filePath()} />
         </BlockTool>
       </Match>
@@ -905,6 +915,15 @@ function Edit(props: ToolProps) {
             <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filePath()} />
           </BlockTool>
         )}
+      </Match>
+      <Match when={stringValue(props.input.newString) || stringValue(props.input.oldString)}>
+        <BlockTool title={"# Edit " + normalizePath(filePath())} part={props.part} spinner={props.active}>
+          <ToolCode
+            content={stringValue(props.input.newString) ?? stringValue(props.input.oldString) ?? ""}
+            filetype={filetype(filePath())}
+            streaming={props.active && props.part.state.status === "pending"}
+          />
+        </BlockTool>
       </Match>
       <Match when={true}>
         <InlineTool icon="←" pending="Preparing edit..." complete={filePath()} part={props.part}>
@@ -968,6 +987,15 @@ function ApplyPatch(props: ToolProps) {
             </BlockTool>
           )}
         </For>
+      </Match>
+      <Match when={stringValue(props.input.patchText)}>
+        <BlockTool title="# Patch" part={props.part} spinner={props.active}>
+          <ToolCode
+            content={stringValue(props.input.patchText) ?? ""}
+            filetype="diff"
+            streaming={props.active && props.part.state.status === "pending"}
+          />
+        </BlockTool>
       </Match>
       <Match when={true}>
         <InlineTool icon="%" pending="Preparing patch..." complete={false} part={props.part}>
@@ -1095,7 +1123,7 @@ function toolOutput(content?: Array<ToolTextContent | ToolFileContent>) {
 }
 
 function toolInputRecord(input: string | Record<string, unknown>) {
-  if (typeof input === "string") return {}
+  if (typeof input === "string") return parseToolInput(input)
   return input
 }
 

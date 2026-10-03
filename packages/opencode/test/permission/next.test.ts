@@ -10,6 +10,9 @@ import { InstanceStore } from "../../src/project/instance-store"
 import { TestInstance, tmpdirScoped } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { MessageID, SessionID } from "../../src/session/schema"
+import { Flag } from "@opencode-ai/core/flag/flag"
+import { evaluate } from "../../src/permission/evaluate"
+import { deriveSubagentSessionPermission } from "../../src/agent/subagent-permissions"
 
 const bus = Bus.layer
 const noopBootstrap = Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void }))
@@ -20,6 +23,21 @@ const env = Layer.mergeAll(
   InstanceStore.defaultLayer.pipe(Layer.provide(noopBootstrap)),
 )
 const it = testEffect(env)
+
+const setEnv = (name: string, value: string | undefined) =>
+  Effect.acquireRelease(
+    Effect.sync(() => {
+      const previous = process.env[name]
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+      return previous
+    }),
+    (previous) =>
+      Effect.sync(() => {
+        if (previous === undefined) delete process.env[name]
+        else process.env[name] = previous
+      }),
+  )
 
 const rejectAll = (message?: string) =>
   Effect.gen(function* () {
@@ -76,6 +94,106 @@ const list = () =>
   })
 
 // fromConfig tests
+
+for (const value of ["true", "TRUE", "1"]) {
+  it.live(`yolo-forever ${value} bypasses deny and ask without instance state`, () =>
+    Effect.gen(function* () {
+      yield* setEnv("OPENCODE_YOLO_FOREVER", value)
+      expect(Flag.OPENCODE_YOLO_FOREVER).toBe(true)
+      const ruleset = deriveSubagentSessionPermission({
+        parentSessionPermission: Permission.fromConfig({ "*": "deny", external_directory: { "/outside/*": "deny" } }),
+        parentAgent: {
+          name: "plan",
+          mode: "primary",
+          options: {},
+          permission: Permission.fromConfig({ edit: "deny" }),
+        },
+        subagent: { name: "child", mode: "subagent", options: {}, permission: [] },
+      })
+      const before = JSON.stringify(ruleset)
+      for (const [permission, pattern] of [
+        ["bash", "rm -rf /outside"],
+        ["external_directory", "/outside/secrets"],
+        ["edit", "/outside/secrets"],
+        ["task", "child"],
+        ["spawn_agent", "grandchild"],
+        ["skill", "restricted-skill"],
+        ["workflow", "*"],
+      ]) {
+        expect(Permission.evaluate(permission, pattern, ruleset).action).toBe("allow")
+        expect(evaluate(permission, pattern, ruleset).action).toBe("allow")
+        yield* ask({
+          sessionID: SessionID.make("session_yolo_forever"),
+          permission,
+          patterns: [pattern],
+          metadata: {},
+          always: [pattern],
+          ruleset,
+        })
+      }
+      yield* ask({
+        sessionID: SessionID.make("session_yolo_forever_ask"),
+        permission: "external_directory",
+        patterns: ["/outside"],
+        metadata: {},
+        always: [],
+        ruleset: [],
+      })
+      expect(Permission.disabled(["bash", "write", "apply_patch", "task", "spawn_agent", "skill"], ruleset).size).toBe(
+        0,
+      )
+      expect(JSON.stringify(ruleset)).toBe(before)
+    }),
+  )
+}
+
+for (const value of [undefined, "false", "0", "yes", "on"]) {
+  it.instance(`yolo-forever ${value ?? "unset"} preserves explicit denies`, () =>
+    Effect.gen(function* () {
+      yield* setEnv("OPENCODE_YOLO_FOREVER", value)
+      expect(Flag.OPENCODE_YOLO_FOREVER).toBe(false)
+      const ruleset = Permission.fromConfig({ "*": "deny" })
+      expect(Permission.evaluate("external_directory", "/outside", ruleset).action).toBe("deny")
+      expect(evaluate("task", "child", ruleset).action).toBe("deny")
+      expect(Permission.disabled(["write", "apply_patch", "task"], ruleset)).toEqual(
+        new Set(["write", "apply_patch", "task"]),
+      )
+      expect(
+        yield* fail(
+          ask({
+            sessionID: SessionID.make("session_yolo_forever_off"),
+            permission: "external_directory",
+            patterns: ["/outside"],
+            metadata: {},
+            always: [],
+            ruleset,
+          }),
+        ),
+      ).toBeInstanceOf(Permission.DeniedError)
+    }),
+  )
+}
+
+it.instance("yolo still preserves explicit denies and asks for external directories", () =>
+  Effect.gen(function* () {
+    yield* setEnv("OPENCODE_YOLO_FOREVER", undefined)
+    yield* setEnv("OPENCODE_DANGEROUSLY_SKIP_PERMISSIONS", undefined)
+    yield* setEnv("OPENCODE_YOLO", "true")
+    const input = {
+      sessionID: SessionID.make("session_yolo"),
+      permission: "external_directory",
+      patterns: ["/outside"],
+      metadata: {},
+      always: [],
+      ruleset: Permission.fromConfig({ external_directory: "deny" }),
+    }
+    expect(yield* fail(ask(input))).toBeInstanceOf(Permission.DeniedError)
+    const fiber = yield* ask({ ...input, ruleset: [] }).pipe(Effect.forkScoped)
+    const pending = yield* waitForPending(1)
+    yield* reply({ requestID: pending[0].id, reply: "once" })
+    yield* Fiber.join(fiber)
+  }),
+)
 
 test("fromConfig - string value becomes wildcard rule", () => {
   const result = Permission.fromConfig({ bash: "allow" })
@@ -1157,6 +1275,89 @@ it.instance(
       const exit = yield* Fiber.await(fiber)
       expect(Exit.isFailure(exit)).toBe(true)
       if (Exit.isFailure(exit)) expect(Cause.squash(exit.cause)).toBeInstanceOf(Permission.RejectedError)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "ask - auto-approves when OPENCODE_DANGEROUSLY_SKIP_PERMISSIONS is set",
+  () =>
+    Effect.gen(function* () {
+      process.env.OPENCODE_DANGEROUSLY_SKIP_PERMISSIONS = "true"
+      try {
+        const fiber = yield* ask({
+          id: PermissionID.make("per_skip"),
+          sessionID: SessionID.make("session_skip"),
+          permission: "bash",
+          patterns: ["ls"],
+          metadata: {},
+          always: [],
+          ruleset: [{ permission: "bash", pattern: "*", action: "ask" }],
+        }).pipe(Effect.forkScoped)
+
+        const exit = yield* Fiber.await(fiber)
+        expect(Exit.isSuccess(exit)).toBe(true)
+
+        const pending = yield* list()
+        expect(pending).toHaveLength(0)
+      } finally {
+        delete process.env.OPENCODE_DANGEROUSLY_SKIP_PERMISSIONS
+      }
+    }),
+  { git: true },
+)
+
+it.instance(
+  "ask - throws DeniedError when action is deny even if OPENCODE_DANGEROUSLY_SKIP_PERMISSIONS is set",
+  () =>
+    Effect.gen(function* () {
+      process.env.OPENCODE_DANGEROUSLY_SKIP_PERMISSIONS = "true"
+      try {
+        const exit = yield* ask({
+          id: PermissionID.make("per_deny_skip"),
+          sessionID: SessionID.make("session_deny_skip"),
+          permission: "bash",
+          patterns: ["rm -rf /"],
+          metadata: {},
+          always: [],
+          ruleset: [{ permission: "bash", pattern: "*", action: "deny" }],
+        }).pipe(Effect.exit)
+
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) {
+          expect(Cause.squash(exit.cause)).toBeInstanceOf(Permission.DeniedError)
+        }
+      } finally {
+        delete process.env.OPENCODE_DANGEROUSLY_SKIP_PERMISSIONS
+      }
+    }),
+  { git: true },
+)
+
+it.instance(
+  "ask - auto-approves external_directory when OPENCODE_DANGEROUSLY_SKIP_PERMISSIONS is set",
+  () =>
+    Effect.gen(function* () {
+      process.env.OPENCODE_DANGEROUSLY_SKIP_PERMISSIONS = "true"
+      try {
+        const fiber = yield* ask({
+          id: PermissionID.make("per_ext_skip"),
+          sessionID: SessionID.make("session_ext_skip"),
+          permission: "external_directory",
+          patterns: ["/tmp/outside"],
+          metadata: {},
+          always: [],
+          ruleset: [],
+        }).pipe(Effect.forkScoped)
+
+        const exit = yield* Fiber.await(fiber)
+        expect(Exit.isSuccess(exit)).toBe(true)
+
+        const pending = yield* list()
+        expect(pending).toHaveLength(0)
+      } finally {
+        delete process.env.OPENCODE_DANGEROUSLY_SKIP_PERMISSIONS
+      }
     }),
   { git: true },
 )

@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { Effect, Schema, Stream } from "effect"
+import { Deferred, Effect, Schema, Stream } from "effect"
 import { GenerationOptions, LLM, LLMEvent, LLMRequest, LLMResponse, ToolChoice } from "../src"
 import { Auth, LLMClient } from "../src/route"
 import * as AnthropicMessages from "../src/protocols/anthropic-messages"
@@ -45,6 +45,113 @@ const schema_only_weather = tool({
 })
 
 describe("LLMClient tools", () => {
+  it.live("emits a completed tool without waiting for a pending sibling and interrupts on early exit", () =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>()
+      let released = false
+      const tools = {
+        slow: tool({
+          description: "Wait indefinitely.",
+          jsonSchema: { type: "object" },
+          execute: () =>
+            Effect.gen(function* () {
+              yield* Deferred.succeed(started, undefined)
+              return yield* Effect.never
+            }).pipe(Effect.ensuring(Effect.sync(() => (released = true)))),
+        }),
+        fast: tool({
+          description: "Complete after the sibling starts.",
+          jsonSchema: { type: "object" },
+          execute: () => Deferred.await(started).pipe(Effect.as("done")),
+        }),
+      }
+      const events = yield* ToolRuntime.stream({
+        request: baseRequest,
+        tools,
+        concurrency: 2,
+        stream: () =>
+          Stream.make(
+            LLMEvent.toolCall({ id: "slow", name: "slow", input: {} }),
+            LLMEvent.toolCall({ id: "fast", name: "fast", input: {} }),
+            LLMEvent.finish({ reason: "tool-calls" }),
+          ),
+      }).pipe(Stream.filter(LLMEvent.is.toolResult), Stream.take(1), Stream.runCollect, Effect.timeout("1 second"))
+
+      expect(events.map((event) => event.id)).toEqual(["fast"])
+      expect(released).toBe(true)
+    }),
+  )
+
+  it.live("streams tool results in completion order but keeps follow-up messages in call order", () =>
+    Effect.gen(function* () {
+      const completed = yield* Deferred.make<void>()
+      const requests: LLMRequest[] = []
+      const tools = {
+        slow: tool({
+          description: "Complete last.",
+          jsonSchema: { type: "object" },
+          execute: () => Deferred.await(completed).pipe(Effect.andThen(Effect.sleep("10 millis")), Effect.as("slow")),
+        }),
+        fast: tool({
+          description: "Complete first.",
+          jsonSchema: { type: "object" },
+          execute: () => Deferred.succeed(completed, undefined).pipe(Effect.as("fast")),
+        }),
+      }
+      const events = yield* ToolRuntime.stream({
+        request: baseRequest,
+        tools,
+        stopWhen: ToolRuntime.stepCountIs(2),
+        stream: (request) => {
+          requests.push(request)
+          return requests.length === 1
+            ? Stream.make(
+                LLMEvent.textDelta({ id: "text", text: "Tools:" }),
+                LLMEvent.toolCall({ id: "slow", name: "slow", input: {} }),
+                LLMEvent.toolCall({ id: "fast", name: "fast", input: {} }),
+                LLMEvent.finish({ reason: "tool-calls" }),
+              )
+            : Stream.make(LLMEvent.finish({ reason: "stop" }))
+        },
+      }).pipe(Stream.runCollect)
+
+      expect(events.filter(LLMEvent.is.toolResult).map((event) => event.id)).toEqual(["fast", "slow"])
+      expect(requests[1]?.messages.slice(1)).toMatchObject([
+        { role: "assistant", content: [{ type: "text", text: "Tools:" }, { id: "slow" }, { id: "fast" }] },
+        { role: "tool", content: [{ id: "slow" }] },
+        { role: "tool", content: [{ id: "fast" }] },
+      ])
+      expect(events.filter(LLMEvent.is.finish)).toHaveLength(1)
+    }),
+  )
+
+  it.effect("respects inherited sequential tool concurrency", () =>
+    Effect.gen(function* () {
+      const order: string[] = []
+      const tools = {
+        record: tool({
+          description: "Record execution order.",
+          jsonSchema: { type: "string" },
+          execute: (input) => Effect.sync(() => order.push(String(input))),
+        }),
+      }
+      const events = yield* ToolRuntime.stream({
+        request: baseRequest,
+        tools,
+        concurrency: "inherit",
+        stream: () =>
+          Stream.make(
+            LLMEvent.toolCall({ id: "first", name: "record", input: "first" }),
+            LLMEvent.toolCall({ id: "second", name: "record", input: "second" }),
+            LLMEvent.finish({ reason: "tool-calls" }),
+          ),
+      }).pipe(Stream.runCollect, Effect.withConcurrency(1))
+
+      expect(order).toEqual(["first", "second"])
+      expect(events.filter(LLMEvent.is.toolResult).map((event) => event.id)).toEqual(["first", "second"])
+    }),
+  )
+
   it.effect("uses the registered model route when adding runtime tools", () =>
     Effect.gen(function* () {
       const layer = scriptedResponses([

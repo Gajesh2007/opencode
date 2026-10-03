@@ -142,6 +142,17 @@ describe("ModelsDev.injectModels", () => {
     },
   })
 
+  const withPoolside = (models: Record<string, ModelsDev.Model> = {}): Record<string, ModelsDev.Provider> => ({
+    poolside: {
+      id: "poolside",
+      name: "Poolside",
+      env: ["POOLSIDE_API_KEY"],
+      api: "https://inference.poolside.ai/v1",
+      npm: "@ai-sdk/openai-compatible",
+      models,
+    },
+  })
+
   const withSakana = (models: Record<string, ModelsDev.Model> = {}): Record<string, ModelsDev.Provider> => ({
     sakana: {
       id: "sakana",
@@ -186,6 +197,19 @@ describe("ModelsDev.injectModels", () => {
       expect(terra?.cost?.output).toBe(15)
       expect(luna?.cost?.input).toBe(1)
       expect(result.openrouter.models["openai/gpt-5.6-sol-pro"]).toBeUndefined()
+    }),
+  )
+
+  it.live("adds Laguna S 2.1 Preview to Poolside when missing", () =>
+    Effect.sync(() => {
+      const result = ModelsDev.injectModels(withPoolside())
+      const model = result.poolside.models["poolside/laguna-s-2.1-preview"]
+      expect(model?.name).toBe("Laguna S 2.1 Preview")
+      expect(model?.reasoning).toBe(true)
+      expect(model?.tool_call).toBe(true)
+      expect(model?.interleaved).toEqual({ field: "reasoning_content" })
+      expect(model?.limit.context).toBe(1_000_000)
+      expect(model?.limit.output).toBe(32_768)
     }),
   )
 

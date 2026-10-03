@@ -54,19 +54,21 @@ export const GlobTool = Tool.define(
           const limit = 100
           let truncated = false
           const files = yield* rg.files({ cwd: search, glob: [params.pattern], signal: ctx.abort }).pipe(
-            Stream.mapEffect((file) =>
-              Effect.gen(function* () {
-                const full = path.resolve(search, file)
-                const info = yield* fs.stat(full).pipe(Effect.catch(() => Effect.succeed(undefined)))
-                const mtime =
-                  info?.mtime.pipe(
-                    Option.map((date) => date.getTime()),
-                    Option.getOrElse(() => 0),
-                  ) ?? 0
-                return { path: full, mtime }
-              }),
-            ),
             Stream.take(limit + 1),
+            Stream.mapEffect(
+              (file) =>
+                Effect.gen(function* () {
+                  const full = path.resolve(search, file)
+                  const info = yield* fs.stat(full).pipe(Effect.catch(() => Effect.succeed(undefined)))
+                  const mtime =
+                    info?.mtime.pipe(
+                      Option.map((date) => date.getTime()),
+                      Option.getOrElse(() => 0),
+                    ) ?? 0
+                  return { path: full, mtime }
+                }),
+              { concurrency: 16 },
+            ),
             Stream.runCollect,
             Effect.map((chunk) => [...chunk]),
           )

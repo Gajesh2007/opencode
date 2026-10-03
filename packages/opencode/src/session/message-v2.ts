@@ -620,8 +620,8 @@ const part = (row: typeof PartTable.$inferSelect) =>
 const older = (row: Cursor) =>
   or(lt(MessageTable.time_created, row.time), and(eq(MessageTable.time_created, row.time), lt(MessageTable.id, row.id)))
 
-function hydrate(rows: (typeof MessageTable.$inferSelect)[]) {
-  const ids = rows.map((row) => row.id)
+function hydrate(messages: Info[]) {
+  const ids = messages.map((message) => message.id)
   const partByMessage = new Map<string, Part[]>()
   if (ids.length > 0) {
     const partRows = Database.use((db) =>
@@ -640,10 +640,24 @@ function hydrate(rows: (typeof MessageTable.$inferSelect)[]) {
     }
   }
 
-  return rows.map((row) => ({
-    info: info(row),
-    parts: partByMessage.get(row.id) ?? [],
+  return messages.map((info) => ({
+    info,
+    parts: partByMessage.get(info.id) ?? [],
   }))
+}
+
+function readPage(sessionID: SessionID, limit: number, before?: Cursor) {
+  return Database.use((db) =>
+    db
+      .select()
+      .from(MessageTable)
+      .where(
+        before ? and(eq(MessageTable.session_id, sessionID), older(before)) : eq(MessageTable.session_id, sessionID),
+      )
+      .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
+      .limit(limit)
+      .all(),
+  )
 }
 
 function providerMeta(metadata: Record<string, any> | undefined) {
@@ -951,18 +965,7 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
   before?: string
 }) {
   const before = input.before ? cursor.decode(input.before) : undefined
-  const where = before
-    ? and(eq(MessageTable.session_id, input.sessionID), older(before))
-    : eq(MessageTable.session_id, input.sessionID)
-  const rows = Database.use((db) =>
-    db
-      .select()
-      .from(MessageTable)
-      .where(where)
-      .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
-      .limit(input.limit + 1)
-      .all(),
-  )
+  const rows = readPage(input.sessionID, input.limit + 1, before)
   if (rows.length === 0) {
     const row = Database.use((db) =>
       db.select({ id: SessionTable.id }).from(SessionTable).where(eq(SessionTable.id, input.sessionID)).get(),
@@ -976,7 +979,7 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
 
   const more = rows.length > input.limit
   const slice = more ? rows.slice(0, input.limit) : rows
-  const items = hydrate(slice)
+  const items = hydrate(slice.map(info))
   items.reverse()
   const tail = slice.at(-1)
   return {
@@ -1090,8 +1093,39 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
 }
 
 export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: SessionID) {
-  return filterCompacted(stream(sessionID))
+  const messages = filterCompacted(compactionHistory(sessionID))
+  const result: WithParts[] = []
+  // Bound SQL parameter counts without reparsing the message metadata already read.
+  for (let offset = 0; offset < messages.length; offset += 500) {
+    result.push(...hydrate(messages.slice(offset, offset + 500).map((message) => message.info)))
+  }
+  return result
 })
+
+function* compactionHistory(sessionID: SessionID) {
+  const size = 50
+  const completed = new Set<MessageID>()
+  let before: Cursor | undefined
+  while (true) {
+    const rows = readPage(sessionID, size, before)
+    if (rows.length === 0) return
+    for (const row of rows) {
+      const message = info(row)
+      if (message.role === "assistant" && message.summary && message.finish && !message.error) {
+        completed.add(message.parentID)
+      }
+      // Only summary parents can mark a replay boundary. Defer all other parts
+      // until filterCompacted has selected the history, including its retained tail.
+      yield {
+        info: message,
+        parts: message.role === "user" && completed.has(message.id) ? hydrate([message])[0].parts : [],
+      }
+    }
+    if (rows.length < size) return
+    const tail = rows[rows.length - 1]
+    before = { id: tail.id, time: tail.time_created }
+  }
+}
 
 // filterCompacted reorders messages for model consumption
 // ([compaction-user, summary, ...retained tail..., continue-user]), so array

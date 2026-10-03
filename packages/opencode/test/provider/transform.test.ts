@@ -380,6 +380,46 @@ describe("ProviderTransform.options - gpt-5 reasoningEffort", () => {
   })
 })
 
+describe("ProviderTransform.options - anthropic adaptive thinking", () => {
+  const createModel = (apiId: string) =>
+    ({
+      id: `anthropic/${apiId}`,
+      providerID: "anthropic",
+      api: { id: apiId, url: "https://api.anthropic.com", npm: "@ai-sdk/anthropic" },
+      name: apiId,
+      capabilities: { reasoning: true },
+      limit: { context: 1_000_000, output: 128_000 },
+      options: {},
+      headers: {},
+    }) as any
+
+  // Adaptive models reject `thinking: { type: "enabled" }` outright:
+  // "\"thinking.type.enabled\" is not supported for this model."
+  for (const apiId of ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-fable-5"]) {
+    test(`${apiId} defaults to summarized adaptive thinking`, () => {
+      const result = ProviderTransform.options({
+        model: createModel(apiId),
+        sessionID: "test-session-123",
+        providerOptions: {},
+      })
+
+      expect(result.thinking).toEqual({ type: "adaptive", display: "summarized" })
+      expect(result.effort).toBe("medium")
+    })
+  }
+
+  test("claude-opus-4-6 defaults to adaptive thinking without summarization", () => {
+    const result = ProviderTransform.options({
+      model: createModel("claude-opus-4-6"),
+      sessionID: "test-session-123",
+      providerOptions: {},
+    })
+
+    expect(result.thinking).toEqual({ type: "adaptive" })
+    expect(result.effort).toBe("medium")
+  })
+})
+
 describe("ProviderTransform.options - gateway", () => {
   const sessionID = "test-session-123"
 
@@ -418,7 +458,7 @@ describe("ProviderTransform.options - gateway", () => {
     }) as any
 
   test("puts gateway defaults under gateway key", () => {
-    const model = createModel("anthropic/claude-sonnet-4")
+    const model = createModel("openai/gpt-4o")
     const result = ProviderTransform.options({ model, sessionID, providerOptions: {} })
     expect(result).toEqual({
       gateway: {
@@ -2248,7 +2288,7 @@ describe("ProviderTransform.message - cache control on gateway", () => {
       ...overrides,
     }) as any
 
-  test("gateway does not set cache control for anthropic models", () => {
+  test("gateway forwards explicit one-hour system caching for anthropic models", () => {
     const model = createModel()
     const msgs = [
       {
@@ -2264,7 +2304,7 @@ describe("ProviderTransform.message - cache control on gateway", () => {
     const result = ProviderTransform.message(msgs, model, {}) as any[]
 
     expect(result[0].content).toBe("You are a helpful assistant")
-    expect(result[0].providerOptions).toBeUndefined()
+    expect(result[0].providerOptions.anthropic.cacheControl).toEqual({ type: "ephemeral", ttl: "1h" })
   })
 
   test("non-gateway anthropic keeps existing cache control behavior", () => {
@@ -2293,11 +2333,13 @@ describe("ProviderTransform.message - cache control on gateway", () => {
       anthropic: {
         cacheControl: {
           type: "ephemeral",
+          ttl: "1h",
         },
       },
       openrouter: {
         cacheControl: {
           type: "ephemeral",
+          ttl: "1h",
         },
       },
       bedrock: {
@@ -2308,6 +2350,7 @@ describe("ProviderTransform.message - cache control on gateway", () => {
       openaiCompatible: {
         cache_control: {
           type: "ephemeral",
+          ttl: "1h",
         },
       },
       copilot: {
@@ -2318,6 +2361,7 @@ describe("ProviderTransform.message - cache control on gateway", () => {
       alibaba: {
         cacheControl: {
           type: "ephemeral",
+          ttl: "1h",
         },
       },
     })
@@ -2350,11 +2394,13 @@ describe("ProviderTransform.message - cache control on gateway", () => {
       anthropic: {
         cacheControl: {
           type: "ephemeral",
+          ttl: "1h",
         },
       },
       openrouter: {
         cacheControl: {
           type: "ephemeral",
+          ttl: "1h",
         },
       },
       bedrock: {
@@ -2365,6 +2411,7 @@ describe("ProviderTransform.message - cache control on gateway", () => {
       openaiCompatible: {
         cache_control: {
           type: "ephemeral",
+          ttl: "1h",
         },
       },
       copilot: {
@@ -2375,6 +2422,7 @@ describe("ProviderTransform.message - cache control on gateway", () => {
       alibaba: {
         cacheControl: {
           type: "ephemeral",
+          ttl: "1h",
         },
       },
     })
@@ -2571,6 +2619,88 @@ describe("ProviderTransform.variants", () => {
     }
   })
 
+  test("kimi-k3 via vercel ai gateway exposes reasoning_effort variants", () => {
+    for (const apiId of ["moonshotai/kimi-k3", "moonshotai/kimi-k3-fast"]) {
+      const model = createMockModel({
+        id: apiId,
+        providerID: "vercel",
+        api: {
+          id: apiId,
+          url: "https://ai-gateway.vercel.app/v1",
+          npm: "@ai-sdk/gateway",
+        },
+      })
+      expect(ProviderTransform.variants(model)).toEqual({
+        low: { reasoningEffort: "low" },
+        high: { reasoningEffort: "high" },
+        max: { reasoningEffort: "max" },
+      })
+    }
+  })
+
+  test("kimi-k3 via modal exposes reasoning_effort variants", () => {
+    for (const endpoint of [
+      {
+        id: "moonshotai/Kimi-K3",
+        providerID: "modal",
+        url: "https://inference.us-west.modal.direct/v1",
+      },
+      {
+        id: "owner--ep-kimi-k3-server.us-west.modal.direct",
+        providerID: "modal",
+        url: "https://inference.us-west.modal.direct/v1",
+      },
+      {
+        id: "moonshotai/Kimi-K3",
+        providerID: "custom-modal",
+        url: "https://inference.us-east.modal.direct/v1",
+      },
+    ]) {
+      const model = createMockModel({
+        id: endpoint.id,
+        providerID: endpoint.providerID,
+        api: {
+          id: endpoint.id,
+          url: endpoint.url,
+          npm: "@ai-sdk/openai-compatible",
+        },
+      })
+      expect(ProviderTransform.variants(model)).toEqual({
+        low: { reasoningEffort: "low" },
+        high: { reasoningEffort: "high" },
+        max: { reasoningEffort: "max" },
+      })
+    }
+  })
+
+  test("kimi-k3 outside the gateway and modal stays excluded from variants", () => {
+    const model = createMockModel({
+      id: "kimi-k3",
+      providerID: "moonshotai",
+      api: {
+        id: "kimi-k3",
+        url: "https://api.moonshot.ai/v1",
+        npm: "@ai-sdk/openai-compatible",
+      },
+    })
+    expect(ProviderTransform.variants(model)).toEqual({})
+  })
+
+  test("kimi-k2.x via vercel ai gateway stays excluded from variants", () => {
+    for (const apiId of ["moonshotai/kimi-k2.5", "moonshotai/kimi-k2.7-code", "moonshotai/kimi-k2-thinking"]) {
+      const model = createMockModel({
+        id: apiId,
+        providerID: "vercel",
+        api: {
+          id: apiId,
+          url: "https://ai-gateway.vercel.app/v1",
+          npm: "@ai-sdk/gateway",
+        },
+      })
+      expect(ProviderTransform.variants(model)).toEqual({})
+    }
+  })
+
   test("mistral models with reasoning support return variants", () => {
     const model = createMockModel({
       id: "mistral/mistral-small-latest",
@@ -2636,6 +2766,34 @@ describe("ProviderTransform.variants", () => {
   })
 
   describe("@openrouter/ai-sdk-provider", () => {
+    for (const id of ["openai/gpt-6.1-sol", "openai/gpt-6-1-sol", "openai/gpt-6.1-sol-2026-10-01"]) {
+      test(`${id} exposes max reasoning`, () => {
+        const result = ProviderTransform.variants(
+          createMockModel({
+            id,
+            providerID: "openrouter",
+            api: { id, url: "https://openrouter.ai", npm: "@openrouter/ai-sdk-provider" },
+          }),
+        )
+        expect(Object.keys(result)).toEqual(["none", "minimal", "low", "medium", "high", "xhigh", "max"])
+        expect(result.max).toEqual({ reasoning: { effort: "max" } })
+      })
+    }
+
+    test("does not advertise max for other GPT-6.1 models", () => {
+      for (const id of ["openai/gpt-6.1", "openai/gpt-6.1-sol-pro", "openai/gpt-6.1-sol-mini"]) {
+        expect(
+          ProviderTransform.variants(
+            createMockModel({
+              id,
+              providerID: "openrouter",
+              api: { id, url: "https://openrouter.ai", npm: "@openrouter/ai-sdk-provider" },
+            }),
+          ).max,
+        ).toBeUndefined()
+      }
+    })
+
     test("returns empty object for non-qualifying models", () => {
       const model = createMockModel({
         id: "openrouter/test-model",
@@ -3283,6 +3441,40 @@ describe("ProviderTransform.variants", () => {
       })
     })
 
+    for (const id of ["gpt-6.1-sol", "gpt-6-1-sol", "gpt-6.1-sol-2026-10-01"]) {
+      test(`${id} exposes max reasoning`, () => {
+        const result = ProviderTransform.variants(
+          createMockModel({
+            id,
+            providerID: "openai",
+            api: { id, url: "https://api.openai.com", npm: "@ai-sdk/openai" },
+            release_date: "2026-10-01",
+          }),
+        )
+        expect(Object.keys(result)).toEqual(["none", "low", "medium", "high", "xhigh", "max"])
+        expect(result.max).toEqual({
+          reasoningEffort: "max",
+          reasoningSummary: "auto",
+          include: ["reasoning.encrypted_content"],
+        })
+      })
+    }
+
+    test("does not advertise max for other GPT-6.1 models", () => {
+      for (const id of ["gpt-6.1", "gpt-6.1-sol-pro", "gpt-6.1-sol-mini"]) {
+        expect(
+          ProviderTransform.variants(
+            createMockModel({
+              id,
+              providerID: "openai",
+              api: { id, url: "https://api.openai.com", npm: "@ai-sdk/openai" },
+              release_date: "2026-10-01",
+            }),
+          ).max,
+        ).toBeUndefined()
+      }
+    })
+
     test("models after 2025-11-13 include 'none' effort", () => {
       const model = createMockModel({
         id: "gpt-5-nano",
@@ -3425,6 +3617,24 @@ describe("ProviderTransform.variants", () => {
       {
         name: "opus 4.7",
         apiIds: ["claude-opus-4-7", "claude-opus-4.7"],
+        efforts: ["low", "medium", "high", "xhigh", "max"],
+        expectedHigh: { thinking: { type: "adaptive", display: "summarized" }, effort: "high" },
+      },
+      {
+        name: "opus 4.8",
+        apiIds: ["claude-opus-4-8", "claude-opus-4.8"],
+        efforts: ["low", "medium", "high", "xhigh", "max"],
+        expectedHigh: { thinking: { type: "adaptive", display: "summarized" }, effort: "high" },
+      },
+      {
+        name: "opus 5",
+        apiIds: ["claude-opus-5", "claude-opus-5-fast"],
+        efforts: ["low", "medium", "high", "xhigh", "max"],
+        expectedHigh: { thinking: { type: "adaptive", display: "summarized" }, effort: "high" },
+      },
+      {
+        name: "fable 5",
+        apiIds: ["claude-fable-5"],
         efforts: ["low", "medium", "high", "xhigh", "max"],
         expectedHigh: { thinking: { type: "adaptive", display: "summarized" }, effort: "high" },
       },
@@ -3873,6 +4083,63 @@ describe("ProviderTransform.variants", () => {
         high: { reasoningEffort: "high" },
       })
     })
+  })
+})
+
+describe("ProviderTransform.serviceTiers - anthropic fast mode", () => {
+  const anthropicModel = (apiId: string) =>
+    ({ id: `anthropic/${apiId}`, providerID: "anthropic", api: { id: apiId, npm: "@ai-sdk/anthropic" } }) as any
+  const gatewayModel = (apiId: string) =>
+    ({
+      id: `anthropic/${apiId}`,
+      providerID: "gateway",
+      api: { id: `anthropic/${apiId}`, npm: "@ai-sdk/gateway" },
+    }) as any
+
+  for (const apiId of [
+    "claude-opus-4-6",
+    "claude-opus-4.6",
+    "claude-opus-4-7",
+    "claude-opus-4.7",
+    "claude-opus-4-8",
+    "claude-opus-4.8",
+    "claude-opus-5",
+  ]) {
+    test(`${apiId} offers the fast tier`, () => {
+      expect(ProviderTransform.serviceTiers(anthropicModel(apiId))).toEqual({ fast: { speed: "fast" } })
+    })
+
+    test(`${apiId} offers the fast tier through the gateway`, () => {
+      expect(ProviderTransform.serviceTiers(gatewayModel(apiId)).fast).toEqual({ speed: "fast" })
+    })
+  }
+
+  test("opus 4.5 does not offer the fast tier", () => {
+    expect(ProviderTransform.serviceTiers(anthropicModel("claude-opus-4-5"))).toEqual({})
+  })
+})
+
+describe("ProviderTransform.serviceTiers - kimi k3 fast mode", () => {
+  const gatewayModel = (apiId: string) =>
+    ({
+      id: apiId,
+      providerID: "vercel",
+      api: { id: apiId, npm: "@ai-sdk/gateway" },
+    }) as any
+
+  test("kimi-k3 offers the fast tier through the gateway", () => {
+    expect(ProviderTransform.serviceTiers(gatewayModel("moonshotai/kimi-k3")).fast).toEqual({
+      gateway: { speed: "fast" },
+    })
+  })
+
+  test("kimi-k3-fast does not offer the fast tier", () => {
+    // kimi-k3-fast already is the fast serving path; `speed` applies to the base model only.
+    expect(ProviderTransform.serviceTiers(gatewayModel("moonshotai/kimi-k3-fast")).fast).toBeUndefined()
+  })
+
+  test("other kimi models do not offer the fast tier", () => {
+    expect(ProviderTransform.serviceTiers(gatewayModel("moonshotai/kimi-k2.5")).fast).toBeUndefined()
   })
 })
 

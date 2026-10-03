@@ -5,6 +5,8 @@ import { Storage } from "@/storage/storage"
 import * as Session from "./session"
 import { MessageV2 } from "./message-v2"
 import { SessionID, MessageID } from "./schema"
+import { and, Database, eq, inArray, sql } from "@/storage/db"
+import { MessageTable, PartTable } from "./session.sql"
 
 function unquoteGitPath(input: string) {
   if (!input.startsWith('"')) return input
@@ -78,34 +80,58 @@ export const layer = Layer.effect(
     const storage = yield* Storage.Service
     const bus = yield* Bus.Service
 
-    const computeDiff = Effect.fn("SessionSummary.computeDiff")(function* (input: { messages: MessageV2.WithParts[] }) {
-      let from: string | undefined
-      let to: string | undefined
-      for (const item of input.messages) {
-        if (!from) {
-          for (const part of item.parts) {
-            if (part.type === "step-start" && part.snapshot) {
-              from = part.snapshot
-              break
-            }
-          }
-        }
-        for (const part of item.parts) {
-          if (part.type === "step-finish" && part.snapshot) to = part.snapshot
-        }
-      }
-      if (from && to) return yield* snapshot.diffFull(from, to)
-      return []
+    const diffParts = (parts: readonly { type: string; snapshot?: string | null }[]) => {
+      const from = parts.find((part) => part.type === "step-start" && part.snapshot)?.snapshot
+      const to = parts.findLast((part) => part.type === "step-finish" && part.snapshot)?.snapshot
+      return from && to ? snapshot.diffFull(from, to) : Effect.succeed([])
+    }
+
+    const computeDiff = Effect.fn("SessionSummary.computeDiff")((input: { messages: MessageV2.WithParts[] }) => {
+      return diffParts(
+        input.messages.flatMap((item) =>
+          item.parts.filter((part) => part.type === "step-start" || part.type === "step-finish"),
+        ),
+      )
     })
 
     const summarize = Effect.fn("SessionSummary.summarize")(function* (input: {
       sessionID: SessionID
       messageID: MessageID
     }) {
-      const all = yield* sessions.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)
-      if (!all.length) return
+      if (
+        !Database.use((db) =>
+          db
+            .select({ id: MessageTable.id })
+            .from(MessageTable)
+            .where(eq(MessageTable.session_id, input.sessionID))
+            .get(),
+        )
+      )
+        return
 
-      const diffs = yield* computeDiff({ messages: all })
+      // Project only snapshot metadata. Hydrating tool output here duplicates the
+      // entire conversation on every step, even after model-history compaction.
+      const parts = Database.use((db) =>
+        db
+          .select({
+            messageID: PartTable.message_id,
+            parentID: sql<string | null>`json_extract(${MessageTable.data}, '$.parentID')`,
+            role: sql<string>`json_extract(${MessageTable.data}, '$.role')`,
+            type: sql<string>`json_extract(${PartTable.data}, '$.type')`,
+            snapshot: sql<string | null>`json_extract(${PartTable.data}, '$.snapshot')`,
+          })
+          .from(PartTable)
+          .innerJoin(MessageTable, eq(PartTable.message_id, MessageTable.id))
+          .where(
+            and(
+              eq(MessageTable.session_id, input.sessionID),
+              inArray(sql`json_extract(${PartTable.data}, '$.type')`, ["step-start", "step-finish"]),
+            ),
+          )
+          .orderBy(MessageTable.time_created, MessageTable.id, PartTable.id)
+          .all(),
+      )
+      const diffs = yield* diffParts(parts)
       yield* sessions.setSummary({
         sessionID: input.sessionID,
         summary: {
@@ -117,14 +143,26 @@ export const layer = Layer.effect(
       yield* storage.write(["session_diff", input.sessionID], diffs).pipe(Effect.ignore)
       yield* bus.publish(Session.Event.Diff, { sessionID: input.sessionID, diff: diffs })
 
-      const messages = all.filter(
-        (m) => m.info.id === input.messageID || (m.info.role === "assistant" && m.info.parentID === input.messageID),
+      const target = Database.use((db) =>
+        db
+          .select()
+          .from(MessageTable)
+          .where(and(eq(MessageTable.id, input.messageID), eq(MessageTable.session_id, input.sessionID)))
+          .get(),
       )
-      const target = messages.find((m) => m.info.id === input.messageID)
-      if (!target || target.info.role !== "user") return
-      const msgDiffs = yield* computeDiff({ messages })
-      target.info.summary = { ...target.info.summary, diffs: msgDiffs }
-      yield* sessions.updateMessage(target.info)
+      if (!target || target.data.role !== "user") return
+      const msgDiffs = yield* diffParts(
+        parts.filter(
+          (part) =>
+            part.messageID === input.messageID || (part.role === "assistant" && part.parentID === input.messageID),
+        ),
+      )
+      yield* sessions.updateMessage({
+        ...target.data,
+        id: target.id,
+        sessionID: target.session_id,
+        summary: { ...target.data.summary, diffs: msgDiffs },
+      })
     })
 
     const diff = Effect.fn("SessionSummary.diff")(function* (input: { sessionID: SessionID; messageID?: MessageID }) {

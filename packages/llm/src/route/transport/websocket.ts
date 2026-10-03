@@ -250,6 +250,8 @@ export interface PoolOptions {
   readonly idleTtlMillis?: number
   /** Hard upper bound on a socket's lifetime (OpenAI: 60 minutes). */
   readonly maxAgeMillis?: number
+  /** Maximum idle sockets retained across all keys (default: 64; 0 disables retention). */
+  readonly maxIdleConnections?: number
 }
 
 interface PoolEntry {
@@ -262,10 +264,15 @@ interface PoolEntry {
 
 const DEFAULT_IDLE_TTL_MS = 30_000
 const DEFAULT_MAX_AGE_MS = 55 * 60 * 1000 // a few minutes under OpenAI's 60-min hard limit
+const DEFAULT_MAX_IDLE_CONNECTIONS = 64
 
 const keyFor = (input: WebSocketRequest) => {
-  const auth = (input.headers as unknown as Record<string, string>).authorization ?? ""
-  return `${input.url}\u0000${auth}`
+  // Headers are normalized to lowercase. Handshake headers (including session
+  // affinity) cannot change when reusing a connection and its response cache.
+  return `${input.url}\u0000${Object.keys(input.headers)
+    .sort()
+    .map((name) => `${name}:${input.headers[name]}`)
+    .join("\u0000")}`
 }
 
 const isHealthy = (entry: PoolEntry, maxAge: number) =>
@@ -276,11 +283,14 @@ const isHealthy = (entry: PoolEntry, maxAge: number) =>
 export const pool = (options: PoolOptions = {}): Interface => {
   const idleTtl = options.idleTtlMillis ?? DEFAULT_IDLE_TTL_MS
   const maxAge = options.maxAgeMillis ?? DEFAULT_MAX_AGE_MS
+  const maxIdle = options.maxIdleConnections ?? DEFAULT_MAX_IDLE_CONNECTIONS
   const entries = new Map<string, PoolEntry>()
+  const idle = new Set<PoolEntry>()
 
   const evict = (entry: PoolEntry) => {
     if (entry.idleTimer) clearTimeout(entry.idleTimer)
-    entries.delete(entry.key)
+    idle.delete(entry)
+    if (entries.get(entry.key) === entry) entries.delete(entry.key)
     if (
       entry.ws.readyState !== globalThis.WebSocket.CLOSED &&
       entry.ws.readyState !== globalThis.WebSocket.CLOSING
@@ -310,10 +320,13 @@ export const pool = (options: PoolOptions = {}): Interface => {
       const existing = entries.get(key)
       if (existing && isHealthy(existing, maxAge)) {
         if (existing.idleTimer) clearTimeout(existing.idleTimer)
+        idle.delete(existing)
         existing.busy = true
         return existing
       }
-      if (existing) evict(existing)
+      // A concurrent request must not close or replace the active connection.
+      // Its temporary socket is closed on release instead of entering the pool.
+      if (existing && !existing.busy) evict(existing)
 
       const ws = yield* Effect.try({
         try: () =>
@@ -327,7 +340,7 @@ export const pool = (options: PoolOptions = {}): Interface => {
           }),
       })
       const entry: PoolEntry = { ws, key, openedAt: Date.now(), busy: true }
-      entries.set(key, entry)
+      if (!existing?.busy) entries.set(key, entry)
       return entry
     })
 
@@ -337,11 +350,15 @@ export const pool = (options: PoolOptions = {}): Interface => {
       const session = yield* attach(entry.ws, input).pipe(
         Effect.tapCause(() => Effect.sync(() => evict(entry))),
       )
+      let released = false
       const release = Effect.sync(() => {
+        if (released) return
+        released = true
         entry.busy = false
         // Re-check health: if the socket died while we were using it, evict
         // instead of returning it to the pool.
         if (
+          entries.get(entry.key) !== entry ||
           entry.ws.readyState !== globalThis.WebSocket.OPEN ||
           Date.now() - entry.openedAt >= maxAge
         ) {
@@ -349,6 +366,12 @@ export const pool = (options: PoolOptions = {}): Interface => {
           return
         }
         armIdle(entry)
+        // Set insertion order tracks release recency; active leases are absent.
+        idle.add(entry)
+        if (idle.size > maxIdle) {
+          const oldest = idle.values().next().value
+          if (oldest) evict(oldest)
+        }
       })
       return {
         sendText: (message) =>

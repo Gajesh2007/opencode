@@ -1723,7 +1723,7 @@ export const layer = Layer.effect(
           ) {
             const body = JSON.parse(opts.body as string)
             const keepIds = body.store === true
-            if (!keepIds && Array.isArray(body.input)) {
+            if (!keepIds && Array.isArray(body.input) && body.input.some((item: object) => "id" in item)) {
               for (const item of body.input) {
                 if ("id" in item) {
                   delete item.id

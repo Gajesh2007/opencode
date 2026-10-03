@@ -1,6 +1,7 @@
 import { Bus } from "@/bus"
 import * as Log from "@opencode-ai/core/util/log"
-import { Effect } from "effect"
+import { Deferred, Effect } from "effect"
+import { disconnectOnOverflow, SSE_QUEUE_CAPACITY } from "@/server/event"
 import * as Stream from "effect/Stream"
 import { HttpServerResponse } from "effect/unstable/http"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
@@ -24,9 +25,11 @@ function eventResponse(bus: Bus.Interface) {
     // at this yield, so any publish from now on is queued for the body-pump
     // fiber to drain — closing the race where Stream.concat(server.connected,
     // lazy-subscribe) used to drop publishes in the prefix-consume window.
-    const events = (yield* bus.subscribeAll()).pipe(
-      Stream.takeUntil((event) => event.type === Bus.InstanceDisposed.type),
-    )
+    const overflow = yield* Deferred.make<void>()
+    const events = (yield* bus.subscribeAll({
+      capacity: SSE_QUEUE_CAPACITY,
+      onOverflow: () => Deferred.doneUnsafe(overflow, Effect.void),
+    })).pipe(Stream.takeUntil((event) => event.type === Bus.InstanceDisposed.type))
     const heartbeat = Stream.tick("10 seconds").pipe(
       Stream.drop(1),
       Stream.map(() => ({ id: Bus.createID(), type: "server.heartbeat", properties: {} })),
@@ -39,6 +42,7 @@ function eventResponse(bus: Bus.Interface) {
         Stream.map(eventData),
         Stream.pipeThroughChannel(Sse.encode()),
         Stream.encodeText,
+        (stream) => disconnectOnOverflow(stream, overflow),
         Stream.ensuring(Effect.sync(() => log.info("event disconnected"))),
       ),
       {

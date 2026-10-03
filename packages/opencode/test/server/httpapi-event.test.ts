@@ -2,7 +2,8 @@ import { afterEach, describe, expect } from "bun:test"
 import { Effect, Schema } from "effect"
 import * as Log from "@opencode-ai/core/util/log"
 import { Bus } from "../../src/bus"
-import { Event as ServerEvent } from "../../src/server/event"
+import { Event as ServerEvent, SSE_QUEUE_CAPACITY } from "../../src/server/event"
+import { GlobalBus } from "../../src/bus/global"
 import { Server } from "../../src/server/server"
 import { EventPaths } from "../../src/server/routes/instance/httpapi/groups/event"
 import { resetDatabase } from "../fixture/db"
@@ -97,5 +98,45 @@ describe("event HttpApi", () => {
         expect(yield* readEvent(reader)).toMatchObject({ type: "server.connected", properties: {} })
       }),
     { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  it.instance(
+    "disconnects an instance SSE reader that stops draining its body",
+    () =>
+      Effect.gen(function* () {
+        const { directory } = yield* TestInstance
+        const { reader } = yield* openEventStream(directory)
+        expect(yield* readEvent(reader)).toMatchObject({ type: "server.connected" })
+        const closed = reader.closed.then(
+          () => true,
+          () => true,
+        )
+        // The body pump can already hold a full batch in addition to the subscription queue.
+        yield* Effect.replicateEffect(Bus.use.publish(ServerEvent.Connected, {}), SSE_QUEUE_CAPACITY * 3)
+        expect(yield* Effect.promise(() => closed).pipe(Effect.timeout("2 seconds"))).toBe(true)
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  it.live("global SSE overflow closes the body and detaches its listener", () =>
+    Effect.gen(function* () {
+      const before = GlobalBus.listenerCount("event")
+      const response = yield* Effect.promise(async () => Server.Default().app.request("/global/event"))
+      if (!response.body) return yield* Effect.die("missing global SSE response body")
+      const reader = response.body.getReader()
+      yield* Effect.addFinalizer(() => Effect.promise(() => reader.cancel().catch(() => undefined)))
+      const initial = yield* Effect.promise(() => reader.read())
+      expect(new TextDecoder().decode(initial.value)).toContain("server.connected")
+      expect(GlobalBus.listenerCount("event")).toBe(before + 1)
+      const closed = reader.closed.then(
+        () => true,
+        () => true,
+      )
+      for (let index = 0; index < SSE_QUEUE_CAPACITY + 16; index++) {
+        GlobalBus.emit("event", { payload: { type: "test.sse", properties: {} } })
+      }
+      expect(GlobalBus.listenerCount("event")).toBe(before)
+      expect(yield* Effect.promise(() => closed).pipe(Effect.timeout("2 seconds"))).toBe(true)
+    }),
   )
 })

@@ -128,14 +128,10 @@ const OpenAIResponsesCoreFields = {
   store: Schema.optional(Schema.Boolean),
   prompt_cache_key: Schema.optional(Schema.String),
   prompt_cache_retention: Schema.optional(Schema.Literals(["in-memory", "24h"])),
-  service_tier: Schema.optional(Schema.Literals(["auto", "default", "flex", "scale", "priority"])),
+  service_tier: Schema.optional(Schema.Literals(["auto", "default", "flex", "scale", "priority", "ultrafast"])),
   include: optionalArray(OpenAIOptions.OpenAIResponseIncludable),
-  // Continuation pointer for the OpenAI Responses API. The server replays
-  // the cached conversation prefix from that response id instead of
-  // retokenizing the full history. The session layer captures this id
-  // from the prior turn's `providerMetadata.openai.responseId` finish
-  // event and threads it back here. Required for the WebSocket-mode
-  // connection-scoped cache to actually fire.
+  // The caller supplies only the new input when reusing a server-side prefix.
+  // A response ID by itself does not identify a safe boundary in local history.
   previous_response_id: Schema.optional(Schema.String),
   reasoning: Schema.optional(
     Schema.Struct({
@@ -334,26 +330,15 @@ const lowerToolResultOutput = Effect.fn("OpenAIResponses.lowerToolResultOutput")
   return yield* Effect.forEach(part.result.value as readonly ToolResultContentPart[], lowerToolResultContentItem)
 })
 
-const continuationMessages = (request: LLMRequest) => {
-  const previousResponseId = OpenAIOptions.previousResponseId(request)
-  if (!previousResponseId) return { messages: request.messages, incremental: false }
-  const lastAssistant = request.messages.findLastIndex((message) => message.role === "assistant")
-  if (lastAssistant === -1) return { messages: request.messages, incremental: false }
-  const tail = request.messages.slice(lastAssistant + 1)
-  if (tail.length === 0) return { messages: request.messages, incremental: false }
-  return { messages: tail, incremental: true }
-}
-
 const lowerMessages = Effect.fn("OpenAIResponses.lowerMessages")(function* (request: LLMRequest) {
-  const continuation = continuationMessages(request)
+  // Callers own continuation boundaries. A response ID alone cannot tell us
+  // which messages the server has already consumed.
   const system: OpenAIResponsesInputItem[] =
-    continuation.incremental || request.system.length === 0
-      ? []
-      : [{ role: "system", content: ProviderShared.joinText(request.system) }]
+    request.system.length === 0 ? [] : [{ role: "system", content: ProviderShared.joinText(request.system) }]
   const input: OpenAIResponsesInputItem[] = [...system]
   const store = OpenAIOptions.store(request)
 
-  for (const message of continuation.messages) {
+  for (const message of request.messages) {
     if (message.role === "user") {
       input.push({ role: "user", content: yield* Effect.forEach(message.content, lowerUserContent) })
       continue
@@ -457,11 +442,13 @@ const lowerOptions = Effect.fn("OpenAIResponses.lowerOptions")(function* (reques
 
 const fromRequest = Effect.fn("OpenAIResponses.fromRequest")(function* (request: LLMRequest) {
   const generation = request.generation
-  const continuation = continuationMessages(request)
   return {
     model: request.model.id,
     input: yield* lowerMessages(request),
-    tools: continuation.incremental || request.tools.length === 0 ? undefined : request.tools.map(lowerTool),
+    tools:
+      request.tools.length === 0 && !OpenAIOptions.previousResponseId(request)
+        ? undefined
+        : request.tools.map(lowerTool),
     tool_choice: request.toolChoice ? yield* lowerToolChoice(request.toolChoice) : undefined,
     stream: true as const,
     max_output_tokens: generation?.maxTokens,

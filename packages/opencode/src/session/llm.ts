@@ -44,14 +44,9 @@ export type StreamInput = {
   retries?: number
   toolChoice?: "auto" | "required" | "none"
   /**
-   * OpenAI Responses-API continuation pointer captured from the prior
-   * step/turn's `providerMetadata.openai.responseId`. When set, lowered to
-   * `previous_response_id` in the OpenAI Responses request body so the
-   * server reuses the cached prefix instead of retokenizing. Ignored by
-   * non-OpenAI-Responses routes. The session prompt loop is the source of
-   * truth: it threads the most recent assistant's `provider_response_id`
-   * back here on each step (in-turn continuation) and on each new turn
-   * (cross-turn continuation).
+   * Candidate response ID from the prior assistant. Only the opt-in native
+   * OpenAI runtime may use it, after verifying local ownership and history.
+   * Unknown IDs, changed context, and AI SDK requests use full history.
    */
   previousResponseId?: string
 }
@@ -88,6 +83,7 @@ const live: Layer.Layer<
     const perm = yield* Permission.Service
     const llmClient = yield* LLMClient.Service
     const flags = yield* RuntimeFlags.Service
+    const continuation = LLMNativeRuntime.createContinuationState()
 
     const run = Effect.fn("LLM.run")(function* (input: StreamRequest) {
       const l = log
@@ -105,7 +101,10 @@ const live: Layer.Layer<
 
       const [language, cfg, item, info] = yield* Effect.all(
         [
-          provider.getLanguage(input.model),
+          // Native OpenAI does not use an AI SDK model. Resolve it only on fallback.
+          flags.experimentalNativeLlm && input.model.providerID === "openai" && input.model.api.npm === "@ai-sdk/openai"
+            ? Effect.succeed(undefined)
+            : provider.getLanguage(input.model),
           config.get(),
           provider.getProvider(input.model.providerID),
           auth.get(input.model.providerID),
@@ -230,6 +229,9 @@ const live: Layer.Layer<
       // either returns a ready LLMEvent stream or a concrete fallback reason.
       if (flags.experimentalNativeLlm) {
         const native = LLMNativeRuntime.stream({
+          continuation: input.small ? undefined : continuation,
+          sessionID: input.sessionID,
+          previousResponseId: input.previousResponseId,
           model: input.model,
           provider: item,
           auth: info,
@@ -320,7 +322,7 @@ const live: Layer.Layer<
           maxRetries: input.retries ?? 0,
           messages: prepared.messages,
           model: wrapLanguageModel({
-            model: language,
+            model: language ?? (yield* provider.getLanguage(input.model)),
             middleware: [
               {
                 specificationVersion: "v3" as const,

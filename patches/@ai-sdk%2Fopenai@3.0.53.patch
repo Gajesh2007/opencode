@@ -1,0 +1,88 @@
+diff --git a/dist/index.d.mts b/dist/index.d.mts
+index 7317931f93ec5ecac543dd73687d5cd317d021ec..05b9c57414f8439170f0aff384c7c385a45026a1 100644
+--- a/dist/index.d.mts
++++ b/dist/index.d.mts
+@@ -1021,7 +1021,7 @@ declare const openaiLanguageModelResponsesOptionsSchema: _ai_sdk_provider_utils.
+     reasoningEffort?: string | null | undefined;
+     reasoningSummary?: string | null | undefined;
+     safetyIdentifier?: string | null | undefined;
+-    serviceTier?: "default" | "auto" | "flex" | "priority" | null | undefined;
++    serviceTier?: "default" | "auto" | "flex" | "priority" | "ultrafast" | null | undefined;
+     store?: boolean | null | undefined;
+     strictJsonSchema?: boolean | null | undefined;
+     textVerbosity?: "low" | "medium" | "high" | null | undefined;
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+index 7317931f93ec5ecac543dd73687d5cd317d021ec..05b9c57414f8439170f0aff384c7c385a45026a1 100644
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -1021,7 +1021,7 @@ declare const openaiLanguageModelResponsesOptionsSchema: _ai_sdk_provider_utils.
+     reasoningEffort?: string | null | undefined;
+     reasoningSummary?: string | null | undefined;
+     safetyIdentifier?: string | null | undefined;
+-    serviceTier?: "default" | "auto" | "flex" | "priority" | null | undefined;
++    serviceTier?: "default" | "auto" | "flex" | "priority" | "ultrafast" | null | undefined;
+     store?: boolean | null | undefined;
+     strictJsonSchema?: boolean | null | undefined;
+     textVerbosity?: "low" | "medium" | "high" | null | undefined;
+diff --git a/dist/index.js b/dist/index.js
+index 1c78d6f13caed5cbfa034d86f5e51729d540a1ba..7483709bbe251c00617aeddbd5db02c2e6510313 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -4286,7 +4286,7 @@ var openaiLanguageModelResponsesOptionsSchema = (0, import_provider_utils27.lazy
+        *
+        * Defaults to 'auto'.
+        */
+-      serviceTier: import_v422.z.enum(["auto", "flex", "priority", "default"]).nullish(),
++      serviceTier: import_v422.z.enum(["auto", "flex", "priority", "default", "ultrafast"]).nullish(),
+       /**
+        * Whether to store the generation. Defaults to `true`.
+        */
+diff --git a/dist/index.mjs b/dist/index.mjs
+index 3dee8855a0cff4c2d5bef4ff1cb2a92a48bd8c4f..61554f670ad2777e176f64d865308632abb064c6 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -4363,7 +4363,7 @@ var openaiLanguageModelResponsesOptionsSchema = lazySchema20(
+        *
+        * Defaults to 'auto'.
+        */
+-      serviceTier: z22.enum(["auto", "flex", "priority", "default"]).nullish(),
++      serviceTier: z22.enum(["auto", "flex", "priority", "default", "ultrafast"]).nullish(),
+       /**
+        * Whether to store the generation. Defaults to `true`.
+        */
+diff --git a/dist/internal/index.js b/dist/internal/index.js
+index 27527ce4b6c232e26c4bed988292d8fdd5dbbb5f..d6fb5a4489044519ea2f6d112359905fb494b9b9 100644
+--- a/dist/internal/index.js
++++ b/dist/internal/index.js
+@@ -4228,7 +4228,7 @@ var openaiLanguageModelResponsesOptionsSchema = (0, import_provider_utils25.lazy
+        *
+        * Defaults to 'auto'.
+        */
+-      serviceTier: import_v418.z.enum(["auto", "flex", "priority", "default"]).nullish(),
++      serviceTier: import_v418.z.enum(["auto", "flex", "priority", "default", "ultrafast"]).nullish(),
+       /**
+        * Whether to store the generation. Defaults to `true`.
+        */
+diff --git a/dist/internal/index.mjs b/dist/internal/index.mjs
+index db50beda01459008c836cd5648e024340fe31e90..b2396383b2cd97650a417c22e99e1661ca5f53ab 100644
+--- a/dist/internal/index.mjs
++++ b/dist/internal/index.mjs
+@@ -4254,7 +4254,7 @@ var openaiLanguageModelResponsesOptionsSchema = lazySchema16(
+        *
+        * Defaults to 'auto'.
+        */
+-      serviceTier: z18.enum(["auto", "flex", "priority", "default"]).nullish(),
++      serviceTier: z18.enum(["auto", "flex", "priority", "default", "ultrafast"]).nullish(),
+       /**
+        * Whether to store the generation. Defaults to `true`.
+        */
+diff --git a/src/responses/openai-responses-options.ts b/src/responses/openai-responses-options.ts
+index 4477d7a1232018309185bed44cd980ae417aa5ab..d70cd18a816e7d422dcfd1f05082cccb399ac3dd 100644
+--- a/src/responses/openai-responses-options.ts
++++ b/src/responses/openai-responses-options.ts
+@@ -254,4 +254,4 @@ export const openaiLanguageModelResponsesOptionsSchema = lazySchema(() =>
+        *
+        * Defaults to 'auto'.
+        */
+-      serviceTier: z.enum(['auto', 'flex', 'priority', 'default']).nullish(),
++      serviceTier: z.enum(['auto', 'flex', 'priority', 'default', 'ultrafast']).nullish(),

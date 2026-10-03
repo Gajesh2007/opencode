@@ -54,9 +54,9 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { AgentAttachment, FileAttachment, ReferenceAttachment, Source } from "@opencode-ai/core/session-prompt"
 import { Reference } from "@/reference/reference"
 import * as DateTime from "effect/DateTime"
-import { eq } from "@/storage/db"
+import { and, eq } from "@/storage/db"
 import * as Database from "@/storage/db"
-import { SessionTable } from "./session.sql"
+import { MessageTable, SessionTable } from "./session.sql"
 import { referencePromptMetadata, referenceTextPart } from "./prompt/reference"
 import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
@@ -1380,10 +1380,14 @@ export const layer = Layer.effect(
 
           // Retraction can win after this turn was selected but before its assistant
           // message was persisted. Never start inference for a message it removed.
-          const currentUser = yield* sessions
-            .findMessage(sessionID, (message) => message.info.id === lastUser.id)
-            .pipe(Effect.orDie)
-          if (Option.isNone(currentUser)) {
+          const currentUser = Database.use((db) =>
+            db
+              .select({ id: MessageTable.id })
+              .from(MessageTable)
+              .where(and(eq(MessageTable.id, lastUser.id), eq(MessageTable.session_id, sessionID)))
+              .get(),
+          )
+          if (!currentUser) {
             yield* sessions.removeMessage({ sessionID, messageID: msg.id })
             continue
           }
@@ -1464,13 +1468,16 @@ export const layer = Layer.effect(
 
             yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
-            const [skills, env, instructions, modelMsgs, agentMemory] = yield* Effect.all([
-              sys.skills(agent),
-              sys.environment(model),
-              instruction.system().pipe(Effect.orDie),
-              MessageV2.toModelMessagesEffect(msgs, model),
-              agent.memory ? memory.read({ name: agent.name, scope: agent.memory }) : Effect.succeed(undefined),
-            ])
+            const [skills, env, instructions, modelMsgs, agentMemory] = yield* Effect.all(
+              [
+                sys.skills(agent),
+                sys.environment(model),
+                instruction.system().pipe(Effect.orDie),
+                MessageV2.toModelMessagesEffect(msgs, model),
+                agent.memory ? memory.read({ name: agent.name, scope: agent.memory }) : Effect.succeed(undefined),
+              ],
+              { concurrency: "unbounded" },
+            )
             const activeGoal = yield* goals.get(sessionID)
             const goalContext =
               activeGoal && activeGoal.status === "active" ? formatGoalReminder(activeGoal) : undefined

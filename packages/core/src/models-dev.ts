@@ -219,6 +219,22 @@ const INJECTED_MODELS: Record<string, Record<string, Model>> = {
       inputLimit: false,
     }),
   },
+  poolside: {
+    "poolside/laguna-s-2.1-preview": {
+      id: "poolside/laguna-s-2.1-preview",
+      name: "Laguna S 2.1 Preview",
+      family: "laguna",
+      release_date: "2026-07-16",
+      attachment: false,
+      reasoning: true,
+      temperature: true,
+      tool_call: true,
+      interleaved: { field: "reasoning_content" },
+      cost: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
+      limit: { context: 1_000_000, output: 32_768 },
+      modalities: { input: ["text"], output: ["text"] },
+    },
+  },
   // MiniMax M3 on the Vercel AI Gateway (1M context, multimodal, agentic).
   // Pricing/limits mirror the Gateway listing.
   vercel: {
@@ -312,6 +328,7 @@ const INJECTED_MODELS: Record<string, Record<string, Model>> = {
       provider: { npm: "@ai-sdk/google-vertex/anthropic" },
     },
   },
+
   "google-vertex-anthropic": {
     "claude-fable-5@default": {
       id: "claude-fable-5@default",

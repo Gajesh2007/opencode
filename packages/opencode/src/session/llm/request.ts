@@ -124,21 +124,8 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
         sessionID: input.sessionID,
         providerOptions: input.provider.options,
       })
-  // OpenAI Responses-API continuation. This is intentionally opt-in for now:
-  // the provider returns `previous_response_not_found` if the server-side
-  // response state cannot be resolved (for example, stale socket cache,
-  // Gateway pooled credentials, or cross-account routing). Until we add a
-  // robust retry-with-full-history fallback, keep the response-id capture on
-  // but only send it when the user explicitly enables it via:
-  //   provider.openai.options.responsesContinuation = true
-  // or per-model:
-  //   provider.openai.models["gpt-5.5"].options.responsesContinuation = true
-  const responsesContinuation =
-    input.model.options?.responsesContinuation === true || input.provider.options?.responsesContinuation === true
-  const previousResponseOptions =
-    !input.small && responsesContinuation && input.previousResponseId
-      ? { openai: { previousResponseId: input.previousResponseId } }
-      : {}
+  // Continuation is native-only: the native adapter verifies and trims history.
+  // Sending a response pointer here would make AI SDK replay the full prefix twice.
   const options = [
     input.model.options,
     input.agent.options,
@@ -146,7 +133,6 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     reasoningMode,
     tierOptions,
     upstreamOptions,
-    previousResponseOptions,
   ].reduce<Record<string, any>>((result, item) => mergeOptions(result, item), base)
   if (isOpenaiOauth) options.instructions = system.join("\n")
 
@@ -182,6 +168,14 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
       options,
     },
   )
+
+  // Even plugin/config-supplied pointers must not bypass the native receipt check.
+  params.options = { ...params.options }
+  delete params.options.previousResponseId
+  if (params.options.openai) {
+    params.options.openai = { ...params.options.openai }
+    delete params.options.openai.previousResponseId
+  }
 
   const { headers } = yield* input.plugin.trigger(
     "chat.headers",

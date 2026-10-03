@@ -260,6 +260,49 @@ describe("OpenAI Chat route", () => {
     }),
   )
 
+  it.live("finishes and cancels the HTTP body at the SSE completion sentinel without waiting for EOF", () =>
+    Effect.gen(function* () {
+      let cancelled = false
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const encoder = new TextEncoder()
+          const text = sseEvents(
+            deltaChunk({ content: "Done." }),
+            deltaChunk({}, "stop"),
+            usageChunk({ prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 }),
+          )
+          controller.enqueue(encoder.encode(text.slice(0, -4)))
+          controller.enqueue(encoder.encode(text.slice(-4)))
+        },
+        cancel() {
+          cancelled = true
+        },
+      })
+      const response = yield* LLMClient.generate(request).pipe(
+        Effect.provide(fixedResponse(body)),
+        Effect.timeout("1 second"),
+      )
+
+      expect(response.text).toBe("Done.")
+      expect(response.usage?.totalTokens).toBe(7)
+      expect(response.events.filter((event) => event.type === "finish")).toHaveLength(1)
+      expect(cancelled).toBe(true)
+    }),
+  )
+
+  it.effect("does not decode frames after the SSE completion sentinel", () =>
+    Effect.gen(function* () {
+      const response = yield* LLMClient.generate(request).pipe(
+        Effect.provide(
+          fixedResponse(`${sseEvents(deltaChunk({ content: "Done." }), deltaChunk({}, "stop"))}data: invalid-json\n\n`),
+        ),
+      )
+
+      expect(response.text).toBe("Done.")
+      expect(response.events.at(-1)).toMatchObject({ type: "finish", reason: "stop" })
+    }),
+  )
+
   it.effect("parses OpenAI-compatible reasoning content deltas", () =>
     Effect.gen(function* () {
       const body = sseEvents(

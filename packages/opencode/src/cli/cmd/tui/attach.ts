@@ -5,12 +5,13 @@ import { TuiConfig } from "@/cli/cmd/tui/config/tui"
 import { errorMessage } from "@/util/error"
 import { validateSession } from "./validate-session"
 import { ServerAuth } from "@/server/auth"
+import { withYoloForever } from "@/cli/yolo-forever"
 
 export const AttachCommand = cmd({
   command: "attach <url>",
   describe: "attach to a running opencode server",
   builder: (yargs) =>
-    yargs
+    withYoloForever(yargs)
       .positional("url", {
         type: "string",
         describe: "http://localhost:4096",
@@ -43,8 +44,14 @@ export const AttachCommand = cmd({
         alias: ["u"],
         type: "string",
         describe: "basic auth username (defaults to OPENCODE_SERVER_USERNAME or 'opencode')",
+      })
+      .option("dangerously-skip-permissions", {
+        type: "boolean",
+        describe: "auto-approve permissions that are not explicitly denied (dangerous!)",
+        default: false,
       }),
   handler: async (args) => {
+    if (args["dangerously-skip-permissions"]) process.env.OPENCODE_DANGEROUSLY_SKIP_PERMISSIONS = "true"
     const unguard = win32InstallCtrlCGuard()
     try {
       win32DisableProcessedInput()

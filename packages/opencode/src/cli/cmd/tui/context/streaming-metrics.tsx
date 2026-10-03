@@ -3,16 +3,15 @@ import { createStore } from "solid-js/store"
 import { createSimpleContext } from "./helper"
 import { useEvent } from "./event"
 
-// Coarse English-text average. Used as a divisor on streamed character count
-// to produce a "live tok/s" estimate while the model is generating. The final
-// realized TPS on the message footer uses the provider-reported token count
-// from step-finish, which is exact — this one is best-effort, never persisted.
+// Coarse estimate for streamed text, reasoning, and tool arguments, not billing
+// usage. Final message metrics use provider-reported tokens instead.
 const CHARS_PER_TOKEN_APPROX = 4
 
 const TICK_MS = 100
+const MAX_ACTIVE_SESSIONS = 128
 
 type State = {
-  messageID: string | undefined
+  messageID: string
   startTime: number
   chars: number
 }
@@ -21,60 +20,64 @@ export const { use: useStreamingMetrics, provider: StreamingMetricsProvider } = 
   name: "StreamingMetrics",
   init: () => {
     const event = useEvent()
-    const [state, setState] = createStore<State>({
-      messageID: undefined,
-      startTime: 0,
-      chars: 0,
-    })
+    const [state, setState] = createStore<Record<string, State | undefined>>({})
 
-    // Wall-clock tick so the TPS keeps updating between deltas. Cheap; only
-    // re-renders consumers when they actually read `tps()` and the value
-    // crosses a rounded integer.
+    // Keep rates updating between deltas without including time to first token.
     const [now, setNow] = createSignal(Date.now())
     const ticker = setInterval(() => {
-      if (state.messageID) setNow(Date.now())
+      if (Object.keys(state).length) setNow(Date.now())
     }, TICK_MS)
     onCleanup(() => clearInterval(ticker))
 
     event.on("message.part.delta", (e) => {
-      const props = e.properties as { messageID: string; field?: string; delta?: string }
-      // Streaming deltas land on multiple field names (text content, reasoning
-      // text, tool input JSON, etc.). Count only "text" — the visible stream —
-      // so tool-call argument streaming doesn't inflate the rate.
-      if (props.field !== "text") return
-      const delta = props.delta ?? ""
-      if (state.messageID !== props.messageID) {
-        // First delta for a new message: anchor the start time here, not at
-        // request-send time, because request-send → first-token is dominated
-        // by TTFT which would skew the per-token rate downward.
-        setState({
+      const props = e.properties
+      // Count generated fragments once, never tool output or part snapshots.
+      if (props.field !== "text" && props.field !== "state.raw") return
+      if (!props.delta) return
+      if (state[props.sessionID]?.messageID !== props.messageID) {
+        const sessions = Object.keys(state)
+        // Bound retention if a completion/idle event was missed.
+        if (!state[props.sessionID] && sessions.length >= MAX_ACTIVE_SESSIONS) {
+          setState(sessions[0], undefined)
+        }
+        const startTime = Date.now()
+        setState(props.sessionID, {
           messageID: props.messageID,
-          startTime: Date.now(),
-          chars: delta.length,
+          startTime,
+          chars: props.delta.length,
         })
-        setNow(Date.now())
+        setNow(startTime)
         return
       }
-      setState("chars", (c) => c + delta.length)
+      setState(props.sessionID, "chars", (c) => c + props.delta.length)
     })
 
     event.on("message.updated", (e) => {
-      const info = e.properties.info as { id: string; role?: string; time?: { completed?: number } }
+      const info = e.properties.info
       if (info.role !== "assistant") return
-      if (info.id !== state.messageID) return
-      if (info.time?.completed) {
-        setState({ messageID: undefined, startTime: 0, chars: 0 })
-      }
+      if (info.id !== state[info.sessionID]?.messageID) return
+      if (info.time.completed === undefined) return
+      setState(info.sessionID, undefined)
+    })
+
+    event.on("session.status", (e) => {
+      if (e.properties.status.type !== "idle") return
+      setState(e.properties.sessionID, undefined)
+    })
+
+    event.on("session.idle", (e) => {
+      setState(e.properties.sessionID, undefined)
     })
 
     return {
-      active: () => !!state.messageID,
-      messageID: () => state.messageID,
-      tps: () => {
-        if (!state.messageID) return 0
-        const elapsedMs = now() - state.startTime
+      active: (sessionID: string | undefined) => !!sessionID && !!state[sessionID],
+      messageID: (sessionID: string | undefined) => (sessionID ? state[sessionID]?.messageID : undefined),
+      tps: (sessionID: string | undefined) => {
+        const current = sessionID ? state[sessionID] : undefined
+        if (!current) return 0
+        const elapsedMs = now() - current.startTime
         if (elapsedMs <= 0) return 0
-        return Math.round(state.chars / CHARS_PER_TOKEN_APPROX / (elapsedMs / 1000))
+        return Math.round(current.chars / CHARS_PER_TOKEN_APPROX / (elapsedMs / 1000))
       },
     }
   },

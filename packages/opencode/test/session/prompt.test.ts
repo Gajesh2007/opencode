@@ -181,6 +181,7 @@ const blockingProcessor = Layer.succeed(
 type PromptLayerInput = {
   processor?: "blocking"
   session?: Layer.Layer<Session.Service>
+  system?: Layer.Layer<SystemPrompt.Service>
 }
 
 function makePrompt(input?: PromptLayerInput) {
@@ -250,7 +251,7 @@ function makePrompt(input?: PromptLayerInput) {
     Layer.provide(Instruction.defaultLayer),
     Layer.provide(
       Layer.mergeAll(
-        SystemPrompt.defaultLayer,
+        input?.system ?? SystemPrompt.defaultLayer,
         Goal.defaultLayer,
         MetaAgent.defaultLayer,
         ReasoningReviewer.defaultLayer,
@@ -273,6 +274,20 @@ function makeHttpNoLLMServer(input?: PromptLayerInput) {
 }
 
 const it = testEffect(makeHttp())
+const parallelPreparation = testEffect(
+  makeHttp({
+    system: Layer.effect(
+      SystemPrompt.Service,
+      Effect.gen(function* () {
+        const environment = yield* Deferred.make<void>()
+        return SystemPrompt.Service.of({
+          skills: () => Deferred.await(environment).pipe(Effect.as("parallel skills")),
+          environment: () => Deferred.succeed(environment, undefined).pipe(Effect.as(["parallel environment"])),
+        })
+      }),
+    ),
+  }),
+)
 const noLLMServer = testEffect(makeHttpNoLLMServer())
 const raceNoLLMServer = testEffect(makeHttpNoLLMServer({ processor: "blocking" }))
 let retractionInterleave:
@@ -583,6 +598,26 @@ it.instance("loop calls LLM and returns assistant message", () =>
   }),
 )
 
+parallelPreparation.instance("prepares independent prompt inputs concurrently without reordering them", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const chat = yield* (yield* Session.Service).create({ title: "Pinned" })
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      model: ref,
+      noReply: true,
+      parts: [{ type: "text", text: "hello" }],
+    })
+    yield* llm.text("world")
+    yield* awaitWithTimeout(prompt.loop({ sessionID: chat.id }), "Prompt preparation did not run concurrently")
+    const request = JSON.stringify((yield* llm.inputs)[0])
+    expect(request).toContain("parallel environment")
+    expect(request).toContain("parallel skills")
+    expect(request.indexOf("parallel environment")).toBeLessThan(request.indexOf("parallel skills"))
+  }),
+)
+
 it.instance("drains collaboration wake records without duplicating persisted mail", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig(providerCfg)
@@ -743,6 +778,7 @@ it.instance("injects explicit-only collaboration guidance for Ultra-capable non-
     const prompt = yield* SessionPrompt.Service
     const sessions = yield* Session.Service
     const session = yield* sessions.create({ title: "Pinned" })
+    yield* (yield* Collaboration.Service).registerRoot(session.id)
     yield* prompt.prompt({
       sessionID: session.id,
       agent: "build",
@@ -814,7 +850,8 @@ it.instance("only injects collaboration guidance for registered roots and descen
     expect(childInput).toContain("You can spawn your own well-scoped subagents using spawn_agent")
     expect(childInput).toContain("Results return to your direct parent")
     expect(legacyChildInput).not.toContain("<collaboration>")
-    expect(legacyChildInput).not.toContain("spawn_agent")
+    const legacyInput = inputs.find((input) => JSON.stringify(input).includes("legacy child task"))
+    expect(legacyInput?.tools).not.toContainEqual(expect.objectContaining({ name: "spawn_agent" }))
   }),
 )
 
@@ -2063,7 +2100,7 @@ unix(
 
       yield* llm.tool("bash", {
         command:
-          'i=0; while [ "$i" -lt 4000 ]; do printf "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx %05d\\n" "$i"; i=$((i + 1)); done; sleep 30',
+          'i=0; while [ "$i" -lt 4000 ]; do printf "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx %05d\\n" "$i"; i=$((i + 1)); done; sleep 0.1; printf "__large_output_ready__\\n"; sleep 30',
         description: "Print many lines",
         timeout: 30_000,
         workdir: path.resolve(dir),
@@ -2071,7 +2108,25 @@ unix(
 
       const run = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
       yield* llm.wait(1)
-      yield* Effect.sleep(150)
+      yield* pollWithTimeout(
+        sessions
+          .messages({ sessionID: chat.id })
+          .pipe(
+            Effect.map((messages) =>
+              messages.some((message) =>
+                message.parts.some(
+                  (part) =>
+                    part.type === "tool" &&
+                    part.state.status === "running" &&
+                    part.state.metadata?.output?.includes("__large_output_ready__"),
+                ),
+              )
+                ? true
+                : undefined,
+            ),
+          ),
+        "shell did not publish its large output before cancellation",
+      )
       yield* prompt.cancel(chat.id)
 
       const exit = yield* Fiber.await(run)

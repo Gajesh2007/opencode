@@ -79,6 +79,49 @@ describe("OpenAI Responses route", () => {
       expect(prepared.body).toMatchObject({ model: "gpt-4.1-mini", stream: true })
     }),
   )
+  ;["gpt-6-astra", "gpt-5.6-sol"].forEach((id) => {
+    it.effect(`prepares ultrafast HTTP Responses for ${id}`, () =>
+      Effect.gen(function* () {
+        const input = LLM.request({
+          model: OpenAI.configure({ apiKey: "test" }).responses(id),
+          prompt: "Say hello.",
+          providerOptions: { openai: { serviceTier: "ultrafast" } },
+        })
+        const prepared = yield* LLMClient.prepare<OpenAIResponses.OpenAIResponsesBody>(input)
+
+        expect(prepared.route).toBe("openai-responses")
+        expect(prepared.metadata).toEqual({ transport: "http-json" })
+        expect(prepared.body).toMatchObject({ model: id, service_tier: "ultrafast", stream: true })
+
+        const transport = yield* OpenAIResponses.route.prepareTransport(prepared.body, input)
+        const web = yield* HttpClientRequest.toWeb(transport.request).pipe(Effect.orDie)
+        expect(yield* Effect.promise(() => web.json())).toEqual(prepared.body)
+      }),
+    )
+
+    it.effect(`prepares ultrafast WebSocket Responses for ${id}`, () =>
+      Effect.gen(function* () {
+        const input = LLM.request({
+          model: OpenAI.configure({
+            apiKey: "test",
+            providerOptions: { openai: { serviceTier: "ultrafast" } },
+          }).responsesWebSocket(id),
+          prompt: "Say hello.",
+        })
+        const prepared = yield* LLMClient.prepare<OpenAIResponses.OpenAIResponsesBody>(input)
+
+        expect(prepared.route).toBe("openai-responses-websocket")
+        expect(prepared.metadata).toEqual({ transport: "websocket-json" })
+        expect(prepared.body).toMatchObject({ model: id, service_tier: "ultrafast" })
+
+        const transport = yield* OpenAIResponses.webSocketRoute.prepareTransport(prepared.body, input)
+        const message = JSON.parse(transport.message)
+        expect(message).toMatchObject({ type: "response.create", model: id, service_tier: "ultrafast" })
+        expect(message).not.toHaveProperty("stream")
+        expect(message).not.toHaveProperty("serviceTier")
+      }),
+    )
+  })
 
   it.effect("streams OpenAI Responses over WebSocket", () =>
     Effect.gen(function* () {
@@ -704,7 +747,7 @@ describe("OpenAI Responses route", () => {
     }),
   )
 
-  it.effect("uses incremental input when previousResponseId is available", () =>
+  it.effect("preserves caller-owned input and tools when previousResponseId is available", () =>
     Effect.gen(function* () {
       const prepared = yield* LLMClient.prepare<OpenAIResponses.OpenAIResponsesBody>(
         LLM.request({
@@ -727,12 +770,24 @@ describe("OpenAI Responses route", () => {
       )
 
       expect(prepared.body.previous_response_id).toBe("resp_123")
-      expect(prepared.body.tools).toBeUndefined()
-      expect(prepared.body.input).toEqual([{ type: "function_call_output", call_id: "call_1", output: "tool result" }])
+      expect(prepared.body.tools).toEqual([
+        {
+          type: "function",
+          name: "lookup",
+          description: "Lookup data",
+          parameters: { type: "object", properties: {} },
+        },
+      ])
+      expect(prepared.body.input).toEqual([
+        { role: "system", content: "You are concise." },
+        { role: "user", content: [{ type: "input_text", text: "first turn" }] },
+        { type: "function_call", call_id: "call_1", name: "lookup", arguments: '{"query":"repo"}' },
+        { type: "function_call_output", call_id: "call_1", output: "tool result" },
+      ])
     }),
   )
 
-  it.effect("falls back to full input when previousResponseId has no new tail", () =>
+  it.effect("does not guess a continuation boundary from the last assistant", () =>
     Effect.gen(function* () {
       const prepared = yield* LLMClient.prepare<OpenAIResponses.OpenAIResponsesBody>(
         LLM.request({

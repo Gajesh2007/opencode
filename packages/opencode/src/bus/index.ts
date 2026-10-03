@@ -2,7 +2,7 @@ import { Effect, Exit, Layer, PubSub, Scope, Context, Stream, Schema } from "eff
 import { EffectBridge } from "@/effect/bridge"
 import * as Log from "@opencode-ai/core/util/log"
 import { BusEvent } from "./bus-event"
-import { GlobalBus } from "./global"
+import { GlobalBus, subscribeBounded } from "./global"
 import { InstanceState } from "@/effect/instance-state"
 import { makeRuntime } from "@/effect/run-service"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
@@ -30,6 +30,7 @@ type Payload<D extends BusEvent.Definition = BusEvent.Definition> = {
 type State = {
   wildcard: PubSub.PubSub<Payload>
   typed: Map<string, PubSub.PubSub<Payload>>
+  bounded: Set<(event: Payload) => void>
 }
 
 export interface Interface {
@@ -47,7 +48,10 @@ export interface Interface {
   readonly subscribe: <D extends BusEvent.Definition>(
     def: D,
   ) => Effect.Effect<Stream.Stream<Payload<D>>, never, Scope.Scope>
-  readonly subscribeAll: () => Effect.Effect<Stream.Stream<Payload>, never, Scope.Scope>
+  readonly subscribeAll: (options?: {
+    capacity: number
+    onOverflow?: () => void
+  }) => Effect.Effect<Stream.Stream<Payload>, never, Scope.Scope>
   readonly subscribeCallback: <D extends BusEvent.Definition>(
     def: D,
     callback: (event: Payload<D>) => unknown,
@@ -66,15 +70,19 @@ export const layer = Layer.effect(
       Effect.fn("Bus.state")(function* (ctx) {
         const wildcard = yield* PubSub.unbounded<Payload>()
         const typed = new Map<string, PubSub.PubSub<Payload>>()
+        const bounded = new Set<(event: Payload) => void>()
 
         yield* Effect.addFinalizer(() =>
           Effect.gen(function* () {
             // Publish InstanceDisposed before shutting down so subscribers see it
-            yield* PubSub.publish(wildcard, {
+            const disposed: Payload = {
               type: InstanceDisposed.type,
               id: createID(),
               properties: { directory: ctx.directory },
-            })
+            }
+            yield* PubSub.publish(wildcard, disposed)
+            bounded.forEach((offer) => offer(disposed))
+            bounded.clear()
             yield* PubSub.shutdown(wildcard)
             for (const ps of typed.values()) {
               yield* PubSub.shutdown(ps)
@@ -82,7 +90,7 @@ export const layer = Layer.effect(
           }),
         )
 
-        return { wildcard, typed }
+        return { wildcard, typed, bounded }
       }),
     )
 
@@ -109,6 +117,7 @@ export const layer = Layer.effect(
         const ps = s.typed.get(def.type)
         if (ps) yield* PubSub.publish(ps, payload)
         yield* PubSub.publish(s.wildcard, payload)
+        s.bounded.forEach((offer) => offer(payload))
 
         const dir = yield* InstanceState.directory
         const context = yield* InstanceState.context
@@ -135,10 +144,16 @@ export const layer = Layer.effect(
         return Stream.fromSubscription(subscription)
       })
 
-    const subscribeAll = (): Effect.Effect<Stream.Stream<Payload>, never, Scope.Scope> =>
+    const subscribeAll: Interface["subscribeAll"] = (options) =>
       Effect.gen(function* () {
         log.info("subscribing", { type: "*" })
         const s = yield* InstanceState.get(state)
+        if (options) {
+          return (yield* subscribeBounded<Payload>((offer) => {
+            s.bounded.add(offer)
+            return () => s.bounded.delete(offer)
+          }, options)).pipe(Stream.takeUntil((event) => event.type === InstanceDisposed.type))
+        }
         const subscription = yield* PubSub.subscribe(s.wildcard)
         yield* Effect.addFinalizer(() => Effect.sync(() => log.info("unsubscribing", { type: "*" })))
         return Stream.fromSubscription(subscription)

@@ -9,7 +9,7 @@ export interface OpenAIOptionsInput {
   readonly store?: boolean
   readonly promptCacheKey?: string
   readonly promptCacheRetention?: "in-memory" | "24h"
-  readonly serviceTier?: "auto" | "default" | "flex" | "scale" | "priority"
+  readonly serviceTier?: "auto" | "default" | "flex" | "scale" | "priority" | "ultrafast"
   readonly reasoningEffort?: ReasoningEffort
   readonly reasoningSummary?: "auto"
   // OpenAI Responses `include` wire field. Mirrors the official SDK's

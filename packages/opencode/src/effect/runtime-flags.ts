@@ -51,7 +51,12 @@ export class Service extends ConfigService.Service<Service>()("@opencode/Runtime
   bashDefaultTimeoutMs: positiveInteger("OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS"),
   subagentConcurrency: positiveInteger("OPENCODE_SUBAGENT_CONCURRENCY"),
   experimentalNativeLlm: bool("OPENCODE_EXPERIMENTAL_NATIVE_LLM"),
+  dangerouslySkipPermissions: bool("OPENCODE_DANGEROUSLY_SKIP_PERMISSIONS"),
   yolo: bool("OPENCODE_YOLO"),
+  yoloForever: Config.string("OPENCODE_YOLO_FOREVER").pipe(
+    Config.withDefault(""),
+    Config.map((value) => value.toLowerCase() === "true" || value === "1"),
+  ),
   client: Config.string("OPENCODE_CLIENT").pipe(Config.withDefault("cli")),
 }) {}
 

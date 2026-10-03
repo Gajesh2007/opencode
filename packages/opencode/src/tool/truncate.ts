@@ -88,11 +88,24 @@ export const layer = Layer.effect(
       const maxLines = options.maxLines ?? resolved.maxLines
       const maxBytes = options.maxBytes ?? resolved.maxBytes
       const direction = options.direction ?? "head"
-      const lines = text.split("\n")
       const totalBytes = Buffer.byteLength(text, "utf-8")
+      let totalLines = 1
+      for (let offset = text.indexOf("\n"); offset !== -1; offset = text.indexOf("\n", offset + 1)) totalLines++
 
-      if (lines.length <= maxLines && totalBytes <= maxBytes) {
+      if (totalLines <= maxLines && totalBytes <= maxBytes) {
         return { content: text, truncated: false } as const
+      }
+
+      // Only materialize the preview's lines, not every line in a large tool result.
+      const lines = direction === "head" ? text.split("\n", maxLines) : []
+      if (direction === "tail") {
+        let end = text.length
+        while (lines.length < maxLines) {
+          const start = end === 0 ? 0 : text.lastIndexOf("\n", end - 1) + 1
+          lines.unshift(text.slice(start, end))
+          if (start === 0) break
+          end = start - 1
+        }
       }
 
       const out: string[] = []
@@ -122,7 +135,7 @@ export const layer = Layer.effect(
         }
       }
 
-      const removed = hitBytes ? totalBytes - bytes : lines.length - out.length
+      const removed = hitBytes ? totalBytes - bytes : totalLines - out.length
       const unit = hitBytes ? "bytes" : "lines"
       const preview = out.join("\n")
       const file = yield* write(text)

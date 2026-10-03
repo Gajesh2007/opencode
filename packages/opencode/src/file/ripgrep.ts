@@ -346,37 +346,51 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | ChildPro
         })
       })
 
-      const files: Interface["files"] = (input) =>
-        Stream.callback<string, PlatformError | Error>((queue) =>
-          Effect.gen(function* () {
-            yield* Effect.forkScoped(
-              Effect.gen(function* () {
-                yield* check(input.cwd)
-                const handle = yield* spawner.spawn(yield* command(input.cwd, filesArgs(input)))
-                const stderr = yield* Stream.mkString(Stream.decodeText(handle.stderr)).pipe(Effect.forkScoped)
-                const stdout = yield* Stream.decodeText(handle.stdout).pipe(
-                  Stream.splitLines,
-                  Stream.filter((line) => line.length > 0),
-                  Stream.runForEach((line) => Effect.sync(() => Queue.offerUnsafe(queue, clean(line)))),
-                  Effect.forkScoped,
-                )
-                const code = yield* raceAbort(handle.exitCode, input.signal)
-                yield* Fiber.join(stdout)
-                if (code === 0 || code === 1) {
-                  Queue.endUnsafe(queue)
-                  return
-                }
-                fail(queue, error(yield* Fiber.join(stderr), code))
-              }).pipe(
-                Effect.catch((err) =>
-                  Effect.sync(() => {
-                    fail(queue, err)
-                  }),
+      const files: Interface["files"] = (input) => {
+        const stream = Stream.callback<string, PlatformError | Error>(
+          (queue) =>
+            Effect.gen(function* () {
+              yield* Effect.forkScoped(
+                Effect.gen(function* () {
+                  yield* check(input.cwd)
+                  const handle = yield* spawner.spawn(yield* command(input.cwd, filesArgs(input)))
+                  const stderr = yield* Stream.mkString(Stream.decodeText(handle.stderr)).pipe(Effect.forkScoped)
+                  const stdout = yield* Stream.decodeText(handle.stdout).pipe(
+                    Stream.splitLines,
+                    Stream.filter((line) => line.length > 0),
+                    Stream.runForEach((line) => Queue.offer(queue, clean(line))),
+                    Effect.forkScoped,
+                  )
+                  const code = yield* handle.exitCode
+                  yield* Fiber.join(stdout)
+                  if (code === 0 || code === 1) {
+                    Queue.endUnsafe(queue)
+                    return
+                  }
+                  fail(queue, error(yield* Fiber.join(stderr), code))
+                }).pipe(
+                  Effect.scoped,
+                  (effect) => raceAbort(effect, input.signal),
+                  Effect.catch((err) =>
+                    Effect.gen(function* () {
+                      fail(queue, err)
+                      yield* Queue.shutdown(queue)
+                    }),
+                  ),
                 ),
-              ),
-            )
-          }),
+              )
+            }),
+          { bufferSize: 128 },
         )
+        if (!input.signal) return stream
+        // Do not hand a cancelled consumer an entire previously buffered batch.
+        return stream.pipe(
+          Stream.rechunk(1),
+          Stream.mapEffect((file) =>
+            input.signal?.aborted ? Effect.fail(aborted(input.signal)) : Effect.succeed(file),
+          ),
+        )
+      }
 
       const search: Interface["search"] = Effect.fn("Ripgrep.search")(function* (input: SearchInput) {
         yield* check(input.cwd)
@@ -418,8 +432,6 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | ChildPro
 
       const tree: Interface["tree"] = Effect.fn("Ripgrep.tree")(function* (input: TreeInput) {
         log.info("tree", input)
-        const list = Array.from(yield* files({ cwd: input.cwd, signal: input.signal }).pipe(Stream.runCollect))
-
         interface Node {
           name: string
           children: Map<string, Node>
@@ -438,15 +450,19 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | ChildPro
         }
 
         const root: Node = { name: "", children: new Map() }
-        for (const file of list) {
-          if (file.includes(".opencode")) continue
-          const parts = file.split(path.sep)
-          if (parts.length < 2) continue
-          let node = root
-          for (const part of parts.slice(0, -1)) {
-            node = child(node, part)
-          }
-        }
+        yield* files({ cwd: input.cwd, signal: input.signal }).pipe(
+          Stream.runForEach((file) =>
+            Effect.sync(() => {
+              if (file.includes(".opencode")) return
+              const parts = file.split(path.sep)
+              if (parts.length < 2) return
+              let node = root
+              for (const part of parts.slice(0, -1)) {
+                node = child(node, part)
+              }
+            }),
+          ),
+        )
 
         const total = count(root)
         const limit = input.limit ?? total

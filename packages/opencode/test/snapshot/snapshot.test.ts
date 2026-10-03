@@ -516,6 +516,26 @@ it.instance(
 )
 
 it.instance(
+  "exclude rules stay fresh when the source file is removed and recreated",
+  withTrackedSnapshot(({ tmp, snapshot, before }) =>
+    Effect.gen(function* () {
+      const exclude = `${tmp.path}/.git/info/exclude`
+      yield* rm(exclude)
+      yield* snapshot.track()
+      yield* write(exclude, "ignored.txt\n")
+      yield* write(`${tmp.path}/ignored.txt`, "ignored content")
+      yield* write(`${tmp.path}/normal.txt`, "normal content")
+      const patch = yield* snapshot.patch(before)
+      expect(patch.files).toContain(fwd(tmp.path, "normal.txt"))
+      expect(patch.files).not.toContain(fwd(tmp.path, "ignored.txt"))
+      yield* rm(exclude)
+      expect((yield* snapshot.patch(before)).files).toContain(fwd(tmp.path, "ignored.txt"))
+    }),
+  ),
+  { git: true },
+)
+
+it.instance(
   "git info exclude keeps global excludes",
   Effect.gen(function* () {
     const tmp = yield* bootstrap()

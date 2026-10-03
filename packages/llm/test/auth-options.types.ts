@@ -81,6 +81,16 @@ OpenAI.configure({
   providerOptions: { openai: { store: false } },
 }).responses("gpt-4.1-mini")
 
+const ultrafast = OpenAI.configure({
+  apiKey: "sk-test",
+  providerOptions: { openai: { serviceTier: "ultrafast" } satisfies OpenAI.OpenAIOptionsInput },
+})
+ultrafast.responses("gpt-6-astra")
+ultrafast.responsesWebSocket("gpt-6-astra")
+
+// @ts-expect-error OpenAI service tiers remain a closed union.
+OpenAI.configure({ providerOptions: { openai: { serviceTier: "invalid" } } })
+
 // @ts-expect-error OpenAI model selectors only accept model ids.
 OpenAI.configure({ apiKey: "sk-test" }).responses("gpt-4.1-mini", {})
 

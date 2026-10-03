@@ -552,6 +552,7 @@ const GPT5_FAMILY_RE = /(?:^|\/)gpt-5(?:[.-]|$)/
 const GPT5_VERSION_RE = /(?:^|\/)gpt-5[.-](\d+)(?:[.-]|$)/
 const GPT5_PRO_RE = /(?:^|\/)gpt-5[.-]?pro(?:[.-]|$)/
 const GPT5_VERSIONED_PRO_RE = /(?:^|\/)gpt-5[.-]\d+[.-]pro(?:[.-]|$)/
+const GPT61_SOL_RE = /^(?:openai\/)?gpt-6[.-]1-sol(?:-\d{4}-\d{2}-\d{2})?$/
 
 function gpt5Version(apiId: string) {
   return Number(GPT5_VERSION_RE.exec(apiId)?.[1]) || undefined
@@ -640,11 +641,13 @@ function openaiReasoningEfforts(apiId: string, releaseDate: string, direct = fal
   if (GPT5_FAMILY_RE.test(id)) efforts.unshift("minimal")
   if (releaseDate >= OPENAI_NONE_EFFORT_RELEASE_DATE) efforts.unshift("none")
   if (releaseDate >= OPENAI_XHIGH_EFFORT_RELEASE_DATE) efforts.push("xhigh")
+  if (GPT61_SOL_RE.test(id)) efforts.push("max")
   return efforts
 }
 
 function openaiCompatibleReasoningEfforts(id: string) {
   const apiId = id.toLowerCase()
+  if (GPT61_SOL_RE.test(apiId)) return [...OPENAI_EFFORTS, "max"]
   const chatEfforts = gpt5ChatReasoningEfforts(apiId)
   if (chatEfforts) return chatEfforts
   if (GPT5_PRO_RE.test(apiId)) return OPENAI_GPT5_PRO_EFFORTS
@@ -656,14 +659,26 @@ function openaiCompatibleReasoningEfforts(id: string) {
   )
 }
 
+// Models that reject `thinking: { type: "enabled", budgetTokens }` and instead
+// expect `thinking: { type: "adaptive" }` plus an `effort` tier.
 function anthropicAdaptiveEfforts(apiId: string): string[] | null {
-  if (["fable-5", "opus-4-8", "opus-4.8", "opus-4-7", "opus-4.7"].some((v) => apiId.includes(v))) {
+  const id = apiId.toLowerCase()
+  if (["opus-5", "fable-5", "opus-4-8", "opus-4.8", "opus-4-7", "opus-4.7"].some((v) => id.includes(v))) {
     return ["low", "medium", "high", "xhigh", "max"]
   }
-  if (["opus-4-6", "opus-4.6", "sonnet-4-6", "sonnet-4.6"].some((v) => apiId.includes(v))) {
+  if (["opus-4-6", "opus-4.6", "sonnet-4-6", "sonnet-4.6"].some((v) => id.includes(v))) {
     return ["low", "medium", "high", "max"]
   }
   return null
+}
+
+// Models whose raw chain-of-thought is never returned (display defaults to
+// "omitted"); request summarized thinking so opencode can render reasoning.
+function anthropicSummarizedThinking(apiId: string) {
+  const id = apiId.toLowerCase()
+  return ["opus-5", "fable-5", "opus-4-7", "opus-4.7", "opus-4-8", "opus-4.8"].some((v) => id.includes(v))
+    ? { display: "summarized" }
+    : {}
 }
 
 function googleThinkingLevelEfforts(apiId: string) {
@@ -686,6 +701,14 @@ function googleThinkingBudgetMax(apiId: string) {
 // and 400 on `reasoning_effort`, so they stay excluded from variants.
 // https://docs.z.ai/guides/capabilities/thinking
 const GLM_52_PLUS_RE = /glm-5\.(?:[2-9]|\d{2,})(?:[.-]|$)/
+// Kimi K3 always reasons and exposes the top-level `reasoning_effort` field
+// (low/high/max, default `max`). Earlier kimi models (K2.x) only support the
+// `thinking` flag and 400 on `reasoning_effort`, so they stay excluded.
+// https://platform.kimi.ai/docs/guide/use-reasoning-effort
+// Modal Auto Endpoint model IDs embed the model name in a hostname slug, such
+// as `owner--ep-kimi-k3-server.region.modal.direct`.
+const KIMI_K3_RE = /(?:^|[\/-])kimi-k3(?:[.-]|$)/
+const KIMI_K3_EFFORTS = ["low", "high", "max"]
 // `reasoningEffort` is the AI SDK providerOptions key. For direct zai/zhipuai
 // (`@ai-sdk/openai-compatible`) it becomes the upstream `reasoning_effort`
 // body field; for Vercel AI Gateway (`@ai-sdk/gateway`) it is routed under
@@ -705,11 +728,28 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
     id.includes("deepseek-v3") ||
     id.includes("minimax") ||
     (id.includes("glm") && !GLM_52_PLUS_RE.test(id)) ||
-    id.includes("kimi") ||
+    (id.includes("kimi") && !KIMI_K3_RE.test(id)) ||
     id.includes("k2p") ||
     id.includes("big-pickle")
   )
     return {}
+
+  // Kimi K3 exposes reasoning_effort variants on the Vercel AI Gateway and on
+  // Modal. The model's own default is `max`, so leaving no variant selected
+  // still yields max-effort reasoning.
+  // - Gateway (`@ai-sdk/gateway`): `reasoningEffort` is routed under
+  //   `providerOptions.moonshotai.reasoningEffort` and passed through to the
+  //   upstream's top-level `reasoning_effort` field.
+  // - Modal (`@ai-sdk/openai-compatible`): `reasoningEffort` becomes the
+  //   upstream's top-level `reasoning_effort` body field directly. Match the
+  //   models.dev `modal` provider id as well as any custom provider pointed
+  //   at a Modal inference host (*.modal.direct).
+  if (id.includes("kimi")) {
+    const modal = model.providerID === "modal" || model.api.url.toLowerCase().includes(".modal.direct")
+    const supported = model.api.npm === "@ai-sdk/gateway" || (modal && model.api.npm === "@ai-sdk/openai-compatible")
+    if (!supported) return {}
+    return Object.fromEntries(KIMI_K3_EFFORTS.map((effort) => [effort, { reasoningEffort: effort }]))
+  }
 
   // GLM 5.2+: expose reasoning_effort variants. The model's own default is
   // `max`, so leaving no variant selected still yields max-effort reasoning.
@@ -770,12 +810,7 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
               {
                 thinking: {
                   type: "adaptive",
-                  ...(model.api.id.includes("opus-4-7") ||
-                  model.api.id.includes("opus-4.7") ||
-                  model.api.id.includes("opus-4-8") ||
-                  model.api.id.includes("opus-4.8")
-                    ? { display: "summarized" }
-                    : {}),
+                  ...anthropicSummarizedThinking(model.api.id),
                 },
                 effort,
               },
@@ -912,7 +947,7 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
       if (adaptiveEfforts) {
         let efforts = [...adaptiveEfforts]
         if (model.providerID === "github-copilot") {
-          if (model.api.id.includes("opus-4.7") || model.api.id.includes("opus-4.8")) {
+          if (["opus-4.7", "opus-4.8", "opus-5"].some((v) => model.api.id.includes(v))) {
             efforts = ["medium"]
           }
           // Efforts currently supported are: low, medium, high
@@ -924,12 +959,7 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
             {
               thinking: {
                 type: "adaptive",
-                ...(model.api.id.includes("opus-4-7") ||
-                model.api.id.includes("opus-4.7") ||
-                model.api.id.includes("opus-4-8") ||
-                model.api.id.includes("opus-4.8")
-                  ? { display: "summarized" }
-                  : {}),
+                ...anthropicSummarizedThinking(model.api.id),
               },
               effort,
             },
@@ -966,12 +996,7 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
               reasoningConfig: {
                 type: "adaptive",
                 maxReasoningEffort: effort,
-                ...(model.api.id.includes("opus-4-7") ||
-                model.api.id.includes("opus-4.7") ||
-                model.api.id.includes("opus-4-8") ||
-                model.api.id.includes("opus-4.8")
-                  ? { display: "summarized" }
-                  : {}),
+                ...anthropicSummarizedThinking(model.api.id),
               },
             },
           ]),
@@ -1174,18 +1199,18 @@ export function availableUpstreams(model: Provider.Model): string[] {
 // Tier names are user-facing so they show up verbatim in the picker.
 export function serviceTiers(model: Provider.Model): Record<string, Record<string, any>> {
   const apiId = model.api.id.toLowerCase()
-  const isOpusFastEligible = ["opus-4-6", "opus-4.6", "opus-4-7", "opus-4.7", "opus-4-8", "opus-4.8"].some((v) =>
-    apiId.includes(v),
+  const isOpusFastEligible = ["opus-4-6", "opus-4.6", "opus-4-7", "opus-4.7", "opus-4-8", "opus-4.8", "opus-5"].some(
+    (v) => apiId.includes(v),
   )
 
   switch (model.api.npm) {
     case "@ai-sdk/anthropic":
     case "@ai-sdk/google-vertex/anthropic": {
       const tiers: Record<string, Record<string, any>> = {}
-      // Fast mode: Opus 4.6 / 4.7 / 4.8. @ai-sdk/anthropic auto-adds the
+      // Fast mode: Opus 4.6 / 4.7 / 4.8 / 5. @ai-sdk/anthropic auto-adds the
       // anthropic-beta: fast-mode-2026-02-01 header when speed === "fast".
-      // Pricing is 2x standard for 4.8, 6x for 4.6/4.7. Not compatible with
-      // Priority Tier or Batch.
+      // Pricing is 2x standard for 4.8 and 5, 6x for 4.6/4.7. Not compatible
+      // with Priority Tier or Batch.
       if (isOpusFastEligible) tiers["fast"] = { speed: "fast" }
       return tiers
     }
@@ -1200,6 +1225,10 @@ export function serviceTiers(model: Provider.Model): Record<string, Record<strin
       const hasFlex = /(^|\/)(o3|o4-mini)(?:[.-]|$)/.test(apiId) || /(^|\/)gpt-5(?:[.-]|$)/.test(apiId)
       if (hasPriority) tiers["priority"] = { serviceTier: "priority" }
       if (hasFlex) tiers["flex"] = { serviceTier: "flex" }
+      // Ultrafast is a direct Responses API tier, not an OpenRouter upstream pin.
+      if (model.providerID === "openai" && /^(gpt-6-astra|gpt-5\.6-sol)(?:-\d{4}-\d{2}-\d{2})?$/.test(apiId)) {
+        tiers["ultrafast"] = { serviceTier: "ultrafast" }
+      }
       return tiers
     }
 
@@ -1226,6 +1255,17 @@ export function serviceTiers(model: Provider.Model): Record<string, Record<strin
       // here lands as `{ anthropic: { speed: "fast" } }` on the wire.
       if (apiId.startsWith("anthropic/") && isOpusFastEligible) {
         tiers["fast"] = { speed: "fast" }
+      }
+      // Kimi K3 fast mode through AI Gateway. Vercel changelog:
+      //   https://vercel.com/changelog/kimi-k3-and-kimi-k3-fast-on-ai-gateway
+      // Unlike Anthropic's upstream `speed`, this is the gateway-native
+      // `providerOptions.gateway.speed = "fast"` routing option: the base
+      // model is served by the low-latency tier (~50% higher per-token cost)
+      // and falls back to standard speed when the fast tier is unavailable.
+      // `moonshotai/kimi-k3-fast` already IS the fast serving path, so the
+      // tier is only offered on the base model.
+      if (apiId === "moonshotai/kimi-k3") {
+        tiers["fast"] = { gateway: { speed: "fast" } }
       }
       return tiers
     }
@@ -1329,17 +1369,9 @@ export function options(input: {
     input.model.api.npm === "@ai-sdk/gateway"
 
   if (supportsAdaptive && isAnthropicSDKOrGateway) {
-    // Models whose raw chain-of-thought is never returned (display defaults to
-    // "omitted"); request summarized thinking so opencode can render reasoning.
-    const summarizedThinking =
-      modelId.includes("fable-5") ||
-      modelId.includes("opus-4-7") ||
-      modelId.includes("opus-4.7") ||
-      modelId.includes("opus-4-8") ||
-      modelId.includes("opus-4.8")
     result["thinking"] = {
       type: "adaptive",
-      ...(summarizedThinking ? { display: "summarized" } : {}),
+      ...anthropicSummarizedThinking(modelId),
     }
     result["effort"] = "medium"
   }

@@ -2,6 +2,7 @@ import { describe, expect } from "bun:test"
 import { ConfigProvider, Effect, Layer } from "effect"
 import { RuntimeFlags } from "../../src/effect/runtime-flags"
 import { it } from "../lib/effect"
+import { Flag } from "@opencode-ai/core/flag/flag"
 
 const fromConfig = (input: Record<string, unknown>) =>
   RuntimeFlags.defaultLayer.pipe(Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown(input))))
@@ -9,6 +10,42 @@ const fromConfig = (input: Record<string, unknown>) =>
 const readFlags = RuntimeFlags.Service.useSync((flags) => flags)
 
 describe("RuntimeFlags", () => {
+  for (const value of [undefined, "false", "0", "", "yes", "on", "true", "TRUE", "TrUe", "1"]) {
+    it.live(`yoloForever matches process Flag for ${JSON.stringify(value)}`, () =>
+      Effect.gen(function* () {
+        yield* Effect.acquireRelease(
+          Effect.sync(() => {
+            const previous = process.env.OPENCODE_YOLO_FOREVER
+            if (value === undefined) delete process.env.OPENCODE_YOLO_FOREVER
+            else process.env.OPENCODE_YOLO_FOREVER = value
+            return previous
+          }),
+          (previous) =>
+            Effect.sync(() => {
+              if (previous === undefined) delete process.env.OPENCODE_YOLO_FOREVER
+              else process.env.OPENCODE_YOLO_FOREVER = previous
+            }),
+        )
+        const flags = yield* readFlags.pipe(
+          Effect.provide(RuntimeFlags.defaultLayer.pipe(Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv())))),
+        )
+        expect(flags.yoloForever).toBe(Flag.OPENCODE_YOLO_FOREVER)
+        expect(flags.yoloForever).toBe(value?.toLowerCase() === "true" || value === "1")
+      }),
+    )
+  }
+
+  it.effect("yoloForever can be overridden without enabling legacy modes", () =>
+    Effect.gen(function* () {
+      const defaults = yield* readFlags.pipe(Effect.provide(RuntimeFlags.layer()))
+      const enabled = yield* readFlags.pipe(Effect.provide(RuntimeFlags.layer({ yoloForever: true })))
+      expect(defaults.yoloForever).toBe(false)
+      expect(enabled.yoloForever).toBe(true)
+      expect(enabled.yolo).toBe(false)
+      expect(enabled.dangerouslySkipPermissions).toBe(false)
+    }),
+  )
+
   it.effect("defaultLayer defaults autoShare to false", () =>
     Effect.gen(function* () {
       const flags = yield* readFlags.pipe(Effect.provide(fromConfig({})))

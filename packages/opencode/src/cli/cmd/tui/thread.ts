@@ -21,6 +21,7 @@ import {
   sanitizedProcessEnv,
 } from "@opencode-ai/core/util/opencode-process"
 import { validateSession } from "./validate-session"
+import { withYoloForever } from "@/cli/yolo-forever"
 
 declare global {
   const OPENCODE_WORKER_PATH: string
@@ -80,7 +81,7 @@ export const TuiThreadCommand = cmd({
   command: "$0 [project]",
   describe: "start opencode tui",
   builder: (yargs) =>
-    withNetworkOptions(yargs)
+    withNetworkOptions(withYoloForever(yargs))
       .positional("project", {
         type: "string",
         describe: "path to start opencode in",
@@ -89,6 +90,10 @@ export const TuiThreadCommand = cmd({
         type: "string",
         alias: ["m"],
         describe: "model to use in the format of provider/model",
+      })
+      .option("variant", {
+        type: "string",
+        describe: "model variant (provider-specific reasoning effort, e.g. high, max, minimal)",
       })
       .option("continue", {
         alias: ["c"],
@@ -112,6 +117,11 @@ export const TuiThreadCommand = cmd({
         type: "string",
         describe: "agent to use",
       })
+      .option("dangerously-skip-permissions", {
+        type: "boolean",
+        describe: "auto-approve permissions that are not explicitly denied (dangerous!)",
+        default: false,
+      })
       .option("yolo", {
         type: "boolean",
         describe:
@@ -119,6 +129,7 @@ export const TuiThreadCommand = cmd({
         default: false,
       }),
   handler: async (args) => {
+    if (args["dangerously-skip-permissions"]) process.env.OPENCODE_DANGEROUSLY_SKIP_PERMISSIONS = "true"
     if (args.yolo) process.env.OPENCODE_YOLO = "true"
     // Keep ENABLE_PROCESSED_INPUT cleared even if other code flips it.
     // (Important when running under `bun run` wrappers on Windows.)
@@ -252,6 +263,7 @@ export const TuiThreadCommand = cmd({
             sessionID: args.session,
             agent: args.agent,
             model: args.model,
+            variant: args.variant,
             prompt,
             fork: args.fork,
           },

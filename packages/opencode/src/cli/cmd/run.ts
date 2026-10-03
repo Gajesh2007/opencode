@@ -24,6 +24,7 @@ import { createOpencodeClient, type OpencodeClient, type ToolPart } from "@openc
 import { Agent } from "@/agent/agent"
 import { Permission } from "@/permission"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { withYoloForever } from "@/cli/yolo-forever"
 import { InstanceRef } from "@/effect/instance-ref"
 import { FormatError, FormatUnknownError } from "../error"
 import { INTERACTIVE_INPUT_ERROR, resolveInteractiveStdin } from "./run/runtime.stdin"
@@ -134,7 +135,7 @@ export const RunCommand = effectCmd({
   // The handler also chdirs (preserving the legacy order: chdir → file resolution).
   directory: (args) => (args.dir && !args.attach ? path.resolve(process.cwd(), args.dir) : process.cwd()),
   builder: (yargs: Argv) =>
-    yargs
+    withYoloForever(yargs)
       .positional("message", {
         describe: "message to send",
         type: "string",
@@ -214,6 +215,11 @@ export const RunCommand = effectCmd({
         type: "string",
         describe: "model variant (provider-specific reasoning effort, e.g., high, max, minimal)",
       })
+      .option("dangerously-skip-permissions", {
+        type: "boolean",
+        describe: "auto-approve permissions that are not explicitly denied (dangerous!)",
+        default: false,
+      })
       .option("thinking", {
         type: "boolean",
         describe: "show thinking blocks",
@@ -250,6 +256,7 @@ export const RunCommand = effectCmd({
         describe: "enable direct interactive demo slash commands; pass one as the message to run it immediately",
       }),
   handler: Effect.fn("Cli.run")(function* (args) {
+    if (args["dangerously-skip-permissions"]) process.env.OPENCODE_DANGEROUSLY_SKIP_PERMISSIONS = "true"
     if (args.yolo) process.env.OPENCODE_YOLO = "true"
     const agentSvc = yield* Agent.Service
     const flags = yield* RuntimeFlags.Service

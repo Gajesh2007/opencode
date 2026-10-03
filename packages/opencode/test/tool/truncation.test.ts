@@ -27,6 +27,44 @@ const configuredIt = (cfg: Config.Info) => testEffect(configuredLayer(cfg))
 
 describe("Truncate", () => {
   describe("output", () => {
+    it.live("bounded previews preserve empty lines, UTF-8 byte counts, and zero-line limits", () =>
+      Effect.gen(function* () {
+        const svc = yield* Truncate.Service
+        const fs = yield* AppFileSystem.Service
+        const emoji = String.fromCodePoint(0x1f600)
+        for (const item of [
+          {
+            text: "\nalpha\n\nomega\n",
+            maxLines: 2,
+            maxBytes: 100,
+            head: "\nalpha",
+            tail: "omega\n",
+            removed: "3 lines",
+          },
+          { text: `a\n${emoji}\nc`, maxLines: 10, maxBytes: 5, head: "a", tail: "c", removed: "7 bytes" },
+          {
+            text: `a\n${emoji}\nc`,
+            maxLines: 10,
+            maxBytes: 6,
+            head: `a\n${emoji}`,
+            tail: `${emoji}\nc`,
+            removed: "2 bytes",
+          },
+          { text: "a\nb", maxLines: 0, maxBytes: 100, head: "", tail: "", removed: "2 lines" },
+        ]) {
+          for (const direction of ["head", "tail"] as const) {
+            const result = yield* svc.output(item.text, { direction, maxLines: item.maxLines, maxBytes: item.maxBytes })
+            if (!result.truncated) throw new Error("expected truncation")
+            yield* Effect.addFinalizer(() => fs.remove(result.outputPath).pipe(Effect.ignore))
+            expect(result.content).toContain(`...${item.removed} truncated...`)
+            if (direction === "head") expect(result.content.startsWith(`${item.head}\n\n...`)).toBe(true)
+            if (direction === "tail") expect(result.content.endsWith(`\n\n${item.tail}`)).toBe(true)
+            expect(yield* fs.readFileString(result.outputPath)).toBe(item.text)
+          }
+        }
+      }),
+    )
+
     it.live("truncates large json file by bytes", () =>
       Effect.gen(function* () {
         const svc = yield* Truncate.Service

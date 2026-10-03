@@ -116,6 +116,7 @@ const appBindingCommands = [
   "subagent.steer",
   "service_tier.cycle",
   "service_tier.list",
+  "service_tier.ultrafast.toggle",
   "upstream.cycle",
   "upstream.list",
   "provider.connect",
@@ -295,7 +296,7 @@ export function tui(input: {
   })
 }
 
-function App(props: { onSnapshot?: () => Promise<string[]> }) {
+export function App(props: { onSnapshot?: () => Promise<string[]> }) {
   const tuiConfig = useTuiConfig()
   const route = useRoute()
   const dimensions = useTerminalDimensions()
@@ -773,6 +774,40 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
         slashName: "tier",
         run: () => {
           dialog.replace(() => <DialogServiceTier />)
+        },
+      },
+      {
+        name: "service_tier.ultrafast.toggle",
+        title: local.model.serviceTier.current() === "ultrafast" ? "Disable Ultrafast" : "Enable Ultrafast",
+        category: "Agent",
+        slashName: "ultrafast",
+        run: () => {
+          const current = local.model.current()
+          const model = current && sync.data.provider.find((x) => x.id === current.providerID)?.models[current.modelID]
+          dialog.clear()
+          if (
+            current?.providerID !== "openai" ||
+            model?.api.npm !== "@ai-sdk/openai" ||
+            !local.model.serviceTier.list().includes("ultrafast")
+          ) {
+            toast.show({
+              message:
+                "Ultrafast requires a supported GPT-6 Astra or GPT-5.6 Sol model via the direct OpenAI API. Select one with /models.",
+              variant: "warning",
+              duration: 7000,
+            })
+            return
+          }
+          const enabled = local.model.serviceTier.current() !== "ultrafast"
+          local.model.serviceTier.set(enabled ? "ultrafast" : undefined)
+          toast.show({
+            title: enabled ? "Ultrafast enabled" : "Ultrafast disabled",
+            message: enabled
+              ? "Higher pricing applies. GPT-5.6 Sol requires Ultrafast preview access."
+              : "Restored the default service tier.",
+            variant: enabled ? "warning" : "info",
+            duration: enabled ? 7000 : 3000,
+          })
         },
       },
       {

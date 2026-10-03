@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { Cause, Effect, Exit, Layer } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import type * as Scope from "effect/Scope"
 import os from "os"
 import path from "path"
@@ -1159,6 +1159,142 @@ describe("tool.shell abort", () => {
 })
 
 describe("tool.shell truncation", () => {
+  it.live("drains burst output with slow metadata and preserves UTF-8 tails", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const fs = yield* AppFileSystem.Service
+        const character = String.fromCodePoint(0x1f600)
+        const content = character.repeat(400_000)
+        const result = yield* run(
+          {
+            command: `${bin} -e ${evalarg("process.stdout.write(String.fromCodePoint(0x1f600).repeat(400000))")}`,
+            description: "Burst Unicode output",
+          },
+          { ...ctx, metadata: () => Effect.sleep("10 millis") },
+        )
+        const file = result.metadata.outputPath
+        if (typeof file !== "string") throw new Error("missing output file")
+        yield* Effect.addFinalizer(() => fs.remove(file).pipe(Effect.ignore))
+        expect(result.metadata.exit).toBe(0)
+        expect(yield* fs.readFileString(file)).toBe(content)
+        const tail = result.output.split("\n\n").at(-1) ?? ""
+        expect(tail).not.toContain("\ufffd")
+        expect(tail.endsWith(character)).toBe(true)
+        expect(Buffer.byteLength(tail)).toBeLessThanOrEqual(Truncate.MAX_BYTES)
+      }),
+    ),
+  )
+
+  it.live("publishes first and final output while coalescing burst metadata", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const updates: string[] = []
+        const code = "for(let i=0;i<20;i++){console.log(String.fromCharCode(116,105,99,107)+i);await Bun.sleep(10)}"
+        const result = yield* run(
+          { command: `${bin} -e ${evalarg(code)}`, description: "Progress updates" },
+          {
+            ...ctx,
+            metadata: (input) =>
+              Effect.sync(() => {
+                const output = input.metadata?.output
+                if (typeof output === "string" && output) updates.push(output)
+              }),
+          },
+        )
+        expect(updates[0]).toContain("tick0")
+        expect(updates.at(-1)).toContain("tick19")
+        expect(updates.length).toBeGreaterThan(1)
+        expect(updates.length).toBeLessThan(20)
+        expect(result.output).toContain("tick19")
+      }),
+    ),
+  )
+
+  it.live("abort interrupts a blocked metadata consumer", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const ready = yield* Deferred.make<void>()
+        const controller = new AbortController()
+        const task = yield* run(
+          { command: fill("bytes", 2 * 1024 * 1024), description: "Blocked capture" },
+          {
+            ...ctx,
+            abort: controller.signal,
+            metadata: (input) =>
+              input.metadata?.output
+                ? Deferred.succeed(ready, undefined).pipe(Effect.andThen(Effect.never))
+                : Effect.void,
+          },
+        ).pipe(Effect.forkScoped)
+        yield* Deferred.await(ready)
+        controller.abort()
+        const result = yield* Fiber.join(task).pipe(Effect.timeout("2 seconds"))
+        expect(result.output).toContain("User aborted the command")
+        if (typeof result.metadata.outputPath === "string") {
+          yield* (yield* AppFileSystem.Service).remove(result.metadata.outputPath)
+        }
+      }),
+    ),
+  )
+
+  if (process.platform !== "win32") {
+    it.live("output-file write failures fail promptly instead of waiting for the command timeout", () =>
+      runIn(
+        projectRoot,
+        Effect.gen(function* () {
+          const fs = yield* AppFileSystem.Service
+          yield* fs.ensureDir(Truncate.DIR)
+          const mode = (yield* fs.stat(Truncate.DIR)).mode
+          yield* Effect.addFinalizer(() => fs.chmod(Truncate.DIR, mode).pipe(Effect.orDie))
+          yield* fs.chmod(Truncate.DIR, 0o555)
+          const result = yield* run({ command: fill("bytes", 2 * 1024 * 1024), description: "Unwritable output" }).pipe(
+            Effect.timeout("2 seconds"),
+            Effect.exit,
+          )
+          expect(Exit.isFailure(result)).toBe(true)
+          if (Exit.isFailure(result)) {
+            expect(Cause.pretty(result.cause)).not.toContain("TimeoutError")
+            expect(Cause.pretty(result.cause)).toContain("EACCES")
+          }
+        }),
+      ),
+    )
+
+    it.live(
+      "fiber cancellation kills a command that ignores SIGTERM",
+      () =>
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            const ready = yield* Deferred.make<number>()
+            const task = yield* run(
+              {
+                command: `${bin} -e ${evalarg("process.on(String.fromCharCode(83,73,71,84,69,82,77),()=>{});console.log(process.pid);setInterval(()=>{},1000)")}`,
+                description: "Uncooperative process",
+              },
+              {
+                ...ctx,
+                metadata: (input) =>
+                  typeof input.metadata?.output === "string" && input.metadata.output.trim()
+                    ? Deferred.succeed(ready, Number(input.metadata.output.trim()))
+                    : Effect.void,
+              },
+            ).pipe(Effect.forkScoped)
+            const pid = yield* Deferred.await(ready)
+            yield* Fiber.interrupt(task).pipe(Effect.timeout("5 seconds"))
+            const alive = yield* Effect.try({ try: () => process.kill(pid, 0), catch: (error) => error }).pipe(
+              Effect.orElseSucceed(() => false),
+            )
+            expect(alive).toBe(false)
+          }),
+        ),
+      10_000,
+    )
+  }
+
   it.live("truncates output exceeding line limit", () =>
     runIn(
       projectRoot,

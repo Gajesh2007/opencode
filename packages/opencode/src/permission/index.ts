@@ -9,10 +9,14 @@ import { Database } from "@/storage/db"
 import { eq } from "drizzle-orm"
 import * as Log from "@opencode-ai/core/util/log"
 import { Wildcard } from "@opencode-ai/core/util/wildcard"
+import { Flag } from "@opencode-ai/core/flag/flag"
 import { Deferred, Duration, Effect, Layer, Schema, Context } from "effect"
 import os from "os"
 import { PermissionV2 } from "@opencode-ai/core/permission"
 import { PermissionID } from "./schema"
+import { evaluate } from "./evaluate"
+
+export { evaluate } from "./evaluate"
 
 const log = Log.create({ service: "permission" })
 
@@ -135,10 +139,6 @@ interface State {
   approved: Rule[]
 }
 
-export function evaluate(permission: string, pattern: string, ...rulesets: Ruleset[]): Rule {
-  return PermissionV2.evaluate(permission, pattern, ...rulesets)
-}
-
 export class Service extends Context.Service<Service, Interface>()("@opencode/Permission") {}
 
 export const layer = Layer.effect(
@@ -169,6 +169,7 @@ export const layer = Layer.effect(
     )
 
     const ask = Effect.fn("Permission.ask")(function* (input: AskInput) {
+      if (Flag.OPENCODE_YOLO_FOREVER) return
       const { approved, pending } = yield* InstanceState.get(state)
       const { ruleset, ...request } = input
       let needsAsk = false
@@ -186,6 +187,19 @@ export const layer = Layer.effect(
       }
 
       if (!needsAsk) return
+
+      const dangerouslySkipPermissions =
+        Flag.OPENCODE_DANGEROUSLY_SKIP_PERMISSIONS ||
+        process.env.OPENCODE_DANGEROUSLY_SKIP_PERMISSIONS === "true" ||
+        process.env.OPENCODE_DANGEROUSLY_SKIP_PERMISSIONS === "1"
+
+      if (dangerouslySkipPermissions) {
+        log.info("dangerously-skip-permissions auto-approved", {
+          permission: request.permission,
+          patterns: request.patterns,
+        })
+        return
+      }
 
       const yoloEnabled = process.env.OPENCODE_YOLO === "true"
 
@@ -333,6 +347,7 @@ export function merge(...rulesets: Ruleset[]): Rule[] {
 }
 
 export function disabled(tools: string[], ruleset: Ruleset): Set<string> {
+  if (Flag.OPENCODE_YOLO_FOREVER) return new Set()
   return PermissionV2.disabled(tools, ruleset)
 }
 

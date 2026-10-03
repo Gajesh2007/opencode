@@ -213,6 +213,45 @@ describe("Bus (Effect-native)", () => {
     }),
   )
 
+  it.instance("bounded subscribeAll is eager and delivers in order below capacity", () =>
+    Effect.gen(function* () {
+      const bus = yield* Bus.Service
+      const stream = yield* bus.subscribeAll({ capacity: 3 })
+      yield* bus.publish(TestEvent.Ping, { value: 1 })
+      yield* bus.publish(TestEvent.Pong, { message: "second" })
+      yield* bus.publish(TestEvent.Ping, { value: 3 })
+      expect(yield* stream.pipe(Stream.take(3), Stream.runCollect, Effect.timeout("1 second"))).toMatchObject([
+        { type: TestEvent.Ping.type, properties: { value: 1 } },
+        { type: TestEvent.Pong.type, properties: { message: "second" } },
+        { type: TestEvent.Ping.type, properties: { value: 3 } },
+      ])
+    }),
+  )
+
+  it.instance("bounded overflow disconnects without backpressure or changing native delivery", () =>
+    Effect.gen(function* () {
+      const bus = yield* Bus.Service
+      const typed = yield* bus.subscribe(TestEvent.Ping)
+      const wildcard = yield* bus.subscribeAll()
+      const overflow = yield* Deferred.make<void>()
+      const bounded = yield* bus.subscribeAll({
+        capacity: 2,
+        onOverflow: () => Deferred.doneUnsafe(overflow, Effect.void),
+      })
+      yield* Effect.forEach([1, 2, 3, 4], (value) => bus.publish(TestEvent.Ping, { value })).pipe(
+        Effect.timeout("1 second"),
+      )
+      yield* Deferred.await(overflow).pipe(Effect.timeout("1 second"))
+      const disconnected = yield* bounded.pipe(Stream.runDrain, Effect.exit, Effect.timeout("1 second"))
+      expect(disconnected._tag).toBe("Failure")
+      expect(yield* typed.pipe(Stream.take(4), Stream.runCollect)).toHaveLength(4)
+      expect(yield* wildcard.pipe(Stream.take(4), Stream.runCollect)).toHaveLength(4)
+      const fresh = yield* bus.subscribeAll({ capacity: 1 })
+      yield* bus.publish(TestEvent.Ping, { value: 5 })
+      expect(yield* fresh.pipe(Stream.take(1), Stream.runCollect)).toMatchObject([{ properties: { value: 5 } }])
+    }),
+  )
+
   // RACE 3: the /event-handler shape exactly. With eager subscription, the
   // bus subscription is alive before Stream.concat ever starts. Publishes
   // during the prefix consumption window are queued and delivered.
@@ -283,6 +322,19 @@ describe("Bus (Effect-native)", () => {
 
       expect(types).toContain("test.effect.ping")
       expect(types).toContain(Bus.InstanceDisposed.type)
+    }),
+  )
+
+  it.live("bounded subscribeAll sees InstanceDisposed on disposal", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const stream = yield* Effect.gen(function* () {
+        return yield* (yield* Bus.Service).subscribeAll({ capacity: 2 })
+      }).pipe(provideInstance(dir))
+      yield* Effect.promise(disposeAllInstances)
+      expect(yield* stream.pipe(Stream.runCollect, Effect.timeout("1 second"))).toMatchObject([
+        { type: Bus.InstanceDisposed.type, properties: { directory: dir } },
+      ])
     }),
   )
 })

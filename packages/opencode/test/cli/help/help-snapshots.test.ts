@@ -91,6 +91,16 @@ const SUBCOMMANDS = [
 const SNAPSHOT_ENV = { COLUMNS: "120" }
 
 describe("opencode CLI help-text snapshots", () => {
+  cliIt.live("root help documents the process-lifetime permission bypass", ({ opencode }) =>
+    Effect.gen(function* () {
+      const result = yield* opencode.spawn(["--help"])
+      opencode.expectExit(result, 0)
+      expect(result.stderr).toContain("--yolo-forever")
+      expect(result.stderr).toContain("including denies")
+      expect(result.stderr).not.toContain("Warning: YOLO FOREVER")
+    }),
+  )
+
   // Single test, parallel spawns. Each command's help fires under
   // `concurrency: 8` — wall-clock stays under ~10s even for ~35 commands,
   // versus ~1 minute if we serialized.

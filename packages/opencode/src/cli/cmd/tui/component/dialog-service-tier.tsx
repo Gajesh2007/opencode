@@ -7,6 +7,7 @@ import { DialogUpstream } from "./dialog-upstream"
 const TIER_DESCRIPTIONS: Record<string, string> = {
   fast: "Anthropic fast mode — up to 2.5x output TPS on Opus 4.6/4.7. ~6x standard price. Beta.",
   priority: "Higher availability + faster processing. Premium price.",
+  ultrafast: "OpenAI Ultrafast: faster output at higher pricing. GPT-5.6 Sol requires preview access.",
   flex: "Cheaper processing, higher latency, occasional capacity errors.",
   throughput: "Route to the provider with the highest tokens/sec (median).",
   latency: "Route to the provider with the lowest time-to-first-token (median).",

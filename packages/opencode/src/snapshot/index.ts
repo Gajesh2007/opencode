@@ -170,18 +170,17 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | AppProce
             return (yield* config.get()).snapshot !== false
           })
 
-          const excludes = Effect.fnUntraced(function* () {
-            const result = yield* git(["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"], {
-              cwd: state.worktree,
-            })
-            const file = result.text.trim()
-            if (!file) return
-            if (!(yield* exists(file))) return
-            return file
-          })
+          const excludes = yield* Effect.cached(
+            Effect.gen(function* () {
+              const result = yield* git(["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"], {
+                cwd: state.worktree,
+              })
+              return result.text.trim()
+            }),
+          )
 
           const sync = Effect.fnUntraced(function* (list: string[] = []) {
-            const file = yield* excludes()
+            const file = yield* excludes
             const target = path.join(state.gitdir, "info", "exclude")
             const text = [
               file ? (yield* read(file)).trimEnd() : "",
@@ -189,8 +188,11 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | AppProce
             ]
               .filter(Boolean)
               .join("\n")
+            const content = text ? `${text}\n` : ""
+            // Read source rules each time; only the repository metadata path is stable.
+            if ((yield* read(target)) === content) return
             yield* fs.ensureDir(path.join(state.gitdir, "info")).pipe(Effect.orDie)
-            yield* fs.writeFileString(target, text ? `${text}\n` : "").pipe(Effect.orDie)
+            yield* fs.writeFileString(target, content).pipe(Effect.orDie)
           })
 
           const add = Effect.fnUntraced(function* () {

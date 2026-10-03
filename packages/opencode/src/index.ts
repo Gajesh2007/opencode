@@ -40,6 +40,7 @@ import { Heap } from "./cli/heap"
 import { drizzle } from "drizzle-orm/bun-sqlite"
 import { ensureProcessMetadata } from "@opencode-ai/core/util/opencode-process"
 import { isRecord } from "@/util/record"
+import { withYoloForever } from "./cli/yolo-forever"
 
 const processMetadata = ensureProcessMetadata("main")
 
@@ -67,7 +68,7 @@ function show(out: string) {
   process.stderr.write(out)
 }
 
-const cli = yargs(args)
+const cli = withYoloForever(yargs(args))
   .parserConfiguration({ "populate--": true })
   .scriptName("opencode")
   .wrap(100)
@@ -88,9 +89,16 @@ const cli = yargs(args)
     describe: "run without external plugins",
     type: "boolean",
   })
+  .option("dangerously-skip-permissions", {
+    describe: "auto-approve permissions that are not explicitly denied (dangerous!)",
+    type: "boolean",
+  })
   .middleware(async (opts) => {
     if (opts.pure) {
       process.env.OPENCODE_PURE = "1"
+    }
+    if (opts["dangerously-skip-permissions"]) {
+      process.env.OPENCODE_DANGEROUSLY_SKIP_PERMISSIONS = "true"
     }
 
     await Log.init({

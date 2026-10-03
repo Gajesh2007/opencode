@@ -1,6 +1,7 @@
 .DS_Store
 node_modules
 .worktrees
+/.claude/worktrees/
 .sst
 .env
 .env.local
@@ -34,3 +35,6 @@ tsconfig.tsbuildinfo
 # Verification / e2e scratch artifacts
 .playwright-cli/
 /output/
+
+# External reference clones
+/references/

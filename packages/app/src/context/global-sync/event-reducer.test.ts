@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test"
-import type { Message, Part, PermissionRequest, Project, QuestionRequest, Session } from "@opencode-ai/sdk/v2/client"
+import type {
+  Message,
+  Part,
+  PermissionRequest,
+  Project,
+  QuestionRequest,
+  Session,
+  ToolPart,
+} from "@opencode-ai/sdk/v2/client"
 import { createStore } from "solid-js/store"
 import type { State } from "./types"
 import { applyDirectoryEvent, applyGlobalEvent, cleanupDroppedSessionCaches } from "./event-reducer"
@@ -33,6 +41,16 @@ const textPart = (id: string, sessionID: string, messageID: string) =>
     type: "text",
     text: id,
   }) as Part
+
+const toolPart = (state: ToolPart["state"]): ToolPart => ({
+  id: "prt_1",
+  sessionID: "ses_1",
+  messageID: "msg_1",
+  type: "tool",
+  callID: "call_1",
+  tool: "bash",
+  state,
+})
 
 const permissionRequest = (id: string, sessionID: string, title = id) =>
   ({
@@ -422,6 +440,101 @@ describe("applyDirectoryEvent", () => {
     })
 
     expect(store.part[messageID]).toBeUndefined()
+  })
+
+  test("appends partial raw input only to pending tool state", () => {
+    const [store, setStore] = createStore(
+      baseState({ part: { msg_1: [toolPart({ status: "pending", input: {}, raw: '{"command":' })] } }),
+    )
+
+    for (const [delta, raw] of [
+      ['"echo ', '{"command":"echo '],
+      ['hello"}', '{"command":"echo hello"}'],
+    ]) {
+      applyDirectoryEvent({
+        event: {
+          type: "message.part.delta",
+          properties: { messageID: "msg_1", partID: "prt_1", field: "state.raw", delta },
+        },
+        store,
+        setStore,
+        push() {},
+        directory: "/tmp",
+        loadLsp() {},
+      })
+
+      expect(store.part.msg_1).toEqual([toolPart({ status: "pending", input: {}, raw })])
+      expect(store.part_text_accum_delta).toEqual({})
+    }
+  })
+
+  test.each([
+    { status: "running", input: { command: "pwd" }, time: { start: 1 } },
+    {
+      status: "completed",
+      input: { command: "pwd" },
+      output: "/tmp",
+      title: "pwd",
+      metadata: {},
+      time: { start: 1, end: 2 },
+    },
+    { status: "error", input: { command: "pwd" }, error: "failed", time: { start: 1, end: 2 } },
+  ] satisfies ToolPart["state"][])("keeps $status snapshots authoritative over raw deltas", (state) => {
+    const [store, setStore] = createStore(
+      baseState({ part: { msg_1: [toolPart({ status: "pending", input: {}, raw: "" })] } }),
+    )
+    const snapshot = toolPart(state)
+    const delta = {
+      type: "message.part.delta",
+      properties: { messageID: "msg_1", partID: "prt_1", field: "state.raw", delta: '{"command":"echo' },
+    }
+
+    for (const event of [
+      delta,
+      { type: "message.part.updated", properties: { part: structuredClone(snapshot) } },
+      delta,
+    ]) {
+      applyDirectoryEvent({
+        event,
+        store,
+        setStore,
+        push() {},
+        directory: "/tmp",
+        loadLsp() {},
+      })
+    }
+
+    expect(store.part.msg_1).toEqual([snapshot])
+    expect(store.part_text_accum_delta).toEqual({})
+  })
+
+  test.each(["text", "reasoning"] as const)("ignores raw deltas for %s parts and still accumulates text", (type) => {
+    const [store, setStore] = createStore(
+      baseState({
+        part: {
+          msg_1: [{ id: "prt_1", sessionID: "ses_1", messageID: "msg_1", type, text: "hello", time: { start: 1 } }],
+        },
+      }),
+    )
+
+    for (const field of ["text", "state.raw"]) {
+      applyDirectoryEvent({
+        event: {
+          type: "message.part.delta",
+          properties: { messageID: "msg_1", partID: "prt_1", field, delta: " world" },
+        },
+        store,
+        setStore,
+        push() {},
+        directory: "/tmp",
+        loadLsp() {},
+      })
+    }
+
+    expect(store.part.msg_1).toEqual([
+      { id: "prt_1", sessionID: "ses_1", messageID: "msg_1", type, text: "hello world", time: { start: 1 } },
+    ])
+    expect(store.part_text_accum_delta).toEqual({ prt_1: " world" })
   })
 
   test("tracks permission and question request lifecycles", () => {

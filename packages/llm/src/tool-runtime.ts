@@ -1,4 +1,4 @@
-import { Effect, Stream } from "effect"
+import { Effect, References, Stream } from "effect"
 import type { Concurrency } from "effect/Types"
 import {
   type ContentPart,
@@ -64,6 +64,7 @@ export const stepCountIs =
  */
 export const stream = <T extends Tools>(options: StreamOptions<T>): Stream.Stream<LLMEvent, LLMError> => {
   const concurrency = options.concurrency ?? 10
+  const retainHistory = options.stopWhen !== undefined && options.toolExecution !== "none"
   const tools = options.tools as Tools
   const runtimeTools = toDefinitions(tools)
   const runtimeToolNames = new Set(runtimeTools.map((tool) => tool.name))
@@ -92,8 +93,13 @@ export const stream = <T extends Tools>(options: StreamOptions<T>): Stream.Strea
 
         const modelStream = options
           .stream(request)
-          .pipe(Stream.map((event) => indexStep(event, step)))
-          .pipe(Stream.tap((event) => Effect.sync(() => accumulate(state, event))))
+          .pipe(
+            Stream.map((event) => {
+              const indexed = indexStep(event, step)
+              accumulate(state, indexed, retainHistory)
+              return indexed
+            }),
+          )
           .pipe(Stream.filter((event) => event.type !== "finish"))
 
         const continuation = Stream.unwrap(
@@ -111,31 +117,31 @@ export const stream = <T extends Tools>(options: StreamOptions<T>): Stream.Strea
             if (state.finishReason !== "tool-calls" || state.toolCalls.length === 0) return finishStream
             if (options.toolExecution === "none") return finishStream
 
-            const dispatched = yield* Effect.forEach(
-              state.toolCalls,
-              (call) =>
-                dispatch(tools, call).pipe(Effect.map((result) => [call, result.result, result.error] as const)),
-              { concurrency },
+            const dispatched: Array<readonly [ToolCallPart, ToolResultValueType]> = []
+            const resultStream = Stream.fromIterable(state.toolCalls).pipe(
+              Stream.mapEffect(
+                (call, index) =>
+                  dispatch(tools, call).pipe(
+                    Effect.map((result) => {
+                      // Emit as tools complete, but retain the model's call order for history.
+                      if (retainHistory) dispatched[index] = [call, result.result]
+                      return emitEvents(call, result.result, result.error)
+                    }),
+                  ),
+                {
+                  concurrency: concurrency === "inherit" ? yield* References.CurrentConcurrency : concurrency,
+                  unordered: true,
+                },
+              ),
+              Stream.flattenIterable,
             )
-            const resultStream = Stream.fromIterable(
-              dispatched.flatMap(([call, result, error]) => emitEvents(call, result, error)),
-            )
-
-            if (!options.stopWhen) return resultStream.pipe(Stream.concat(finishStream))
-            if (options.stopWhen({ step, request })) return resultStream.pipe(Stream.concat(finishStream))
 
             return resultStream.pipe(
               Stream.concat(
-                loop(
-                  followUpRequest(
-                    request,
-                    state,
-                    dispatched.map(([call, result]) => [call, result] as const),
-                  ),
-                  step + 1,
-                  totalUsage,
-                  totalProviderMetadata,
-                ),
+                Stream.suspend(() => {
+                  if (!options.stopWhen || options.stopWhen({ step, request })) return finishStream
+                  return loop(followUpRequest(request, state, dispatched), step + 1, totalUsage, totalProviderMetadata)
+                }),
               ),
             )
           }),
@@ -162,24 +168,25 @@ interface StepState {
   providerMetadata: ProviderMetadata | undefined
 }
 
-const accumulate = (state: StepState, event: LLMEvent) => {
-  if (event.type === "text-delta") {
+const accumulate = (state: StepState, event: LLMEvent, retainHistory: boolean) => {
+  if (retainHistory && event.type === "text-delta") {
     appendStreamingText(state, "text", event.text, undefined)
     return
   }
-  if (event.type === "reasoning-delta") {
+  if (retainHistory && event.type === "reasoning-delta") {
     appendStreamingText(state, "reasoning", event.text, undefined)
     return
   }
-  if (event.type === "reasoning-end") {
+  if (retainHistory && event.type === "reasoning-end") {
     appendStreamingText(state, "reasoning", "", event.providerMetadata)
     return
   }
-  if (event.type === "text-end") {
+  if (retainHistory && event.type === "text-end") {
     appendStreamingText(state, "text", "", event.providerMetadata)
     return
   }
   if (event.type === "tool-call") {
+    if (!retainHistory && event.providerExecuted) return
     const part = ToolCallPart.make({
       id: event.id,
       name: event.name,
@@ -187,11 +194,11 @@ const accumulate = (state: StepState, event: LLMEvent) => {
       providerExecuted: event.providerExecuted,
       providerMetadata: event.providerMetadata,
     })
-    state.assistantContent.push(part)
+    if (retainHistory) state.assistantContent.push(part)
     if (!event.providerExecuted) state.toolCalls.push(part)
     return
   }
-  if (event.type === "tool-result" && event.providerExecuted) {
+  if (retainHistory && event.type === "tool-result" && event.providerExecuted) {
     state.assistantContent.push(
       ToolResultPart.make({
         id: event.id,
