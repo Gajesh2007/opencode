@@ -1,6 +1,7 @@
 import * as Tool from "./tool"
 import DESCRIPTION from "./task_status.txt"
 import { BackgroundJob } from "@/background/job"
+import { Collaboration } from "@/agent/collaboration"
 import { Session } from "@/session/session"
 import { MessageV2 } from "@/session/message-v2"
 import { SessionID } from "@/session/schema"
@@ -21,11 +22,11 @@ const Parameters = Schema.Struct({
   }),
 })
 
-type State = BackgroundJob.Status
+type State = BackgroundJob.Status | "pending"
 type InspectResult = { state: State; text: string }
 
 function format(input: { taskID: SessionID; state: State; text: string }) {
-  const tag = input.state === "completed" || input.state === "running" ? "task_result" : "task_error"
+  const tag = ["completed", "running", "pending"].includes(input.state) ? "task_result" : "task_error"
   return [`task_id: ${input.taskID}`, `state: ${input.state}`, "", `<${tag}>`, input.text, `</${tag}>`].join("\n")
 }
 
@@ -49,6 +50,7 @@ export const TaskStatusTool = Tool.define(
   "task_status",
   Effect.gen(function* () {
     const jobs = yield* BackgroundJob.Service
+    const collaboration = yield* Collaboration.Service
     const sessions = yield* Session.Service
     const status = yield* SessionStatus.Service
 
@@ -57,6 +59,13 @@ export const TaskStatusTool = Tool.define(
     ) {
       const job = yield* jobs.get(taskID)
       if (job) {
+        if (
+          job.status === "running" &&
+          (job.type === "spawn_agent" || job.type === "followup_task") &&
+          (yield* collaboration.member(taskID))?.status === "pending"
+        ) {
+          return { state: "pending", text: "Task is waiting to start; it has not begun executing this turn." }
+        }
         return {
           state: job.status,
           text:
@@ -97,7 +106,7 @@ export const TaskStatusTool = Tool.define(
     ) => Effect.Effect<{ result: InspectResult; timedOut: boolean }> = Effect.fn("TaskStatusTool.waitForTerminal")(
       function* (taskID: SessionID, timeout: number) {
         const result = yield* inspect(taskID)
-        if (result.state !== "running") return { result, timedOut: false }
+        if (result.state !== "running" && result.state !== "pending") return { result, timedOut: false }
         if (timeout <= 0) return { result, timedOut: true }
         const sleep = Math.min(POLL_MS, timeout)
         yield* Effect.sleep(`${sleep} millis`)
@@ -129,21 +138,17 @@ export const TaskStatusTool = Tool.define(
       const waited =
         params.wait === true
           ? yield* jobs.wait({ id: params.task_id, timeout: params.timeout_ms ?? DEFAULT_TIMEOUT })
-          : { info: yield* jobs.get(params.task_id), timedOut: false }
-      const inspected = waited.info
-        ? {
-            result: {
-              state: waited.info.status,
-              text:
-                waited.info.output ??
-                waited.info.error ??
-                (waited.info.status === "running" ? "Task is still running." : ""),
-            },
-            timedOut: waited.timedOut,
-          }
-        : params.wait === true
-          ? yield* waitForTerminal(params.task_id, params.timeout_ms ?? DEFAULT_TIMEOUT)
-          : { result: yield* inspect(params.task_id), timedOut: false }
+          : undefined
+      // Follow-ups reuse job IDs, so preserve the turn that the wait completed.
+      const inspected =
+        waited?.info && waited.info.status !== "running"
+          ? {
+              result: { state: waited.info.status, text: waited.info.output ?? waited.info.error ?? "" },
+              timedOut: waited.timedOut,
+            }
+          : params.wait === true && !waited?.info
+            ? yield* waitForTerminal(params.task_id, params.timeout_ms ?? DEFAULT_TIMEOUT)
+            : { result: yield* inspect(params.task_id), timedOut: waited?.timedOut ?? false }
       const text = inspected.timedOut
         ? `Timed out after ${params.timeout_ms ?? DEFAULT_TIMEOUT}ms while waiting for task completion.`
         : inspected.result.text

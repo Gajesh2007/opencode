@@ -21,7 +21,7 @@ For each item, call the `task` tool with:
   5. Open a PR: `gh pr create --fill` (or `--title "..." --body "..."`). If `gh` is not authenticated or unavailable, instead push the branch and report the branch name + the remote compare URL.
   6. Report back the PR URL (or branch/compare URL) as its final message.
 
-Send the items concurrently (multiple `task` calls in one turn). The global concurrency cap bounds how many run at once.
+Send the items concurrently (multiple `task` calls in one turn). There is no default concurrency cap; an explicitly configured global limit is respected.
 
 ## 3. Collect and report
 Once the subagents finish, gather each one's PR URL and present a single list: item → PR link (or branch, if no PR was opened). Note any items that were skipped because they weren't independent.

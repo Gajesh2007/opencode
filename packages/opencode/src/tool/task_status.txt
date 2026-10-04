@@ -1,6 +1,6 @@
 Read the status and output of a subagent launched with `task` or `spawn_agent`.
 
-Use this for background tasks and collaboration agents. Completed output remains readable by session id even after its completion message has been delivered to the parent.
+Use this for background tasks and collaboration agents. Completed output remains readable by session id even after its completion message has been delivered to the parent. Open the child session to view its live chat; this tool does not stream the transcript.
 
 Parameters:
 - `task_id` (required): the task session id returned by `task` or `spawn_agent`
@@ -9,5 +9,5 @@ Parameters:
 
 Returns compact, parseable output:
 - `task_id`
-- `state` (`running`, `completed`, `error`, or `cancelled`)
+- `state` (`pending`, `running`, `completed`, `error`, or `cancelled`). `pending` means a collaboration agent has not begun executing its turn.
 - `<task_result>...</task_result>` or `<task_error>...</task_error>` containing final output, error summary, or current progress text

@@ -464,9 +464,7 @@ export const TaskTool = Tool.define(
         type: id,
         title: params.description,
         metadata,
-        // Gate the actual subagent work behind the shared concurrency semaphore
-        // so massive fan-outs (the workflow engine, or many parallel task calls)
-        // drain through a bounded window instead of stampeding the provider.
+        // Only an explicitly configured global concurrency limit queues work.
         run: limit.withPermit(runTask()),
       })
 

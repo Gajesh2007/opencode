@@ -159,7 +159,7 @@ describe("tool.registry", () => {
       expect(ids).toContain("interrupt_agent")
       expect(ids).toContain("list_agents")
       expect(spawnAgent?.description).toContain("recursively use spawn_agent")
-      expect(spawnAgent?.description).toContain("four total concurrency slots")
+      expect(spawnAgent?.description).toContain("There is no fixed limit on active subagents")
       expect(spawnAgent?.description).toContain("explicit denies win")
       expect(spawnAgent?.description).toContain('defaults to `"none"`')
       expect(spawnAgent?.description).toContain("sufficient context in `message`")

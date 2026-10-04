@@ -121,65 +121,62 @@ export const layer = Layer.effect(
         metadata,
         run: limit
           .withPermit(
-            collaboration.withChildPermit(
-              input.childSessionID,
-              Effect.gen(function* () {
-                yield* collaboration.setStatus({
-                  sessionID: input.childSessionID,
-                  status: "running",
-                  lastTask: input.message,
-                })
-                const executed = yield* runChildTurn({
-                  ops: input.ops,
-                  plugin,
-                  parentSessionID: input.parentSessionID,
-                  childSessionID: input.childSessionID,
-                  agent: input.agent,
-                  description: input.task,
-                  prompt: input.message,
-                  model: input.model,
-                  variant: input.variant,
-                  serviceTier: input.serviceTier,
-                  upstream: input.upstream,
-                  tools: childToolOverrides({ agent: input.agent, primaryTools: cfg.experimental?.primary_tools }),
-                }).pipe(Effect.exit)
-                if (Exit.isFailure(executed)) {
-                  if (Cause.hasInterruptsOnly(executed.cause)) return yield* Effect.failCause(executed.cause)
-                  const error = errorText(Cause.squash(executed.cause))
-                  const completed = yield* collaboration
-                    .complete({ sessionID: input.childSessionID, error })
-                    .pipe(Effect.exit)
-                  if (Exit.isSuccess(completed)) {
-                    yield* notifyParent({ ops: input.ops, parentSessionID: input.parentSessionID })
-                  }
-                  if (Exit.isFailure(completed)) {
-                    yield* collaboration.setStatus({
-                      sessionID: input.childSessionID,
-                      status: "errored",
-                      error: `Child execution failed and its error could not be delivered: ${errorText(Cause.squash(completed.cause))}`,
-                    })
-                  }
-                  return yield* Effect.failCause(executed.cause)
-                }
-                const output = executed.value
-                const delivered = yield* collaboration
-                  .complete({ sessionID: input.childSessionID, result: output })
-                  .pipe(Effect.retry(Schedule.recurs(2)), Effect.exit)
-                if (Exit.isSuccess(delivered)) {
+            Effect.gen(function* () {
+              yield* collaboration.setStatus({
+                sessionID: input.childSessionID,
+                status: "running",
+                lastTask: input.message,
+              })
+              const executed = yield* runChildTurn({
+                ops: input.ops,
+                plugin,
+                parentSessionID: input.parentSessionID,
+                childSessionID: input.childSessionID,
+                agent: input.agent,
+                description: input.task,
+                prompt: input.message,
+                model: input.model,
+                variant: input.variant,
+                serviceTier: input.serviceTier,
+                upstream: input.upstream,
+                tools: childToolOverrides({ agent: input.agent, primaryTools: cfg.experimental?.primary_tools }),
+              }).pipe(Effect.exit)
+              if (Exit.isFailure(executed)) {
+                if (Cause.hasInterruptsOnly(executed.cause)) return yield* Effect.failCause(executed.cause)
+                const error = errorText(Cause.squash(executed.cause))
+                const completed = yield* collaboration
+                  .complete({ sessionID: input.childSessionID, error })
+                  .pipe(Effect.exit)
+                if (Exit.isSuccess(completed)) {
                   yield* notifyParent({ ops: input.ops, parentSessionID: input.parentSessionID })
-                  return output
                 }
-                const error = `Child completed, but final answer delivery failed: ${errorText(Cause.squash(delivered.cause))}`
-                yield* collaboration.setStatus({
-                  sessionID: input.childSessionID,
-                  status: "errored",
-                  result: output,
-                  error,
-                })
-                yield* background.fail({ id: input.childSessionID, error, output })
+                if (Exit.isFailure(completed)) {
+                  yield* collaboration.setStatus({
+                    sessionID: input.childSessionID,
+                    status: "errored",
+                    error: `Child execution failed and its error could not be delivered: ${errorText(Cause.squash(completed.cause))}`,
+                  })
+                }
+                return yield* Effect.failCause(executed.cause)
+              }
+              const output = executed.value
+              const delivered = yield* collaboration
+                .complete({ sessionID: input.childSessionID, result: output })
+                .pipe(Effect.retry(Schedule.recurs(2)), Effect.exit)
+              if (Exit.isSuccess(delivered)) {
+                yield* notifyParent({ ops: input.ops, parentSessionID: input.parentSessionID })
                 return output
-              }),
-            ),
+              }
+              const error = `Child completed, but final answer delivery failed: ${errorText(Cause.squash(delivered.cause))}`
+              yield* collaboration.setStatus({
+                sessionID: input.childSessionID,
+                status: "errored",
+                result: output,
+                error,
+              })
+              yield* background.fail({ id: input.childSessionID, error, output })
+              return output
+            }),
           )
           .pipe(
             Effect.onInterrupt(() =>
@@ -275,29 +272,42 @@ export const layer = Layer.effect(
         taskName,
         lastTask: message,
       })
-      yield* input.context.metadata({
-        title: taskName,
-        metadata: {
-          parentSessionId: input.context.sessionID,
-          sessionId: child.id,
-          taskPath: registered.path,
-          background: true,
-        },
-      })
-      yield* start({
-        ops,
-        childSessionID: child.id,
-        parentSessionID: input.context.sessionID,
-        path: registered.path,
-        agent: selected,
-        task: taskName,
-        message,
-        model,
-        variant: inherited?.variant,
-        serviceTier: inherited?.serviceTier,
-        upstream: inherited?.upstream,
-        type: "spawn_agent",
-      })
+      yield* Effect.gen(function* () {
+        yield* input.context.metadata({
+          title: taskName,
+          metadata: {
+            parentSessionId: input.context.sessionID,
+            sessionId: child.id,
+            taskPath: registered.path,
+            background: true,
+          },
+        })
+        yield* start({
+          ops,
+          childSessionID: child.id,
+          parentSessionID: input.context.sessionID,
+          path: registered.path,
+          agent: selected,
+          task: taskName,
+          message,
+          model,
+          variant: inherited?.variant,
+          serviceTier: inherited?.serviceTier,
+          upstream: inherited?.upstream,
+          type: "spawn_agent",
+        })
+      }).pipe(
+        Effect.onExit((exit) =>
+          Effect.gen(function* () {
+            if (Exit.isSuccess(exit) || (yield* background.get(child.id))) return
+            yield* collaboration.setStatus({
+              sessionID: child.id,
+              status: Cause.hasInterruptsOnly(exit.cause) ? "interrupted" : "errored",
+              error: errorText(Cause.squash(exit.cause)),
+            })
+          }),
+        ),
+      )
       return { path: registered.path, sessionID: child.id }
     }, detached)
 

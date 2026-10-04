@@ -1,5 +1,5 @@
 import { SubagentRun } from "@/agent/subagent-run"
-import { MAX_MAILBOX_PAYLOAD_CHARS } from "@/agent/collaboration"
+import { Collaboration, MAX_MAILBOX_PAYLOAD_CHARS } from "@/agent/collaboration"
 import { PositiveInt } from "@opencode-ai/core/schema"
 import * as Tool from "@/tool/tool"
 import { Effect, Schema } from "effect"
@@ -29,39 +29,41 @@ type Metadata = {
   sessionId: string
   parentSessionId: string
   background: true
+  status: Collaboration.Status
 }
 
 export const SpawnAgentTool = Tool.define(
   "spawn_agent",
   Effect.gen(function* () {
     const run = yield* SubagentRun.Service
+    const collaboration = yield* Collaboration.Service
     return {
       description: DESCRIPTION,
       parameters: Parameters,
       execute: (params, ctx) =>
-        run
-          .run({
+        Effect.gen(function* () {
+          const result = yield* run.run({
             context: ctx,
             taskName: params.task_name,
             message: params.message,
             forkTurns: params.fork_turns,
             agentType: params.agent_type,
           })
-          .pipe(
-            Effect.map((result) => ({
-              title: params.task_name,
-              metadata: {
-                task_path: result.path,
-                session_id: result.sessionID,
-                taskPath: result.path,
-                sessionId: result.sessionID,
-                parentSessionId: ctx.sessionID,
-                background: true as const,
-              },
-              output: `task_path: ${result.path}\nsession_id: ${result.sessionID}\nstatus: pending\n\nUse task_status with task_id=${result.sessionID} to read this agent's output at any time.`,
-            })),
-            Effect.orDie,
-          ),
+          const member = yield* collaboration.member(result.sessionID)
+          return {
+            title: params.task_name,
+            metadata: {
+              task_path: result.path,
+              session_id: result.sessionID,
+              taskPath: result.path,
+              sessionId: result.sessionID,
+              parentSessionId: ctx.sessionID,
+              background: true as const,
+              status: member?.status ?? "pending",
+            },
+            output: `task_path: ${result.path}\nsession_id: ${result.sessionID}\nstatus: ${member?.status ?? "pending"}\n\nUse task_status with task_id=${result.sessionID} to check status and read the final output. Open the child session to view its live chat.`,
+          }
+        }).pipe(Effect.orDie),
     } satisfies Tool.DefWithoutID<typeof Parameters, Metadata>
   }),
 )

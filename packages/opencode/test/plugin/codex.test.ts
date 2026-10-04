@@ -6,6 +6,7 @@ import {
   extractAccountId,
   type IdTokenClaims,
 } from "../../src/plugin/codex"
+import type { Provider } from "../../src/provider/provider"
 
 function createTestJwt(payload: object): string {
   const header = Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url")
@@ -20,6 +21,87 @@ describe("plugin.codex", () => {
     expect(hooks.auth?.provider).toBe("openai-codex")
     expect(hooks.auth?.methods).toHaveLength(2)
     expect(hooks.auth?.methods.every((method) => method.type === "oauth")).toBe(true)
+  })
+
+  test("includes gpt-6-astra and excludes unsupported models", async () => {
+    const hooks = await CodexAuthPlugin({} as never)
+    const models: Record<string, Provider.Model> = {
+      "gpt-6-astra": {
+        id: "gpt-6-astra",
+        providerID: "openai-codex",
+        api: { id: "gpt-6-astra", npm: "@ai-sdk/openai", url: "" },
+        name: "GPT 6 Astra",
+        family: "gpt",
+        capabilities: {
+          temperature: false,
+          reasoning: true,
+          attachment: true,
+          toolcall: true,
+          input: { text: true, audio: false, image: true, video: false, pdf: true },
+          output: { text: true, audio: false, image: false, video: false, pdf: false },
+          interleaved: false,
+        },
+        cost: { input: 1, output: 1, cache: { read: 1, write: 1 } },
+        limit: { context: 1_000_000, output: 128_000 },
+        status: "active",
+        options: {},
+        headers: {},
+        release_date: "2026-09-01",
+        variants: {},
+      } as Provider.Model,
+      "gpt-5.5": {
+        id: "gpt-5.5",
+        providerID: "openai-codex",
+        api: { id: "gpt-5.5", npm: "@ai-sdk/openai", url: "" },
+        name: "GPT 5.5",
+        family: "gpt",
+        capabilities: {
+          temperature: false,
+          reasoning: true,
+          attachment: true,
+          toolcall: true,
+          input: { text: true, audio: false, image: true, video: false, pdf: true },
+          output: { text: true, audio: false, image: false, video: false, pdf: false },
+          interleaved: false,
+        },
+        cost: { input: 1, output: 1, cache: { read: 1, write: 1 } },
+        limit: { context: 1_000_000, output: 128_000 },
+        status: "active",
+        options: {},
+        headers: {},
+        release_date: "2026-01-01",
+        variants: {},
+      } as Provider.Model,
+      "gpt-4o": {
+        id: "gpt-4o",
+        providerID: "openai-codex",
+        api: { id: "gpt-4o", npm: "@ai-sdk/openai", url: "" },
+        name: "GPT 4o",
+        family: "gpt",
+        capabilities: {
+          temperature: false,
+          reasoning: true,
+          attachment: true,
+          toolcall: true,
+          input: { text: true, audio: false, image: true, video: false, pdf: true },
+          output: { text: true, audio: false, image: false, video: false, pdf: false },
+          interleaved: false,
+        },
+        cost: { input: 1, output: 1, cache: { read: 1, write: 1 } },
+        limit: { context: 128_000, output: 16_000 },
+        status: "active",
+        options: {},
+        headers: {},
+        release_date: "2024-05-13",
+        variants: {},
+      } as Provider.Model,
+    }
+
+    const filtered = await hooks.provider!.models!({ id: "openai-codex", models } as never, {} as never)
+    expect(Object.keys(filtered)).toContain("gpt-6-astra")
+    expect(Object.keys(filtered)).toContain("gpt-5.5")
+    expect(Object.keys(filtered)).not.toContain("gpt-4o")
+    expect(filtered["gpt-6-astra"].cost.input).toBe(0)
   })
 
   describe("parseJwtClaims", () => {

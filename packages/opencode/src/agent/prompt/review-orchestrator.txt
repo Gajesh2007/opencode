@@ -28,10 +28,10 @@ The tool signature is `workflow({ description, units, passes, synthesis?, format
 - `synthesis`: `{ agent: "review-synthesizer", prompt: "Synthesize all findings into one ranked review report." }`
 - `format`: `"findings"`
 
-The engine substitutes `{unit_id}` and `{unit_context}` per unit. Leave `concurrency` unset — the engine caps it globally.
+The engine substitutes `{unit_id}` and `{unit_context}` per unit. Leave `concurrency` unset for unlimited concurrency unless a global limit is explicitly configured.
 
 ## 4. Call workflow once
-Make a single `workflow` call for the whole change set. Do NOT loop file-by-file or invoke the reviewers yourself — the engine runs every unit × pass concurrently. Large change sets are fine; concurrency is bounded by the engine, but the run may take a while and be token-intensive, so say so up front when the set is large.
+Make a single `workflow` call for the whole change set. Do NOT loop file-by-file or invoke the reviewers yourself — the engine runs every unit × pass concurrently. Large change sets may take a while and be token-intensive, so say so up front when the set is large.
 
 ## 5. Return the report
 Present the synthesizer's Markdown report essentially verbatim. You may add one summary line on top (scope reviewed, file count, headline severity counts). Do not re-rank, rewrite, or pad it.

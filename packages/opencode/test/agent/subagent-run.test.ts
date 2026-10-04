@@ -712,6 +712,49 @@ describe("agent.subagent-run", () => {
     }),
   )
 
+  for (const outcome of ["failure", "interruption"]) {
+    it.instance(`can resume a child after ${outcome} before initial startup`, () =>
+      Effect.gen(function* () {
+        const run = yield* SubagentRun.Service
+        const collaboration = yield* Collaboration.Service
+        const jobs = yield* BackgroundJob.Service
+        const seeded = yield* seed()
+        const entered = yield* Deferred.make<void>()
+        const ops = {
+          cancel: () => Effect.void,
+          resolvePromptParts: (text: string) => Effect.succeed([{ type: "text" as const, text }]),
+          prompt: (input: SessionPrompt.PromptInput) => Effect.succeed(reply(input, "resumed")),
+          loop: (input: SessionPrompt.LoopInput) =>
+            Effect.succeed(reply({ sessionID: input.sessionID, parts: [] }, "unused")),
+        }
+        const base = { sessionID: seeded.parent.id, messageID: seeded.assistant.id, ops }
+        const initial = yield* run
+          .run({
+            context: context({
+              ...base,
+              metadata: () =>
+                Deferred.succeed(entered, undefined).pipe(
+                  Effect.andThen(outcome === "failure" ? Effect.die("metadata failed") : Effect.never),
+                ),
+            }),
+            taskName: "worker",
+            message: "Start work",
+          })
+          .pipe(Effect.forkScoped)
+        yield* Deferred.await(entered)
+        if (outcome === "interruption") yield* Fiber.interrupt(initial)
+        expect((yield* Fiber.await(initial))._tag).toBe("Failure")
+        const member = yield* collaboration.resolve({ sessionID: seeded.parent.id, target: "worker" })
+        if (!member) return yield* Effect.die("child was not registered")
+        expect(member.status).toBe(outcome === "failure" ? "errored" : "interrupted")
+        expect(yield* jobs.get(member.sessionID)).toBeUndefined()
+
+        const resumed = yield* run.followup({ context: context(base), target: member.path, message: "Resume work" })
+        expect((yield* jobs.wait({ id: resumed.sessionID, timeout: 1_000 })).info?.output).toBe("resumed")
+      }),
+    )
+  }
+
   it.instance("restores the prior status when follow-up startup fails", () =>
     Effect.gen(function* () {
       const collaboration = yield* Collaboration.Service
@@ -795,7 +838,7 @@ describe("agent.subagent-run", () => {
     }),
   )
 
-  it.instance("enforces the shared root-plus-three child cap across nested descendants", () =>
+  it.instance("starts nested descendants while all existing children are still active", () =>
     Effect.gen(function* () {
       const collaboration = yield* Collaboration.Service
       const run = yield* SubagentRun.Service
@@ -809,7 +852,7 @@ describe("agent.subagent-run", () => {
         loop: (input: SessionPrompt.LoopInput) =>
           Effect.succeed(reply({ sessionID: input.sessionID, parts: [] }, "unused")),
       }
-      const children = yield* Effect.forEach(["parent", "one", "two"], (taskName) =>
+      const children = yield* Effect.forEach(["parent", "one", "two", "three", "four", "five"], (taskName) =>
         run.run({
           context: context({ sessionID: seeded.parent.id, messageID: seeded.assistant.id, ops }),
           taskName,
@@ -819,11 +862,9 @@ describe("agent.subagent-run", () => {
 
       yield* pollWithTimeout(
         Effect.forEach(children, (child) => collaboration.member(child.sessionID)).pipe(
-          Effect.map((members) =>
-            members.filter((member) => member?.status === "running").length === 3 ? members : undefined,
-          ),
+          Effect.map((members) => (members.every((member) => member?.status === "running") ? members : undefined)),
         ),
-        "three children did not acquire the collaboration permits",
+        "children did not all start concurrently",
       )
       const parentAssistant = yield* sessions.updateMessage(
         reply({ sessionID: children[0]!.sessionID, model: ref, agent: "build", parts: [] }, "working").info,
@@ -833,7 +874,12 @@ describe("agent.subagent-run", () => {
         taskName: "nested",
         message: "Nested task",
       })
-      expect((yield* collaboration.member(nested.sessionID))?.status).toBe("pending")
+      yield* pollWithTimeout(
+        collaboration
+          .member(nested.sessionID)
+          .pipe(Effect.map((member) => (member?.status === "running" ? member : undefined))),
+        "nested child did not start while its parent was active",
+      )
       yield* Deferred.succeed(release, undefined)
     }),
   )

@@ -65,6 +65,29 @@ describe("OpenAI Ultrafast", () => {
 
 const it = testEffect(RuntimeFlags.layer({}))
 
+test("offers Priority rather than Ultrafast for GPT 6.1 Sol and snapshots", () => {
+  for (const id of ["gpt-6.1-sol", "gpt-6-1-sol", "gpt-6.1-sol-2026-10-01", "openai/gpt-6.1-sol"]) {
+    expect(ProviderTransform.serviceTiers(model(id))).toEqual({ priority: { serviceTier: "priority" } })
+  }
+  for (const id of ["gpt-6.1", "gpt-6.1-sol-mini", "gpt-6.1-sol-pro"]) {
+    expect(ProviderTransform.serviceTiers(model(id)).priority).toBeUndefined()
+  }
+})
+
+test("offers Priority alongside Ultrafast for GPT 6 Astra", () => {
+  for (const providerID of ["openai", "openai-codex"]) {
+    for (const id of ["gpt-6-astra", "gpt-6-astra-2026-09-01"]) {
+      const tiers = ProviderTransform.serviceTiers(model(id, providerID))
+      expect(tiers.priority).toEqual({ serviceTier: "priority" })
+      if (providerID === "openai") expect(tiers.ultrafast).toEqual({ serviceTier: "ultrafast" })
+      else expect(tiers.ultrafast).toBeUndefined()
+    }
+  }
+  for (const id of ["gpt-6-astra-mini", "gpt-6-astra-pro"]) {
+    expect(ProviderTransform.serviceTiers(model(id)).priority).toBeUndefined()
+  }
+})
+
 it.effect("merges Ultrafast into OpenAI options without changing reasoning or opting in other requests", () =>
   Effect.gen(function* () {
     const flags = yield* RuntimeFlags.Service

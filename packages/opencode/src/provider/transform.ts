@@ -1217,10 +1217,12 @@ export function serviceTiers(model: Provider.Model): Record<string, Record<strin
 
     case "@ai-sdk/openai": {
       const tiers: Record<string, Record<string, any>> = {}
-      // Priority: gpt-4 / gpt-5 / gpt-5-mini / o3 / o4-mini (NOT gpt-5-nano)
+      // Priority: gpt-4 / gpt-5 / gpt-5-mini / gpt-6-astra / gpt-6.1-sol / o3 / o4-mini (NOT gpt-5-nano)
       const hasPriority =
         /(^|\/)(gpt-4|gpt-5-mini|o3|o4-mini)(?:[.-]|$)/.test(apiId) ||
-        (/(^|\/)gpt-5(?:[.-]|$)/.test(apiId) && !apiId.includes("gpt-5-nano"))
+        (/(^|\/)gpt-5(?:[.-]|$)/.test(apiId) && !apiId.includes("gpt-5-nano")) ||
+        /(^|\/)gpt-6-astra(?:-\d{4}-\d{2}-\d{2})?$/.test(apiId) ||
+        GPT61_SOL_RE.test(apiId)
       // Flex: o3 / o4-mini / gpt-5 family
       const hasFlex = /(^|\/)(o3|o4-mini)(?:[.-]|$)/.test(apiId) || /(^|\/)gpt-5(?:[.-]|$)/.test(apiId)
       if (hasPriority) tiers["priority"] = { serviceTier: "priority" }

@@ -111,6 +111,7 @@ describe("agent.collaboration", () => {
       const research = yield* sessions.create({ parentID: root.id, title: "[agent] research" })
       const scan = yield* sessions.create({ parentID: research.id, title: "[agent] scan" })
       const editor = yield* sessions.create({ parentID: root.id, title: "[agent] editor" })
+      const unstarted = yield* sessions.create({ parentID: root.id, title: "[agent] unstarted" })
 
       const researchUser = yield* sessions.updateMessage({
         id: MessageID.ascending(),
@@ -181,12 +182,19 @@ describe("agent.collaboration", () => {
       expect((yield* collaboration.member(research.id))?.status).toBe("completed")
       expect((yield* collaboration.member(scan.id))?.status).toBe("interrupted")
       expect((yield* collaboration.member(editor.id))?.status).toBe("interrupted")
+      expect((yield* collaboration.member(unstarted.id))?.status).toBe("interrupted")
+      expect(
+        yield* collaboration.claimFollowup({ sessionID: unstarted.id, lastTask: "Resume queued work" }),
+      ).toBeDefined()
+      expect((yield* collaboration.member(unstarted.id))?.status).toBe("pending")
+      expect(yield* collaboration.claimFollowup({ sessionID: unstarted.id, lastTask: "Duplicate" })).toBeUndefined()
       expect((yield* collaboration.resolve({ sessionID: scan.id, target: "../.." }))?.sessionID).toBe(root.id)
       expect((yield* collaboration.list(root.id)).map((member) => member.path)).toEqual([
         "/root",
         "/root/editor",
         "/root/research",
         "/root/research/scan",
+        "/root/unstarted",
       ])
 
       yield* collaboration.setStatus({ sessionID: research.id, status: "running" })
@@ -207,58 +215,6 @@ describe("agent.collaboration", () => {
         "/root/worker",
         "/root/worker~2",
       ])
-    }),
-  )
-
-  it.instance("shares the child-turn cap across nested descendants and releases permits on interruption", () =>
-    Effect.gen(function* () {
-      const collaboration = yield* Collaboration.Service
-      const root = session("permits_root")
-      const parent = session("permits_parent")
-      const childA = session("permits_a")
-      const childB = session("permits_b")
-      const childC = session("permits_c")
-      const nested = session("permits_nested")
-      yield* collaboration.registerRoot(root)
-      yield* collaboration.registerChild({ parentSessionID: root, sessionID: parent, taskName: "parent" })
-      yield* collaboration.registerChild({ parentSessionID: root, sessionID: childA, taskName: "child_a" })
-      yield* collaboration.registerChild({ parentSessionID: root, sessionID: childB, taskName: "child_b" })
-      yield* collaboration.registerChild({ parentSessionID: root, sessionID: childC, taskName: "child_c" })
-      yield* collaboration.registerChild({ parentSessionID: parent, sessionID: nested, taskName: "nested" })
-
-      const allEntered = yield* Deferred.make<void>()
-      const release = yield* Deferred.make<void>()
-      const fourthEntered = yield* Deferred.make<void>()
-      let entered = 0
-      const hold = (sessionID: SessionID) =>
-        collaboration.withChildPermit(
-          sessionID,
-          Effect.gen(function* () {
-            entered++
-            if (entered === 3) yield* Deferred.succeed(allEntered, undefined)
-            yield* Deferred.await(release)
-          }),
-        )
-
-      const holders = yield* Effect.forEach([parent, childA, childB], (sessionID) =>
-        hold(sessionID).pipe(Effect.forkChild),
-      )
-      yield* Deferred.await(allEntered)
-      const fourth = yield* collaboration
-        .withChildPermit(nested, Deferred.succeed(fourthEntered, undefined))
-        .pipe(Effect.forkChild)
-      yield* Effect.sleep("10 millis")
-      expect(yield* Deferred.isDone(fourthEntered)).toBe(false)
-
-      yield* Deferred.succeed(release, undefined)
-      yield* Effect.forEach(holders, Fiber.join)
-      yield* Deferred.await(fourthEntered)
-      yield* Fiber.join(fourth)
-
-      const held = yield* collaboration.withChildPermit(childC, Effect.never).pipe(Effect.forkChild)
-      yield* Effect.sleep("10 millis")
-      yield* Fiber.interrupt(held)
-      expect(yield* collaboration.withChildPermit(nested, Effect.succeed("released"))).toBe("released")
     }),
   )
 

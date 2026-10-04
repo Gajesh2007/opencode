@@ -3,10 +3,8 @@ import { Bus } from "@/bus"
 import { MessageV2 } from "@/session/message-v2"
 import { MessageID, PartID, SessionID } from "@/session/schema"
 import { Session } from "@/session/session"
-import { Context, Deferred, Effect, Layer, Option, Semaphore } from "effect"
+import { Context, Deferred, Effect, Layer, Option } from "effect"
 import * as Stream from "effect/Stream"
-
-export const DEFAULT_MAX_CONCURRENT_THREADS = 4
 
 export type Status = "pending" | "running" | "completed" | "errored" | "interrupted"
 export type MessageKind = "NEW_TASK" | "MESSAGE" | "FINAL_ANSWER"
@@ -156,7 +154,7 @@ export interface Interface {
     result?: string
     error?: string
   }) => Effect.Effect<Member, MemberNotRegistered>
-  /** Atomically marks a non-running child as running before a follow-up starts. */
+  /** Atomically reserves an idle child before a follow-up starts. */
   readonly claimFollowup: (input: {
     sessionID: SessionID
     lastTask: string
@@ -196,10 +194,6 @@ export interface Interface {
   /** Returns false for sessions outside a collaboration tree. */
   readonly hasMail: (sessionID: SessionID) => Effect.Effect<boolean>
   readonly wait: (input: { sessionID: SessionID; timeout: number }) => Effect.Effect<WaitResult, MemberNotRegistered>
-  readonly withChildPermit: <A, E, R>(
-    sessionID: SessionID,
-    effect: Effect.Effect<A, E, R>,
-  ) => Effect.Effect<A, E | MemberNotRegistered, R>
   readonly remove: (sessionID: SessionID) => Effect.Effect<void>
 }
 
@@ -217,7 +211,6 @@ type Entry = Omit<Member, "status" | "lastTask" | "result" | "error"> & {
 
 type Root = {
   members: Map<SessionID, Entry>
-  permits: Semaphore.Semaphore
 }
 
 type State = {
@@ -382,7 +375,8 @@ export const layer = Layer.effect(
       const latest = (yield* sessions
         .messages({ sessionID })
         .pipe(Effect.catchCause(() => Effect.succeed([])))).findLast((message) => message.info.role === "assistant")
-      if (!latest || latest.info.role !== "assistant") return "pending" as const
+      // Persisted sessions have no live job to execute a previously queued turn.
+      if (!latest || latest.info.role !== "assistant") return "interrupted" as const
       if (latest.info.error?.name === "MessageAbortedError") return "interrupted" as const
       if (latest.info.error) return "errored" as const
       if (latest.info.time.completed !== undefined) return "completed" as const
@@ -464,7 +458,6 @@ export const layer = Layer.effect(
           })
           return {
             members: new Map<SessionID, Entry>([[member.sessionID, member]]),
-            permits: Semaphore.makeUnsafe(DEFAULT_MAX_CONCURRENT_THREADS - 1),
           }
         })()
       if (!existing) {
@@ -618,8 +611,6 @@ export const layer = Layer.effect(
 
           const root: Root = {
             members: new Map(),
-            // The root owns one of the four total threads; child turns share the other three.
-            permits: Semaphore.makeUnsafe(DEFAULT_MAX_CONCURRENT_THREADS - 1),
           }
           const member = createEntry({
             sessionID,
@@ -715,13 +706,13 @@ export const layer = Layer.effect(
           const state = yield* InstanceState.get(states)
           const found = locate(state, input.sessionID)
           if (!found) return yield* Effect.fail(memberNotRegistered(input.sessionID))
-          if (found.member.status === "running") return
+          if (found.member.status === "running" || found.member.status === "pending") return
           const claim: FollowupClaim = {
             member: snapshot(found.member),
             previousStatus: found.member.status,
             ...(found.member.lastTask !== undefined ? { previousLastTask: found.member.lastTask } : {}),
           }
-          found.member.status = "running"
+          found.member.status = "pending"
           found.member.lastTask = input.lastTask
           return claim
         }),
@@ -947,14 +938,6 @@ export const layer = Layer.effect(
             return "activity" as const
           const activity = yield* Deferred.await(found.member.signal).pipe(Effect.timeoutOption(input.timeout))
           return activity._tag === "Some" ? ("activity" as const) : ("timeout" as const)
-        }),
-      withChildPermit: (sessionID, effect) =>
-        Effect.gen(function* () {
-          yield* ensure(sessionID)
-          const state = yield* InstanceState.get(states)
-          const found = locate(state, sessionID)
-          if (!found) return yield* Effect.fail(memberNotRegistered(sessionID))
-          return yield* found.root.permits.withPermits(1)(effect)
         }),
       remove,
     })

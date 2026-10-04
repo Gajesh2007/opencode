@@ -204,6 +204,39 @@ const INJECTED_MODELS: Record<string, Record<string, Model>> = {
     "gpt-5.6-sol": gpt56Model("gpt-5.6-sol", "GPT-5.6 Sol", 5, 30),
     "gpt-5.6-terra": gpt56Model("gpt-5.6-terra", "GPT-5.6 Terra", 2.5, 15),
     "gpt-5.6-luna": gpt56Model("gpt-5.6-luna", "GPT-5.6 Luna", 1, 6),
+    "gpt-6-astra": {
+      id: "gpt-6-astra",
+      name: "GPT-6 Astra",
+      family: "gpt",
+      release_date: "2026-09-01",
+      attachment: true,
+      reasoning: true,
+      temperature: false,
+      tool_call: true,
+      cost: {
+        input: 5,
+        output: 30,
+        cache_read: 0.5,
+        cache_write: 6.25,
+        context_over_200k: {
+          input: 10,
+          output: 45,
+          cache_read: 1,
+          cache_write: 12.5,
+        },
+        tiers: [
+          {
+            input: 10,
+            output: 45,
+            cache_read: 1,
+            cache_write: 12.5,
+            tier: { type: "context", size: 272_000 },
+          },
+        ],
+      },
+      limit: { context: 1_000_000, input: 922_000, output: 128_000 },
+      modalities: { input: ["text", "image", "pdf"], output: ["text"] },
+    },
   },
   openrouter: {
     "openai/gpt-5.6-sol": gpt56Model("openai/gpt-5.6-sol", "OpenAI: GPT-5.6 Sol", 5, 30, {

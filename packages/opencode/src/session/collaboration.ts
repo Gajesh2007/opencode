@@ -26,7 +26,7 @@ export function collaborationGuidance(input: {
     "This system/developer collaboration guidance is the source of truth and remains active across turns and follow-ups.",
     `You are the ${role}. You share a workspace with other agents and use the same tools and model by default.`,
     ...responsibilities,
-    "All descendants share the same root collaboration control plane and four total concurrency slots, including the root session.",
+    "All descendants share the same root collaboration control plane. There is no fixed limit on active subagents; only an explicitly configured concurrency limit applies.",
     delegation,
     "</collaboration>",
   ].join("\n")

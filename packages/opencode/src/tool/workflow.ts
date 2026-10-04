@@ -18,9 +18,9 @@ import * as nodeFs from "node:fs"
 const id = "workflow"
 
 /**
- * Hard ceiling on units x passes for a single run. The engine bounds *concurrency*
- * separately (the shared SubagentLimit semaphore), but a single call still
- * enqueues this many sessions, so we refuse absurd grids outright rather than
+ * Hard ceiling on units x passes for a single run. Concurrency is controlled
+ * separately by the per-call option and any configured global cap, but a single
+ * call still enqueues this many sessions, so we refuse absurd grids outright rather than
  * silently spend a fortune. Reviewing a few thousand files x 3 lenses fits well
  * under this.
  */
@@ -64,7 +64,8 @@ export const Parameters = Schema.Struct({
       "'findings' parses+dedupes+ranks JSON findings per cell before synthesis; 'text' (default) keeps raw text",
   }),
   concurrency: Schema.optional(Schema.Finite).annotate({
-    description: "Optional max cells in flight for this run (a global cap also applies)",
+    description:
+      "Optional max cells in flight for this run (unlimited by default; any configured global cap also applies)",
   }),
 })
 

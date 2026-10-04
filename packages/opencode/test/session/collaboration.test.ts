@@ -40,7 +40,7 @@ describe("session collaboration guidance", () => {
     expect(result).toContain("All descendants share the same root collaboration control plane")
     expect(result).toContain("Proactive multi-agent delegation is active")
     expect(result).toContain("Earlier explicit-request-only restrictions no longer apply")
-    expect(result).toContain("four total concurrency slots, including the root session")
+    expect(result).toContain("There is no fixed limit on active subagents")
   })
 
   test("gives Ultra team agents persistent recursive delegation guidance", () => {

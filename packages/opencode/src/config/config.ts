@@ -303,7 +303,7 @@ export const Info = Schema.Struct({
       }),
       subagent_concurrency: Schema.optional(PositiveInt).annotate({
         description:
-          "Maximum number of subagent sessions (task tool + workflow engine) allowed to run concurrently. Defaults to 200. Also settable via OPENCODE_SUBAGENT_CONCURRENCY.",
+          "Maximum number of subagent sessions allowed to run concurrently across task, spawn_agent, and workflow. Unlimited by default. Also settable via OPENCODE_SUBAGENT_CONCURRENCY.",
       }),
     }),
   ),

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect } from "bun:test"
-import { Effect, Layer } from "effect"
+import { Deferred, Effect, Fiber, Layer } from "effect"
 import { Agent } from "@/agent/agent"
 import { SubagentLimit } from "@/agent/subagent-limit"
 import { BackgroundJob } from "@/background/job"
@@ -20,7 +20,7 @@ import { Truncate } from "@/tool/truncate"
 import { ToolRegistry } from "@/tool/registry"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { disposeAllInstances } from "../fixture/fixture"
-import { testEffect } from "../lib/effect"
+import { awaitWithTimeout, testEffect } from "../lib/effect"
 
 afterEach(async () => {
   await disposeAllInstances()
@@ -75,7 +75,10 @@ const seed = Effect.fn("WorkflowEngineTest.seed")(function* () {
   return { chat, assistant }
 })
 
-function reply(input: { sessionID: SessionPrompt.PromptInput["sessionID"]; messageID?: MessageID }, text: string): MessageV2.WithParts {
+function reply(
+  input: { sessionID: SessionPrompt.PromptInput["sessionID"]; messageID?: MessageID },
+  text: string,
+): MessageV2.WithParts {
   const id = MessageID.ascending()
   return {
     info: {
@@ -131,12 +134,68 @@ function ctx(
 }
 
 describe("workflow.engine", () => {
-  it.instance("defaults subagent concurrency to 200", () =>
-    Effect.gen(function* () {
-      const limit = yield* SubagentLimit.Service
-      expect(yield* limit.cap).toBe(200)
-    }),
-  )
+  for (const settings of [
+    {
+      name: "runs all cells concurrently by default",
+      count: 256,
+      concurrency: undefined,
+      global: undefined,
+      peak: 256,
+    },
+    { name: "preserves per-call concurrency limits", count: 4, concurrency: 2, global: undefined, peak: 2 },
+    { name: "honors a configured global cap with a per-call limit", count: 4, concurrency: 3, global: 1, peak: 1 },
+  ]) {
+    it.instance(
+      settings.name,
+      () =>
+        Effect.gen(function* () {
+          const seeded = yield* seed()
+          const def = yield* (yield* WorkflowTool).init()
+          const ready = yield* Deferred.make<void>()
+          const release = yield* Deferred.make<void>()
+          let active = 0
+          let peak = 0
+          let completed = 0
+          const ops: TaskPromptOps = {
+            ...stubOps([]),
+            prompt: (input) =>
+              Effect.gen(function* () {
+                active += 1
+                peak = Math.max(peak, active)
+                if (active === settings.peak) yield* Deferred.succeed(ready, undefined)
+                yield* Deferred.await(release)
+                completed += 1
+                return reply(input, "done")
+              }).pipe(Effect.ensuring(Effect.sync(() => active--))),
+          }
+          const work = yield* def
+            .execute(
+              {
+                description: settings.name,
+                units: Array.from({ length: settings.count }, (_, index) => ({ id: `f${index}.ts` })),
+                passes: [{ name: "logic", agent: "review-logic", prompt: "Review {unit_id}" }],
+                concurrency: settings.concurrency,
+              },
+              ctx(seeded.chat.id, seeded.assistant.id, ops),
+            )
+            .pipe(Effect.forkScoped)
+
+          yield* awaitWithTimeout(
+            Deferred.await(ready),
+            "workflow did not reach the expected concurrency",
+            "10 seconds",
+          )
+          expect(active).toBe(settings.peak)
+          yield* Deferred.succeed(release, undefined)
+          const result = yield* awaitWithTimeout(Fiber.join(work), "workflow did not finish", "10 seconds")
+          expect(peak).toBe(settings.peak)
+          expect(completed).toBe(settings.count)
+          expect(active).toBe(0)
+          expect(result.output).toContain(`cells: ${settings.count}`)
+        }),
+      { config: { experimental: { subagent_concurrency: settings.global } } },
+    )
+  }
 
   it.instance("fans out units x passes, dedupes findings across lenses, and synthesizes", () =>
     Effect.gen(function* () {

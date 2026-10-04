@@ -21,3 +21,9 @@ test("TUI includes the concurrency-specific Ultra warning when available", () =>
     "Ultra can significantly increase usage and cost with up to 12 concurrent agents.",
   )
 })
+
+test("TUI uses the general Ultra warning for unlimited concurrency", () => {
+  expect(getModelVariantPresentation("ultra", { subagentConcurrency: Infinity }).warning).toBe(
+    getModelVariantPresentation("ultra").warning,
+  )
+})

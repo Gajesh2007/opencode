@@ -47,13 +47,16 @@ export const FollowupTaskTool = Tool.define(
   "followup_task",
   Effect.gen(function* () {
     const run = yield* SubagentRun.Service
+    const collaboration = yield* Collaboration.Service
     return {
       description:
         "Start a new turn for an idle child agent. The child receives the message as new work and reports its final answer to its direct parent.",
       parameters: FollowupParameters,
       execute: (params, ctx) =>
-        run.followup({ context: ctx, target: params.target, message: params.message }).pipe(
-          Effect.map((result) => ({
+        Effect.gen(function* () {
+          const result = yield* run.followup({ context: ctx, target: params.target, message: params.message })
+          const member = yield* collaboration.member(result.sessionID)
+          return {
             title: `follow up ${result.path}`,
             metadata: {
               task_path: result.path,
@@ -62,12 +65,11 @@ export const FollowupTaskTool = Tool.define(
               sessionId: result.sessionID,
               parentSessionId: ctx.sessionID,
               background: true,
-              status: "pending",
+              status: member?.status ?? "pending",
             },
-            output: `task_path: ${result.path}\nsession_id: ${result.sessionID}\nstatus: pending`,
-          })),
-          Effect.orDie,
-        ),
+            output: `task_path: ${result.path}\nsession_id: ${result.sessionID}\nstatus: ${member?.status ?? "pending"}`,
+          }
+        }).pipe(Effect.orDie),
     } satisfies Tool.DefWithoutID<typeof FollowupParameters, Metadata>
   }),
 )
