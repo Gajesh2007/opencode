@@ -348,7 +348,11 @@ export function merge(...rulesets: Ruleset[]): Rule[] {
 
 export function disabled(tools: string[], ruleset: Ruleset): Set<string> {
   if (Flag.OPENCODE_YOLO_FOREVER) return new Set()
-  return PermissionV2.disabled(tools, ruleset)
+  const disabled = PermissionV2.disabled(tools, ruleset)
+  if (tools.includes("followup_task") && PermissionV2.disabled(["spawn_agent"], ruleset).has("spawn_agent")) {
+    disabled.add("followup_task")
+  }
+  return disabled
 }
 
 export const defaultLayer = layer.pipe(Layer.provide(Bus.layer))

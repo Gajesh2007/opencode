@@ -98,6 +98,7 @@ type BundledSDK = {
 
 const BUNDLED_PROVIDERS: Record<string, () => Promise<(opts: any) => BundledSDK>> = {
   "@ai-sdk/amazon-bedrock": () => import("@ai-sdk/amazon-bedrock").then((m) => m.createAmazonBedrock),
+  "@ai-sdk/amazon-bedrock/mantle": () => import("@ai-sdk/amazon-bedrock/mantle").then((m) => m.createBedrockMantle),
   "@ai-sdk/anthropic": () => import("@ai-sdk/anthropic").then((m) => m.createAnthropic),
   "@ai-sdk/azure": () => import("@ai-sdk/azure").then((m) => m.createAzure),
   "@ai-sdk/google": () => import("@ai-sdk/google").then((m) => m.createGoogleGenerativeAI),
@@ -288,8 +289,8 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
       // TODO: Using process.env directly because Env.set only updates a process.env shallow copy,
       // until the scope of the Env API is clarified (test only or runtime?)
       const awsBearerToken = iife(() => {
-        const envToken = process.env.AWS_BEARER_TOKEN_BEDROCK
-        if (envToken) return envToken
+        const token = providerConfig?.options?.apiKey ?? process.env.AWS_BEARER_TOKEN_BEDROCK
+        if (token) return token
         if (auth?.type === "api") {
           process.env.AWS_BEARER_TOKEN_BEDROCK = auth.key
           return auth.key
@@ -330,7 +331,16 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
       return {
         autoload: true,
         options: providerOptions,
+        vars(options) {
+          return { AWS_REGION: options.region ?? defaultRegion }
+        },
         async getModel(sdk: any, modelID: string, options?: Record<string, any>) {
+          if (
+            sdk.responses &&
+            /^(?:(?:us|global)\.)?openai\.gpt-(?:6-astra|6\.1-sol)(?:-\d{4}-\d{2}-\d{2})?$/.test(modelID)
+          ) {
+            return sdk.responses(modelID)
+          }
           // Skip region prefixing if model already has a cross-region inference profile prefix
           // Models from models.dev may already include prefixes like us., eu., global., etc.
           const crossRegionPrefixes = ["global.", "us.", "eu.", "jp.", "apac.", "au."]
@@ -1414,10 +1424,7 @@ export const layer = Layer.effect(
               pickBy(merged, (v) => !v.disabled),
               (v) => omit(v, ["disabled"]),
             )
-            const mergedTiers = mergeDeep(
-              ProviderTransform.serviceTiers(parsedModel),
-              model.serviceTiers ?? {},
-            )
+            const mergedTiers = mergeDeep(ProviderTransform.serviceTiers(parsedModel), model.serviceTiers ?? {})
             parsedModel.serviceTiers = mapValues(
               pickBy(mergedTiers, (v) => !v.disabled),
               (v) => omit(v, ["disabled"]),

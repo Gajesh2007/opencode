@@ -1,7 +1,7 @@
 import { InstanceState } from "@/effect/instance-state"
 import { Identifier } from "@/id/id"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
-import { Cause, Clock, Context, Deferred, Effect, Fiber, Layer, References, Scope, SynchronizedRef } from "effect"
+import { Cause, Clock, Context, Deferred, Effect, Exit, Fiber, Layer, References, Scope, SynchronizedRef } from "effect"
 import path from "node:path"
 
 export type Status = "running" | "completed" | "error" | "cancelled"
@@ -22,6 +22,7 @@ type Active = {
   info: Info
   done: Deferred.Deferred<Info>
   fiber?: Fiber.Fiber<void, unknown>
+  preparing?: Deferred.Deferred<void>
 }
 
 type Job = Active | { info: Info; receipt?: string }
@@ -42,6 +43,8 @@ export type StartInput = {
   type: string
   title?: string
   metadata?: Record<string, unknown>
+  rejectRunning?: boolean
+  beforeStart?: Effect.Effect<void, unknown>
   run: Effect.Effect<string, unknown>
 }
 
@@ -160,6 +163,11 @@ export const layer = Layer.effect(
             ...(data?.output !== undefined ? { output: data.output } : {}),
             ...(data?.error !== undefined ? { error: data.error } : {}),
           }
+          // Signal under the same lock that commits preparation, before startup can advance.
+          if (job.preparing) {
+            yield* Deferred.succeed(job.done, snapshot({ info }))
+            return [{ info: snapshot({ info }) }, jobs] as const
+          }
           if (!s.directory) {
             return [{ info: snapshot({ info }), done: job.done }, new Map(jobs).set(id, { info })] as const
           }
@@ -211,6 +219,7 @@ export const layer = Layer.effect(
           const id = input.id ?? Identifier.ascending("job")
           const started_at = yield* Clock.currentTimeMillis
           const done = yield* Deferred.make<Info>()
+          const preparing = input.beforeStart ? yield* Deferred.make<void>() : undefined
           const active: Active = {
             info: {
               id,
@@ -221,19 +230,60 @@ export const layer = Layer.effect(
               metadata: input.metadata,
             },
             done,
+            ...(preparing ? { preparing } : {}),
           }
-          const existing = yield* SynchronizedRef.modifyEffect(
+          const previous = yield* SynchronizedRef.modifyEffect<Map<string, Job>, Job | undefined, never, never>(
             s.jobs,
             Effect.fnUntraced(function* (jobs) {
               const current = jobs.get(id)
-              if (current && "done" in current) return [current, jobs] as const
-              if (current && "receipt" in current && current.receipt) {
-                yield* fs.remove(current.receipt, { force: true }).pipe(Effect.ignore)
+              if (current && "done" in current) {
+                if (input.rejectRunning) return yield* Effect.die(new Error(`Job ${id} is already running.`))
+                return [current, jobs] as const
               }
-              return [undefined, new Map(jobs).set(id, active)] as const
+              return [current, new Map(jobs).set(id, active)] as const
             }),
           )
-          if (existing) return snapshot(existing)
+          if (previous && "done" in previous) return snapshot(previous)
+
+          if (input.beforeStart && preparing) {
+            const prepared = yield* restore(
+              Effect.raceFirst(input.beforeStart, Deferred.await(done).pipe(Effect.andThen(Effect.interrupt))),
+            ).pipe(Effect.exit)
+            const admitted =
+              Exit.isSuccess(prepared) &&
+              (yield* SynchronizedRef.modifyEffect<Map<string, Job>, boolean, never, never>(s.jobs, (jobs) =>
+                Effect.gen(function* () {
+                  if (jobs.get(id) !== active || (yield* Deferred.isDone(done))) return [false, jobs] as const
+                  delete active.preparing
+                  return [true, jobs] as const
+                }),
+              ))
+            if (!admitted) {
+              const restored = yield* SynchronizedRef.modify(s.jobs, (jobs) => {
+                if (jobs.get(id) !== active) return [false, jobs] as const
+                const next = new Map(jobs)
+                if (previous) next.set(id, previous)
+                else next.delete(id)
+                return [true, next] as const
+              })
+              if (!restored && previous && "receipt" in previous && previous.receipt) {
+                yield* fs.remove(previous.receipt, { force: true }).pipe(Effect.ignore)
+              }
+              yield* Deferred.succeed(done, {
+                ...active.info,
+                status: Exit.isFailure(prepared) && !Cause.hasInterruptsOnly(prepared.cause) ? "error" : "cancelled",
+                completed_at: yield* Clock.currentTimeMillis,
+                ...(Exit.isFailure(prepared) ? { error: errorText(Cause.squash(prepared.cause)) } : {}),
+              })
+              yield* Deferred.succeed(preparing, undefined)
+              if (Exit.isFailure(prepared)) return yield* Effect.failCause(prepared.cause).pipe(Effect.orDie)
+              return yield* Effect.interrupt
+            }
+            yield* Deferred.succeed(preparing, undefined)
+          }
+          if (previous && "receipt" in previous && previous.receipt) {
+            yield* fs.remove(previous.receipt, { force: true }).pipe(Effect.ignore)
+          }
 
           const ready = yield* Deferred.make<void>()
           const stack = snapshotStack(yield* References.CurrentStackFrame)
@@ -256,21 +306,27 @@ export const layer = Layer.effect(
             // Keep diagnostic text and span ancestry without those argument closures.
             Effect.provideService(References.CurrentStackFrame, stack),
           )
-          const attached = yield* SynchronizedRef.modifyEffect(
+          const attached = yield* SynchronizedRef.modifyEffect<
+            Map<string, Job>,
+            { info: Info; owned: boolean },
+            never,
+            never
+          >(
             s.jobs,
             Effect.fnUntraced(function* (jobs) {
               const current = jobs.get(id)
-              if (current !== active) return [yield* read(current ?? active), jobs] as const
+              if (current !== active) return [{ info: yield* read(current ?? active), owned: false }, jobs] as const
               const job = { ...current, fiber }
-              return [snapshot(job), new Map(jobs).set(id, job)] as const
+              return [{ info: snapshot(job), owned: true }, new Map(jobs).set(id, job)] as const
             }),
           )
-          if (attached.status !== "running") {
+          if (!attached.owned || attached.info.status !== "running") {
             yield* Fiber.interrupt(fiber).pipe(Effect.ignore)
-            return attached
+            if (input.rejectRunning) return yield* Effect.interrupt
+            return attached.info
           }
           yield* Deferred.succeed(ready, undefined).pipe(Effect.ignore)
-          return attached
+          return attached.info
         }),
       )
     })
@@ -302,6 +358,7 @@ export const layer = Layer.effect(
         yield* Fiber.await(job.fiber).pipe(Effect.ignore)
       }
       yield* finish(yield* InstanceState.get(state), id, "cancelled", undefined, job.done)
+      if (job.preparing) yield* Deferred.await(job.preparing)
       return yield* Deferred.await(job.done)
     })
 

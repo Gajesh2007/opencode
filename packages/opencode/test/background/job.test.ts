@@ -103,6 +103,111 @@ describe("background.job", () => {
     }),
   )
 
+  it.instance("strict startup reserves the id before setup without blocking unrelated jobs", () =>
+    Effect.gen(function* () {
+      const jobs = yield* BackgroundJob.Service
+      const entered = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const first = yield* jobs
+        .start({
+          id: "strict",
+          type: "test",
+          rejectRunning: true,
+          beforeStart: Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+          run: Effect.succeed("winner"),
+        })
+        .pipe(Effect.forkScoped)
+      yield* Deferred.await(entered)
+      let duplicateSetup = false
+      const duplicate = yield* jobs
+        .start({
+          id: "strict",
+          type: "test",
+          rejectRunning: true,
+          beforeStart: Effect.sync(() => {
+            duplicateSetup = true
+          }),
+          run: Effect.succeed("loser"),
+        })
+        .pipe(Effect.exit)
+      expect(duplicate._tag).toBe("Failure")
+      expect(duplicateSetup).toBe(false)
+      yield* jobs.start({ id: "unrelated", type: "test", run: Effect.succeed("independent") })
+      expect((yield* jobs.wait({ id: "unrelated" })).info?.output).toBe("independent")
+      yield* Deferred.succeed(release, undefined)
+      yield* Fiber.join(first)
+      expect((yield* jobs.wait({ id: "strict" })).info?.output).toBe("winner")
+    }),
+  )
+
+  for (const failure of ["failure", "defect", "throw", "interruption"] as const) {
+    it.instance(`rolls back failed startup after ${failure} and preserves the previous receipt`, () =>
+      Effect.gen(function* () {
+        const jobs = yield* BackgroundJob.Service
+        yield* jobs.start({ id: "rollback", type: "test", run: Effect.succeed("previous") })
+        const previous = (yield* jobs.wait({ id: "rollback" })).info
+        const beforeStart =
+          failure === "failure"
+            ? Effect.fail(new Error("setup failed"))
+            : failure === "defect"
+              ? Effect.die("setup defect")
+              : failure === "interruption"
+                ? Effect.interrupt
+                : Effect.sync(() => {
+                    throw new Error("setup threw")
+                  })
+        const failed = yield* jobs
+          .start({
+            id: "rollback",
+            type: "test",
+            rejectRunning: true,
+            beforeStart,
+            run: Effect.succeed("must not run"),
+          })
+          .pipe(Effect.exit)
+        expect(failed._tag).toBe("Failure")
+        expect(yield* jobs.get("rollback")).toEqual(previous)
+        expect((yield* jobs.wait({ id: "rollback" })).info).toEqual(previous)
+        yield* jobs.start({ id: "rollback", type: "test", rejectRunning: true, run: Effect.succeed("retry") })
+        expect((yield* jobs.wait({ id: "rollback" })).info?.output).toBe("retry")
+      }),
+    )
+  }
+
+  it.instance("cancels startup, releases waiters, and never starts the cancelled work", () =>
+    Effect.gen(function* () {
+      const jobs = yield* BackgroundJob.Service
+      const entered = yield* Deferred.make<void>()
+      const stopped = yield* Deferred.make<void>()
+      let ran = false
+      const starting = yield* jobs
+        .start({
+          id: "cancel-startup",
+          type: "test",
+          rejectRunning: true,
+          beforeStart: Deferred.succeed(entered, undefined).pipe(
+            Effect.andThen(Effect.never),
+            Effect.ensuring(Deferred.succeed(stopped, undefined)),
+          ),
+          run: Effect.sync(() => {
+            ran = true
+            return "cancelled work"
+          }),
+        })
+        .pipe(Effect.forkScoped)
+      yield* Deferred.await(entered)
+      const waiting = yield* jobs.wait({ id: "cancel-startup" }).pipe(Effect.forkScoped({ startImmediately: true }))
+      expect((yield* jobs.cancel("cancel-startup"))?.status).toBe("cancelled")
+      yield* Deferred.await(stopped)
+      expect((yield* Fiber.await(starting))._tag).toBe("Failure")
+      expect((yield* Fiber.join(waiting)).info?.status).toBe("cancelled")
+      expect(yield* jobs.get("cancel-startup")).toBeUndefined()
+      expect(ran).toBe(false)
+      yield* jobs.start({ id: "cancel-startup", type: "test", rejectRunning: true, run: Effect.succeed("new winner") })
+      expect((yield* jobs.wait({ id: "cancel-startup" })).info?.output).toBe("new winner")
+    }),
+  )
+
   it.instance("tracks immediately interrupted jobs", () =>
     Effect.gen(function* () {
       const jobs = yield* BackgroundJob.Service
@@ -241,6 +346,55 @@ const recording = Layer.effect(
   }),
 ).pipe(Layer.provide(AppFileSystem.defaultLayer))
 const receipts = testEffect(BackgroundJob.layer.pipe(Layer.provideMerge(recording)))
+
+receipts.instance("startup rollback preserves only the previous receipt file", () =>
+  Effect.gen(function* () {
+    const jobs = yield* BackgroundJob.Service
+    const fs = yield* AppFileSystem.Service
+    const before = directories.length
+    yield* jobs.start({ id: "receipt-rollback", type: "test", run: Effect.succeed("previous receipt") })
+    yield* jobs.wait({ id: "receipt-rollback" })
+    const directory = directories.at(before)
+    if (!directory) return yield* Effect.die("receipt directory was not allocated")
+    const files = yield* fs.readDirectory(directory)
+    expect(files).toHaveLength(1)
+    yield* jobs
+      .start({
+        id: "receipt-rollback",
+        type: "test",
+        rejectRunning: true,
+        beforeStart: Effect.die("setup failed"),
+        run: Effect.succeed("must not run"),
+      })
+      .pipe(Effect.exit)
+    expect(yield* fs.readDirectory(directory)).toEqual(files)
+    expect((yield* jobs.get("receipt-rollback"))?.output).toBe("previous receipt")
+  }),
+)
+
+receipts.live("instance disposal interrupts pending startup without leaving a reservation", () =>
+  Effect.gen(function* () {
+    const jobs = yield* BackgroundJob.Service
+    const scope = yield* Scope.Scope
+    const entered = yield* Deferred.make<void>()
+    const starting = yield* Effect.scoped(
+      Effect.gen(function* () {
+        const starting = yield* jobs
+          .start({
+            id: "disposed-startup",
+            type: "test",
+            rejectRunning: true,
+            beforeStart: Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
+            run: Effect.die("disposed startup must not run"),
+          })
+          .pipe(Effect.forkIn(scope, { startImmediately: true }))
+        yield* Deferred.await(entered)
+        return starting
+      }).pipe(withTmpdirInstance()),
+    )
+    expect((yield* Fiber.await(starting))._tag).toBe("Failure")
+  }),
+)
 
 const routing = testEffect(
   Layer.mergeAll(Session.layer, SessionRunState.layer).pipe(

@@ -94,7 +94,7 @@ const MAX_REASONING_REDIRECTS = 2
 export interface Interface {
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
   readonly prompt: (input: PromptInput) => Effect.Effect<MessageV2.WithParts, Image.Error>
-  readonly loop: (input: LoopInput) => Effect.Effect<MessageV2.WithParts>
+  readonly loop: (input: LoopInput, signal?: AbortSignal) => Effect.Effect<MessageV2.WithParts>
   readonly shell: (input: ShellInput) => Effect.Effect<MessageV2.WithParts, Session.BusyError>
   readonly command: (input: CommandInput) => Effect.Effect<MessageV2.WithParts, Image.Error>
   readonly resolvePromptParts: (template: string) => Effect.Effect<PromptInput["parts"]>
@@ -1228,27 +1228,32 @@ export const layer = Layer.effect(
       return { info, parts }
     }, Effect.scoped)
 
-    const prompt: (input: PromptInput) => Effect.Effect<MessageV2.WithParts, Image.Error> = Effect.fn(
-      "SessionPrompt.prompt",
-    )(function* (input: PromptInput) {
-      const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
-      yield* revert.cleanup(session)
-      const message = yield* createUserMessage(input)
-      yield* sessions.touch(input.sessionID)
+    const prompt: (input: PromptInput, signal?: AbortSignal) => Effect.Effect<MessageV2.WithParts, Image.Error> =
+      Effect.fn("SessionPrompt.prompt")(function* (input: PromptInput, signal?: AbortSignal) {
+        // Mailbox/goal prompts and loop-only wakeups must not undo an explicit stop.
+        const current =
+          signal ??
+          (yield* input.parts.some((part) => part.type !== "text" || !part.synthetic)
+            ? state.resume(input.sessionID)
+            : state.continuation(input.sessionID))
+        const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+        yield* revert.cleanup(session)
+        const message = yield* createUserMessage(input)
+        yield* sessions.touch(input.sessionID)
 
-      const permissions: Permission.Rule[] = []
-      for (const [t, enabled] of Object.entries(input.tools ?? {})) {
-        permissions.push({ permission: t, action: enabled ? "allow" : "deny", pattern: "*" })
-      }
-      if (permissions.length > 0) {
-        const merged = Permission.merge(session.permission ?? [], permissions)
-        session.permission = merged
-        yield* sessions.setPermission({ sessionID: session.id, permission: merged })
-      }
+        const permissions: Permission.Rule[] = []
+        for (const [t, enabled] of Object.entries(input.tools ?? {})) {
+          permissions.push({ permission: t, action: enabled ? "allow" : "deny", pattern: "*" })
+        }
+        if (permissions.length > 0) {
+          const merged = Permission.merge(session.permission ?? [], permissions)
+          session.permission = merged
+          yield* sessions.setPermission({ sessionID: session.id, permission: merged })
+        }
 
-      if (input.noReply === true) return message
-      return yield* loop({ sessionID: input.sessionID })
-    })
+        if (input.noReply === true) return message
+        return yield* loop({ sessionID: input.sessionID }, current)
+      })
 
     const lastAssistant = Effect.fnUntraced(function* (sessionID: SessionID) {
       const match = yield* sessions.findMessage(sessionID, (m) => m.info.role !== "user").pipe(Effect.orDie)
@@ -1629,20 +1634,31 @@ export const layer = Layer.effect(
       },
     )
 
-    const loop: (input: LoopInput) => Effect.Effect<MessageV2.WithParts> = Effect.fn("SessionPrompt.loop")(function* (
-      input: LoopInput,
-    ) {
-      return yield* state.ensureRunning(input.sessionID, lastAssistant(input.sessionID), runLoop(input.sessionID))
+    const loop: Interface["loop"] = Effect.fn("SessionPrompt.loop")(function* (input: LoopInput, signal?: AbortSignal) {
+      return yield* state.ensureRunning(
+        input.sessionID,
+        lastAssistant(input.sessionID),
+        runLoop(input.sessionID),
+        signal,
+      )
     })
 
     const shell: (input: ShellInput) => Effect.Effect<MessageV2.WithParts, Session.BusyError> = Effect.fn(
       "SessionPrompt.shell",
     )(function* (input: ShellInput) {
+      const signal = yield* state.resume(input.sessionID)
       const ready = yield* Latch.make()
-      return yield* state.startShell(input.sessionID, lastAssistant(input.sessionID), shellImpl(input, ready), ready)
+      return yield* state.startShell(
+        input.sessionID,
+        lastAssistant(input.sessionID),
+        shellImpl(input, ready),
+        ready,
+        signal,
+      )
     })
 
     const command = Effect.fn("SessionPrompt.command")(function* (input: CommandInput) {
+      const signal = yield* state.resume(input.sessionID)
       yield* elog.info("command", { sessionID: input.sessionID, command: input.command, agent: input.agent })
       const cmd = yield* commands.get(input.command)
       if (!cmd) {
@@ -1742,17 +1758,20 @@ export const layer = Layer.effect(
         { parts },
       )
 
-      const result = yield* prompt({
-        sessionID: input.sessionID,
-        messageID: input.messageID,
-        model: userModel,
-        agent: userAgent,
-        parts,
-        variant: input.variant,
-        reasoningMode: input.reasoningMode,
-        serviceTier: input.serviceTier,
-        upstream: input.upstream,
-      })
+      const result = yield* prompt(
+        {
+          sessionID: input.sessionID,
+          messageID: input.messageID,
+          model: userModel,
+          agent: userAgent,
+          parts,
+          variant: input.variant,
+          reasoningMode: input.reasoningMode,
+          serviceTier: input.serviceTier,
+          upstream: input.upstream,
+        },
+        signal,
+      )
       yield* bus.publish(Command.Event.Executed, {
         name: input.command,
         sessionID: input.sessionID,

@@ -193,6 +193,8 @@ export interface Interface {
   }) => Effect.Effect<ReadonlyArray<Message>, MemberNotRegistered | MailboxPersistenceError>
   /** Returns false for sessions outside a collaboration tree. */
   readonly hasMail: (sessionID: SessionID) => Effect.Effect<boolean>
+  /** Checks wake eligibility across the full queue, independently of bounded delivery batches. */
+  readonly hasPendingCompletion: (input: { sessionID: SessionID; messageID: MessageID }) => Effect.Effect<boolean>
   readonly wait: (input: { sessionID: SessionID; timeout: number }) => Effect.Effect<WaitResult, MemberNotRegistered>
   readonly remove: (sessionID: SessionID) => Effect.Effect<void>
 }
@@ -927,6 +929,17 @@ export const layer = Layer.effect(
           const state = yield* InstanceState.get(states)
           const member = locate(state, sessionID)?.member
           return member?.mailbox.some((message) => !member.delivering.has(message.id)) ?? false
+        }),
+      hasPendingCompletion: (input) =>
+        Effect.gen(function* () {
+          yield* ensure(input.sessionID)
+          const member = locate(yield* InstanceState.get(states), input.sessionID)?.member
+          if (!member) return false
+          return (
+            member.mailbox.some(
+              (message) => message.messageID === input.messageID && !member.delivering.has(message.id),
+            ) && member.mailbox.some((message) => message.kind === "FINAL_ANSWER" && !member.delivering.has(message.id))
+          )
         }),
       wait: (input) =>
         Effect.gen(function* () {

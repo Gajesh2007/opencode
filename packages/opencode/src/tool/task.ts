@@ -6,11 +6,14 @@ import { Session } from "@/session/session"
 import { SessionID, MessageID } from "../session/schema"
 import { MessageV2 } from "../session/message-v2"
 import { Agent } from "../agent/agent"
+import { ChildModel } from "../agent/child-model"
+import { Collaboration } from "../agent/collaboration"
 import { childToolOverrides, runChildTurn, type TaskPromptOps } from "../agent/child-session"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import { SubagentLimit } from "../agent/subagent-limit"
 import { Team } from "../agent/team"
 import { Plugin } from "@/plugin"
+import { Provider } from "@/provider/provider"
 import { SessionStatus } from "@/session/status"
 import { Config } from "@/config/config"
 import { TuiEvent } from "@/cli/cmd/tui/event"
@@ -63,6 +66,18 @@ export const Parameters = Schema.Struct({
     description:
       "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
   }),
+  model: Schema.optional(Schema.String).annotate({
+    description:
+      "Model for this child only, in provider/model format. Omit on creation to use the selected agent's model or the parent model; omit on resume to keep the child's latest selection. Only the direct parent can change a child's selection.",
+  }),
+  variant: Schema.optional(Schema.String).annotate({
+    description:
+      "Model-specific reasoning effort/variant for this child. Use a supported variant, or 'default' to clear named effort. Omit on resume to preserve it when the model is unchanged; a model change uses the destination agent default or 'default'.",
+  }),
+  reset_model: Schema.optional(Schema.Boolean).annotate({
+    description:
+      "When true, reselect the current agent/parent model defaults for this child. Cannot be combined with model or variant. Resuming a child requires it to be idle.",
+  }),
   command: Schema.optional(Schema.String).annotate({ description: "The command that triggered this task" }),
   background: Schema.optional(Schema.Boolean).annotate({
     description: "When true, launch the subagent in the background and return immediately",
@@ -91,11 +106,17 @@ function output(sessionID: SessionID, text: string) {
   ].join("\n")
 }
 
-function backgroundOutput(sessionID: SessionID, worktreeDir?: string) {
+function backgroundOutput(
+  sessionID: SessionID,
+  selection: { model: MessageV2.User["model"]; variant: string },
+  worktreeDir?: string,
+) {
   const worktreeLine = worktreeDir ? `worktree: ${worktreeDir}\n` : ""
   return [
     `task_id: ${sessionID} (for polling this task with task_status)`,
     "state: running",
+    `model: ${selection.model.providerID}/${selection.model.modelID}`,
+    `variant: ${selection.variant}`,
     worktreeLine + "",
     "<task_result>",
     "Background task started. Continue your current work and call task_status when you need the result, or wait for the auto-injected completion message.",
@@ -103,10 +124,17 @@ function backgroundOutput(sessionID: SessionID, worktreeDir?: string) {
   ].join("\n")
 }
 
-function syncOutput(sessionID: SessionID, text: string, worktreeDir?: string) {
+function syncOutput(
+  sessionID: SessionID,
+  text: string,
+  selection: { model: MessageV2.User["model"]; variant: string },
+  worktreeDir?: string,
+) {
   const worktreeLine = worktreeDir ? `\nworktree: ${worktreeDir}` : ""
   return [
     `task_id: ${sessionID} (for resuming to continue this task if needed)${worktreeLine}`,
+    `model: ${selection.model.providerID}/${selection.model.modelID}`,
+    `variant: ${selection.variant}`,
     "",
     "<task_result>",
     text,
@@ -205,6 +233,7 @@ export const TaskTool = Tool.define(
     const limit = yield* SubagentLimit.Service
     const team = yield* Team.Service
     const plugin = yield* Plugin.Service
+    const collaboration = yield* Effect.serviceOption(Collaboration.Service)
 
     const run = Effect.fn("TaskTool.execute")(function* (
       params: Schema.Schema.Type<typeof Parameters>,
@@ -218,6 +247,25 @@ export const TaskTool = Tool.define(
       const session = taskID
         ? yield* sessions.get(SessionID.make(taskID)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
         : undefined
+      const checkIdle = Effect.gen(function* () {
+        if (!session) return
+        if (
+          (yield* status.get(session.id)).type !== "idle" ||
+          (yield* background.get(session.id))?.status === "running"
+        ) {
+          return yield* Effect.fail(
+            new Error(`Task ${session.id} is already running. Use task_status to check progress.`),
+          )
+        }
+      })
+      yield* checkIdle
+      if (
+        session &&
+        (params.model !== undefined || params.variant !== undefined || params.reset_model === true) &&
+        session.parentID !== ctx.sessionID
+      ) {
+        return yield* Effect.fail(new Error("Only the direct parent can change a child's model or variant."))
+      }
       const parent = yield* sessions.get(ctx.sessionID)
       const parentAgent = parent.agent
         ? yield* agent.get(parent.agent).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
@@ -252,6 +300,34 @@ export const TaskTool = Tool.define(
       if (!next) {
         return yield* Effect.fail(new Error(`Unknown agent type: ${subagentType} is not a valid agent type`))
       }
+
+      const ops = ctx.extra?.promptOps as TaskPromptOps
+      if (!ops) return yield* Effect.fail(new Error("TaskTool requires promptOps in ctx.extra"))
+      const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(Effect.orDie)
+      if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
+      const parentUser = yield* MessageV2.get({
+        sessionID: ctx.sessionID,
+        messageID: msg.info.parentID,
+      }).pipe(Effect.orDie)
+      const parentUserModel = parentUser.info.role === "user" ? parentUser.info.model : undefined
+      const lastUser = session
+        ? yield* sessions.findMessage(session.id, (item) => item.info.role === "user")
+        : undefined
+      const selection = yield* ChildModel.resolve({
+        model: params.model,
+        variant: params.variant,
+        resetModel: params.reset_model,
+        agent: next,
+        parent: { ...parentUserModel, modelID: msg.info.modelID, providerID: msg.info.providerID },
+        current:
+          lastUser && Option.isSome(lastUser) && lastUser.value.info.role === "user"
+            ? lastUser.value.info.model
+            : session?.model
+              ? { modelID: session.model.id, providerID: session.model.providerID, variant: session.model.variant }
+              : undefined,
+      }).pipe(Effect.provide(Provider.defaultLayer))
+      // Permission/model validation can yield while another turn starts.
+      yield* checkIdle
 
       // If the LLM asked for a worktree, create it before the subagent session
       // so the new session can be scoped to the isolated directory. Resuming
@@ -303,39 +379,13 @@ export const TaskTool = Tool.define(
               permission: subagentPermission,
             }))
 
-      // Register team membership so the teammate and the lead can coordinate via the
-      // send_message / inbox / team_tasks tools, which resolve identity by session id.
       const memberName = params.name ?? next.name
-      if (params.team) {
-        const leadName = (yield* team.whoami(ctx.sessionID))?.name ?? "lead"
-        yield* team.register({ team: params.team, name: leadName, sessionID: ctx.sessionID })
-        yield* team.register({ team: params.team, name: memberName, sessionID: nextSession.id })
-      }
 
-      const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(Effect.orDie)
-      if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
-
-      // Inherit the user-selected mode (service tier, variant, upstream pin) from the
-      // user message that triggered this turn so subagents run with the same tier as
-      // the parent. The agent's own `variant` still wins when set — it's an explicit
-      // configuration of the agent's identity, not a runtime user choice.
-      const parentUser = yield* MessageV2.get({
-        sessionID: ctx.sessionID,
-        messageID: msg.info.parentID,
-      }).pipe(Effect.orDie)
-      const parentUserModel = parentUser.info.role === "user" ? parentUser.info.model : undefined
-      const inheritedServiceTier = next.serviceTier ?? parentUserModel?.serviceTier
-      const inheritedUpstream = parentUserModel?.upstream
-      const inheritedVariant = next.variant ?? parentUserModel?.variant
-
-      const model = next.model ?? {
-        modelID: msg.info.modelID,
-        providerID: msg.info.providerID,
-      }
       const metadata = {
         parentSessionId: ctx.sessionID,
         sessionId: nextSession.id,
-        model,
+        model: selection.model,
+        variant: selection.variant,
         ...(runInBackground ? { background: true } : {}),
         ...(worktreeInfo
           ? {
@@ -346,20 +396,12 @@ export const TaskTool = Tool.define(
       }
       const worktreeDir = worktreeInfo?.directory
 
-      yield* ctx.metadata({
-        title: params.description,
-        metadata,
-      })
-
-      const ops = ctx.extra?.promptOps as TaskPromptOps
-      if (!ops) return yield* Effect.fail(new Error("TaskTool requires promptOps in ctx.extra"))
       const runCancel = yield* EffectBridge.make()
 
       const runTask = Effect.fn("TaskTool.runTask")(function* () {
         const teamPreamble = params.team
           ? `[Team "${params.team}"] You are teammate "${memberName}". Coordinate with teammates using the send_message, inbox, and team_tasks tools; check your inbox when you begin and before you finish.\n\n`
           : ""
-        const subagentModel = { modelID: model.modelID, providerID: model.providerID }
         return yield* runChildTurn({
           ops,
           plugin,
@@ -368,10 +410,7 @@ export const TaskTool = Tool.define(
           agent: next,
           description: params.description,
           prompt: teamPreamble + params.prompt,
-          model: subagentModel,
-          variant: inheritedVariant,
-          serviceTier: inheritedServiceTier,
-          upstream: inheritedUpstream,
+          ...selection,
           tools: childToolOverrides({
             agent: next,
             primaryTools: cfg.experimental?.primary_tools,
@@ -416,16 +455,19 @@ export const TaskTool = Tool.define(
         text: string,
       ) {
         const currentParent = yield* sessions.get(ctx.sessionID)
-        // Carry the parent's original mode forward on the synthetic completion
-        // message so the resumed parent loop runs at the same service tier the
-        // user picked (e.g. fast mode), not a regressed default.
+        const latest = yield* sessions.findMessage(ctx.sessionID, (item) => item.info.role === "user")
+        const currentModel =
+          Option.isSome(latest) && latest.value.info.role === "user" ? latest.value.info.model : parentUserModel
+        // A background child must not undo a parent selection changed after launch.
         const message = yield* ops.prompt({
           sessionID: ctx.sessionID,
           noReply: true,
           agent: currentParent.agent ?? ctx.agent,
-          variant: parentUserModel?.variant,
-          serviceTier: inheritedServiceTier,
-          upstream: inheritedUpstream,
+          model: currentModel ? { providerID: currentModel.providerID, modelID: currentModel.modelID } : undefined,
+          variant: currentModel?.variant ?? "default",
+          reasoningMode: currentModel?.reasoningMode,
+          serviceTier: currentModel?.serviceTier,
+          upstream: currentModel?.upstream,
           parts: [
             {
               type: "text",
@@ -442,13 +484,6 @@ export const TaskTool = Tool.define(
         yield* continueIfIdle({ userID: message.info.id, state })
       })
 
-      const existing = yield* background.get(nextSession.id)
-      if (existing?.status === "running") {
-        return yield* Effect.fail(
-          new Error(`Task ${nextSession.id} is already running. Use task_status to check progress.`),
-        )
-      }
-
       // Unified flow: ALWAYS register the subagent run as a BackgroundJob.
       // The job's `run` is just `runTask()` — no extra pipeline. We decide
       // whether to inject the result back into the parent session by FORKING
@@ -464,6 +499,25 @@ export const TaskTool = Tool.define(
         type: id,
         title: params.description,
         metadata,
+        rejectRunning: true,
+        beforeStart: Effect.gen(function* () {
+          const member = Option.isSome(collaboration) ? yield* collaboration.value.member(nextSession.id) : undefined
+          if (
+            member?.status === "pending" ||
+            member?.status === "running" ||
+            (yield* status.get(nextSession.id)).type !== "idle"
+          ) {
+            return yield* Effect.fail(
+              new Error(`Task ${nextSession.id} is already running. Use task_status to check progress.`),
+            )
+          }
+          yield* ctx.metadata({ title: params.description, metadata })
+          if (params.team) {
+            const leadName = (yield* team.whoami(ctx.sessionID))?.name ?? "lead"
+            yield* team.register({ team: params.team, name: leadName, sessionID: ctx.sessionID })
+            yield* team.register({ team: params.team, name: memberName, sessionID: nextSession.id })
+          }
+        }),
         // Only an explicitly configured global concurrency limit queues work.
         run: limit.withPermit(runTask()),
       })
@@ -485,7 +539,7 @@ export const TaskTool = Tool.define(
         return {
           title: params.description,
           metadata: { ...metadata, jobId: job.id },
-          output: backgroundOutput(nextSession.id, worktreeDir),
+          output: backgroundOutput(nextSession.id, selection, worktreeDir),
         }
       }
 
@@ -537,7 +591,7 @@ export const TaskTool = Tool.define(
             return {
               title: params.description,
               metadata: { ...metadata, jobId: job.id },
-              output: syncOutput(nextSession.id, status.output ?? "", worktreeDir),
+              output: syncOutput(nextSession.id, status.output ?? "", selection, worktreeDir),
             }
           }
           if (status.status === "error") {
@@ -549,7 +603,7 @@ export const TaskTool = Tool.define(
         return {
           title: params.description,
           metadata: { ...metadata, jobId: job.id },
-          output: backgroundOutput(nextSession.id, worktreeDir),
+          output: backgroundOutput(nextSession.id, selection, worktreeDir),
         }
       }
 
@@ -566,7 +620,7 @@ export const TaskTool = Tool.define(
       return {
         title: params.description,
         metadata: { ...metadata, jobId: job.id },
-        output: syncOutput(nextSession.id, info.output ?? "", worktreeDir),
+        output: syncOutput(nextSession.id, info.output ?? "", selection, worktreeDir),
       }
     })
 

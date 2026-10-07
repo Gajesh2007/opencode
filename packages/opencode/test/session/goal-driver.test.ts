@@ -15,6 +15,7 @@ import { MessageV2 } from "../../src/session/message-v2"
 import { Goal } from "../../src/session/goal"
 import { Steering } from "../../src/session/steering"
 import { SessionPrompt } from "../../src/session/prompt"
+import { SessionRunState } from "../../src/session/run-state"
 import { GoalDriver } from "../../src/session/goal-driver"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { SessionStatus } from "../../src/session/status"
@@ -61,7 +62,13 @@ const cfg = {
 }
 
 function providerCfg(url: string) {
-  return { ...cfg, provider: { ...cfg.provider, test: { ...cfg.provider.test, options: { ...cfg.provider.test.options, baseURL: url } } } }
+  return {
+    ...cfg,
+    provider: {
+      ...cfg.provider,
+      test: { ...cfg.provider.test, options: { ...cfg.provider.test.options, baseURL: url } },
+    },
+  }
 }
 
 // Controllable fakes — reset per test. The driver's decision logic is what we
@@ -69,10 +76,7 @@ function providerCfg(url: string) {
 let steerOutcome: Steering.SteerResult = { type: "continue", message: "" }
 let loopCalls: string[] = []
 
-const fakeSteering = Layer.succeed(
-  Steering.Service,
-  Steering.Service.of({ steer: () => Effect.succeed(steerOutcome) }),
-)
+const fakeSteering = Layer.succeed(Steering.Service, Steering.Service.of({ steer: () => Effect.succeed(steerOutcome) }))
 const fakeSessionPrompt = Layer.succeed(
   SessionPrompt.Service,
   SessionPrompt.Service.of({
@@ -104,6 +108,7 @@ const deps = Layer.mergeAll(
   SyncEvent.defaultLayer,
   EventV2Bridge.defaultLayer,
   Goal.defaultLayer,
+  SessionRunState.defaultLayer,
 ).pipe(Layer.provideMerge(infra))
 const driverDeps = Layer.mergeAll(deps, fakeSteering, fakeSessionPrompt)
 const env = Layer.mergeAll(TestLLMServer.layer, driverDeps, GoalDriver.layer.pipe(Layer.provide(driverDeps)))
@@ -158,7 +163,11 @@ const assistant = Effect.fn("test.assistant")(function* (
 })
 
 // Set up a session with one finished assistant turn and an active goal.
-const setup = Effect.fn("test.setup")(function* (dir: string, goalInput?: { tokenBudget?: number; costBudget?: number }, turn?: { tokens?: number; cost?: number }) {
+const setup = Effect.fn("test.setup")(function* (
+  dir: string,
+  goalInput?: { tokenBudget?: number; costBudget?: number },
+  turn?: { tokens?: number; cost?: number },
+) {
   const { driver, goals, sessions } = yield* boot()
   const chat = yield* sessions.create({})
   const u = yield* user(chat.id, "do the thing")

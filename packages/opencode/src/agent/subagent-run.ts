@@ -1,4 +1,5 @@
 import { Agent } from "@/agent/agent"
+import { ChildModel } from "@/agent/child-model"
 import { childToolOverrides, runChildTurn, type TaskPromptOps } from "@/agent/child-session"
 import { Collaboration, MAX_MAILBOX_PAYLOAD_CHARS } from "@/agent/collaboration"
 import { deriveSubagentSessionPermission } from "@/agent/subagent-permissions"
@@ -6,6 +7,7 @@ import { SubagentLimit } from "@/agent/subagent-limit"
 import { BackgroundJob } from "@/background/job"
 import { Config } from "@/config/config"
 import { Plugin } from "@/plugin"
+import { Provider } from "@/provider/provider"
 import { MessageV2 } from "@/session/message-v2"
 import type { SessionPrompt } from "@/session/prompt"
 import { SessionID } from "@/session/schema"
@@ -22,17 +24,25 @@ export type Input = {
   readonly message: string
   readonly forkTurns?: "all" | "none" | number
   readonly agentType?: string
+  readonly model?: string
+  readonly variant?: string
+  readonly resetModel?: boolean
 }
 
 export type Result = {
   readonly path: string
   readonly sessionID: SessionID
+  readonly model: NonNullable<SessionPrompt.PromptInput["model"]>
+  readonly variant: string
 }
 
 export type FollowupInput = {
   readonly context: Tool.Context
   readonly target: string
   readonly message: string
+  readonly model?: string
+  readonly variant?: string
+  readonly resetModel?: boolean
 }
 
 export interface Interface {
@@ -85,40 +95,64 @@ export const layer = Layer.effect(
         .findMessage(input.parentSessionID, (message) => message.info.role === "user")
         .pipe(Effect.orDie)
       if (Option.isNone(latest)) return
+      if (
+        !(yield* collaboration.hasPendingCompletion({
+          sessionID: input.parentSessionID,
+          messageID: latest.value.info.id,
+        }))
+      )
+        return
+      // Other completion notifiers must not restart a parent turn that was cancelled or failed.
+      const previous = yield* sessions
+        .findMessage(input.parentSessionID, (message) => message.info.role === "assistant")
+        .pipe(Effect.orDie)
+      if (Option.isSome(previous) && previous.value.info.role === "assistant" && previous.value.info.error) return
       const mail = yield* collaboration.inbox({ sessionID: input.parentSessionID }).pipe(Effect.orDie)
-      if (!mail.some((message) => message.messageID === latest.value.info.id)) return
-      yield* input.ops.loop({ sessionID: input.parentSessionID }).pipe(Effect.ignore)
+      if (!mail.length) return
+      const resumed = yield* input.ops.loop({ sessionID: input.parentSessionID }).pipe(Effect.exit)
+      if (Exit.isFailure(resumed) || resumed.value.info.role !== "assistant" || resumed.value.info.error) return
+      const remaining = yield* collaboration.inbox({ sessionID: input.parentSessionID }).pipe(Effect.orDie)
+      // A no-op loop must not spin on the same batch. Recheck policy after actual delivery.
+      if (!remaining.length || remaining[0].id === mail[0].id) return
+      return yield* resumeParent(input)
     })
 
     const notifyParent = (input: { ops: TaskPromptOps; parentSessionID: SessionID }) =>
       resumeParent(input).pipe(Effect.ignore, Effect.forkIn(scope, { startImmediately: true }))
 
-    const start = Effect.fn("SubagentRun.start")(function* (input: {
-      ops: TaskPromptOps
-      childSessionID: SessionID
-      parentSessionID: SessionID
-      path: string
-      agent: Agent.Info
-      task: string
-      message: string
-      model: NonNullable<SessionPrompt.PromptInput["model"]>
-      variant?: string
-      serviceTier?: string
-      upstream?: string
-      type: "spawn_agent" | "followup_task"
-    }) {
+    const start = Effect.fn("SubagentRun.start")(function* (
+      input: {
+        ops: TaskPromptOps
+        childSessionID: SessionID
+        parentSessionID: SessionID
+        path: string
+        agent: Agent.Info
+        task: string
+        message: string
+        model: NonNullable<SessionPrompt.PromptInput["model"]>
+        variant?: string
+        serviceTier?: string
+        upstream?: string
+        type: "spawn_agent" | "followup_task"
+      },
+      beforeStart: Effect.Effect<void, unknown>,
+    ) {
       const cfg = yield* config.get()
       const metadata = {
         parentSessionId: input.parentSessionID,
         sessionId: input.childSessionID,
         taskPath: input.path,
         background: true,
+        model: input.model,
+        variant: input.variant,
       }
       yield* background.start({
         id: input.childSessionID,
         type: input.type,
         title: input.task,
         metadata,
+        rejectRunning: true,
+        beforeStart,
         run: limit
           .withPermit(
             Effect.gen(function* () {
@@ -211,8 +245,6 @@ export const layer = Layer.effect(
           ),
         )
       }
-      if (!member) yield* collaboration.registerRoot(input.context.sessionID)
-
       const parentAgentName = parent.agent ?? input.context.agent
       const parentAgent = yield* agents.get(parentAgentName).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
       const selected = yield* agents
@@ -220,6 +252,7 @@ export const layer = Layer.effect(
         .pipe(
           Effect.catchCause(() => Effect.fail(new Error(`Unknown agent type: ${input.agentType ?? parentAgentName}`))),
         )
+      if (!selected) return yield* Effect.fail(new Error(`Unknown agent type: ${input.agentType ?? parentAgentName}`))
       yield* input.context.ask({
         permission: "spawn_agent",
         patterns: ["*"],
@@ -238,11 +271,19 @@ export const layer = Layer.effect(
             Effect.catchCause(() => Effect.succeed(undefined)),
           )
         : undefined
-      const model = {
-        modelID: current.info.modelID,
-        providerID: current.info.providerID,
-      }
       const inherited = source?.info.role === "user" ? source.info.model : undefined
+      const selection = yield* ChildModel.resolve({
+        model: input.model,
+        variant: input.variant,
+        resetModel: input.resetModel,
+        agent: selected,
+        parent: {
+          ...inherited,
+          modelID: current.info.modelID,
+          providerID: current.info.providerID,
+        },
+      }).pipe(Effect.provide(Provider.defaultLayer))
+      if (!member) yield* collaboration.registerRoot(input.context.sessionID)
       const permission = deriveSubagentSessionPermission({
         parentSessionPermission: parent.permission ?? [],
         parentAgent,
@@ -253,7 +294,11 @@ export const layer = Layer.effect(
             parentID: input.context.sessionID,
             title: `[agent] ${taskName}`,
             agent: selected.name,
-            model: { id: model.modelID, providerID: model.providerID, variant: inherited?.variant },
+            model: {
+              id: selection.model.modelID,
+              providerID: selection.model.providerID,
+              variant: selection.variant,
+            },
             permission,
             workspaceID: parent.workspaceID,
           })
@@ -272,17 +317,8 @@ export const layer = Layer.effect(
         taskName,
         lastTask: message,
       })
-      yield* Effect.gen(function* () {
-        yield* input.context.metadata({
-          title: taskName,
-          metadata: {
-            parentSessionId: input.context.sessionID,
-            sessionId: child.id,
-            taskPath: registered.path,
-            background: true,
-          },
-        })
-        yield* start({
+      yield* start(
+        {
           ops,
           childSessionID: child.id,
           parentSessionID: input.context.sessionID,
@@ -290,13 +326,21 @@ export const layer = Layer.effect(
           agent: selected,
           task: taskName,
           message,
-          model,
-          variant: inherited?.variant,
-          serviceTier: inherited?.serviceTier,
-          upstream: inherited?.upstream,
+          ...selection,
           type: "spawn_agent",
-        })
-      }).pipe(
+        },
+        input.context.metadata({
+          title: taskName,
+          metadata: {
+            parentSessionId: input.context.sessionID,
+            sessionId: child.id,
+            taskPath: registered.path,
+            background: true,
+            model: selection.model,
+            variant: selection.variant,
+          },
+        }),
+      ).pipe(
         Effect.onExit((exit) =>
           Effect.gen(function* () {
             if (Exit.isSuccess(exit) || (yield* background.get(child.id))) return
@@ -308,7 +352,7 @@ export const layer = Layer.effect(
           }),
         ),
       )
-      return { path: registered.path, sessionID: child.id }
+      return { path: registered.path, sessionID: child.id, model: selection.model, variant: selection.variant }
     }, detached)
 
     const followup = Effect.fn("SubagentRun.followup")(function* (input: FollowupInput) {
@@ -325,74 +369,121 @@ export const layer = Layer.effect(
       if (target.sessionID === target.rootSessionID || target.sessionID === input.context.sessionID) {
         return yield* Effect.fail(new Error("followup_task can only target another child agent."))
       }
-      if (target.status === "running" || (yield* background.get(target.sessionID))?.status === "running") {
+      if (
+        target.status === "pending" ||
+        target.status === "running" ||
+        (yield* background.get(target.sessionID))?.status === "running" ||
+        (yield* status.get(target.sessionID)).type !== "idle"
+      ) {
         return yield* Effect.fail(new Error(`Agent ${target.path} is already running.`))
       }
 
       const child = yield* sessions.get(target.sessionID)
+      if (
+        (input.model !== undefined || input.variant !== undefined || input.resetModel) &&
+        child.parentID !== input.context.sessionID
+      ) {
+        return yield* Effect.fail(new Error("Only the direct parent can change a child agent's model selection."))
+      }
       const selected = yield* agents
         .get(child.agent ?? input.context.agent)
         .pipe(
           Effect.catchCause(() => Effect.fail(new Error(`Unknown child agent: ${child.agent ?? input.context.agent}`))),
         )
+      if (!selected) return yield* Effect.fail(new Error(`Unknown child agent: ${child.agent ?? input.context.agent}`))
       yield* input.context.ask({
-        permission: "task",
-        patterns: [selected.name],
+        permission: "spawn_agent",
+        patterns: ["*"],
         always: ["*"],
         metadata: { description: "follow up child agent", subagent_type: selected.name, collaboration: true },
       })
       const lastUser = yield* sessions.findMessage(target.sessionID, (item) => item.info.role === "user")
       const userModel =
         Option.isSome(lastUser) && lastUser.value.info.role === "user" ? lastUser.value.info.model : undefined
-      const model = userModel
-        ? { modelID: userModel.modelID, providerID: userModel.providerID }
-        : child.model
-          ? { modelID: child.model.id, providerID: child.model.providerID }
-          : undefined
-      if (!model) return yield* Effect.fail(new Error(`Agent ${target.path} has no model to resume with.`))
+      const current =
+        userModel ??
+        (child.model
+          ? { modelID: child.model.id, providerID: child.model.providerID, variant: child.model.variant }
+          : undefined)
+      if (!current) return yield* Effect.fail(new Error(`Agent ${target.path} has no model to resume with.`))
       const parentSessionID = child.parentID ?? target.parentSessionID
       if (!parentSessionID) return yield* Effect.fail(new Error(`Agent ${target.path} has no parent session.`))
-      const claim = yield* collaboration.claimFollowup({ sessionID: target.sessionID, lastTask: message })
-      if (!claim) return yield* Effect.fail(new Error(`Agent ${target.path} is already running.`))
-
-      yield* input.context
-        .metadata({
-          title: target.taskName,
-          metadata: {
-            parentSessionId: parentSessionID,
-            sessionId: target.sessionID,
-            taskPath: target.path,
-            background: true,
-          },
-        })
-        .pipe(
-          Effect.andThen(
-            start({
-              ops,
-              childSessionID: target.sessionID,
-              parentSessionID,
-              path: target.path,
-              agent: selected,
-              task: target.taskName,
-              message,
-              model,
-              variant: userModel?.variant ?? child.model?.variant,
-              serviceTier: userModel?.serviceTier,
-              upstream: userModel?.upstream,
-              type: "followup_task",
-            }),
-          ),
-          Effect.onExit((exit) =>
-            Exit.isFailure(exit)
-              ? collaboration.setStatus({
-                  sessionID: target.sessionID,
-                  status: claim.previousStatus,
-                  lastTask: claim.previousLastTask,
-                })
-              : Effect.void,
-          ),
-        )
-      return { path: target.path, sessionID: target.sessionID }
+      const parentUser = input.resetModel
+        ? yield* sessions.findMessage(parentSessionID, (item) => item.info.role === "user")
+        : Option.none()
+      const selection = yield* ChildModel.resolve({
+        model: input.model,
+        variant: input.variant,
+        resetModel: input.resetModel,
+        agent: selected,
+        parent:
+          Option.isSome(parentUser) && parentUser.value.info.role === "user" ? parentUser.value.info.model : current,
+        current,
+      }).pipe(Effect.provide(Provider.defaultLayer))
+      if ((yield* status.get(target.sessionID)).type !== "idle") {
+        return yield* Effect.fail(new Error(`Agent ${target.path} is already running.`))
+      }
+      const admission: { claim?: Collaboration.FollowupClaim } = {}
+      yield* start(
+        {
+          ops,
+          childSessionID: target.sessionID,
+          parentSessionID,
+          path: target.path,
+          agent: selected,
+          task: target.taskName,
+          message,
+          ...selection,
+          type: "followup_task",
+        },
+        Effect.gen(function* () {
+          const claim = yield* collaboration.claimFollowup({ sessionID: target.sessionID, lastTask: message })
+          if (!claim) return yield* Effect.fail(new Error(`Agent ${target.path} is already running.`))
+          admission.claim = claim
+          yield* input.context.metadata({
+            title: target.taskName,
+            metadata: {
+              parentSessionId: parentSessionID,
+              sessionId: target.sessionID,
+              taskPath: target.path,
+              background: true,
+              model: selection.model,
+              variant: selection.variant,
+            },
+          })
+        }).pipe(
+          Effect.onExit((exit) => {
+            if (Exit.isSuccess(exit) || !admission.claim) return Effect.void
+            return collaboration
+              .setStatus({
+                sessionID: target.sessionID,
+                status: admission.claim.previousStatus,
+                lastTask: admission.claim.previousLastTask,
+              })
+              .pipe(
+                Effect.tap(() =>
+                  Effect.sync(() => {
+                    admission.claim = undefined
+                  }),
+                ),
+              )
+          }),
+        ),
+      ).pipe(
+        Effect.onExit((exit) =>
+          Effect.gen(function* () {
+            if (Exit.isSuccess(exit) || !admission.claim) return
+            const member = yield* collaboration.member(target.sessionID)
+            if (member?.status !== "pending" || member.lastTask !== message) return
+            yield* collaboration.setStatus({
+              sessionID: target.sessionID,
+              status: admission.claim.previousStatus,
+              lastTask: admission.claim.previousLastTask,
+            })
+          }),
+        ),
+      )
+      return { path: target.path, sessionID: target.sessionID, model: selection.model, variant: selection.variant }
     }, detached)
 
     return Service.of({

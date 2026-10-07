@@ -34,6 +34,7 @@ function sdkKey(npm: string): string | undefined {
     case "@ai-sdk/azure":
       return "azure"
     case "@ai-sdk/openai":
+    case "@ai-sdk/amazon-bedrock/mantle":
       return "openai"
     case "@ai-sdk/amazon-bedrock":
       return "bedrock"
@@ -553,6 +554,8 @@ const GPT5_VERSION_RE = /(?:^|\/)gpt-5[.-](\d+)(?:[.-]|$)/
 const GPT5_PRO_RE = /(?:^|\/)gpt-5[.-]?pro(?:[.-]|$)/
 const GPT5_VERSIONED_PRO_RE = /(?:^|\/)gpt-5[.-]\d+[.-]pro(?:[.-]|$)/
 const GPT61_SOL_RE = /^(?:openai\/)?gpt-6[.-]1-sol(?:-\d{4}-\d{2}-\d{2})?$/
+const GPT6_ASTRA_RE = /^(?:openai\/)?gpt-6-astra(?:-\d{4}-\d{2}-\d{2})?$/
+const BEDROCK_REASONING_RE = /^(?:(?:us|global)\.)?openai\.gpt-(?:6-astra|6\.1-sol)(?:-\d{4}-\d{2}-\d{2})?$/
 
 function gpt5Version(apiId: string) {
   return Number(GPT5_VERSION_RE.exec(apiId)?.[1]) || undefined
@@ -641,13 +644,13 @@ function openaiReasoningEfforts(apiId: string, releaseDate: string, direct = fal
   if (GPT5_FAMILY_RE.test(id)) efforts.unshift("minimal")
   if (releaseDate >= OPENAI_NONE_EFFORT_RELEASE_DATE) efforts.unshift("none")
   if (releaseDate >= OPENAI_XHIGH_EFFORT_RELEASE_DATE) efforts.push("xhigh")
-  if (GPT61_SOL_RE.test(id)) efforts.push("max")
+  if (GPT61_SOL_RE.test(id) || GPT6_ASTRA_RE.test(id)) efforts.push("max")
   return efforts
 }
 
 function openaiCompatibleReasoningEfforts(id: string) {
   const apiId = id.toLowerCase()
-  if (GPT61_SOL_RE.test(apiId)) return [...OPENAI_EFFORTS, "max"]
+  if (GPT61_SOL_RE.test(apiId) || GPT6_ASTRA_RE.test(apiId)) return [...OPENAI_EFFORTS, "max"]
   const chatEfforts = gpt5ChatReasoningEfforts(apiId)
   if (chatEfforts) return chatEfforts
   if (GPT5_PRO_RE.test(apiId)) return OPENAI_GPT5_PRO_EFFORTS
@@ -925,9 +928,13 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
           },
         ]),
       )
+    case "@ai-sdk/amazon-bedrock/mantle":
     case "@ai-sdk/openai": {
       // https://v5.ai-sdk.dev/providers/ai-sdk-providers/openai
-      const efforts = openaiReasoningEfforts(model.api.id, model.release_date, true)
+      const bedrockReasoning = BEDROCK_REASONING_RE.test(model.api.id.toLowerCase())
+      const efforts = bedrockReasoning
+        ? [...WIDELY_SUPPORTED_EFFORTS, "xhigh", "max"]
+        : openaiReasoningEfforts(model.api.id, model.release_date, true)
       return Object.fromEntries(
         efforts.map((effort) => [
           effort,
@@ -935,6 +942,7 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
             reasoningEffort: openaiWireReasoningEffort(effort),
             reasoningSummary: "auto",
             include: INCLUDE_ENCRYPTED_REASONING,
+            ...(bedrockReasoning ? { forceReasoning: true } : {}),
           },
         ]),
       )
@@ -1300,9 +1308,20 @@ export function options(input: {
   if (
     input.model.providerID === "openai" ||
     input.model.api.npm === "@ai-sdk/openai" ||
+    input.model.api.npm === "@ai-sdk/amazon-bedrock/mantle" ||
     input.model.api.npm === "@ai-sdk/github-copilot"
   ) {
     result["store"] = false
+  }
+
+  if (
+    ["@ai-sdk/openai", "@ai-sdk/amazon-bedrock/mantle"].includes(input.model.api.npm) &&
+    BEDROCK_REASONING_RE.test(input.model.api.id.toLowerCase())
+  ) {
+    // Bedrock's prefixed IDs are not recognized as reasoning models by the OpenAI SDK.
+    result["forceReasoning"] = true
+    result["reasoningSummary"] = "auto"
+    result["include"] = INCLUDE_ENCRYPTED_REASONING
   }
 
   if (input.model.api.npm === "@ai-sdk/azure") {
@@ -1452,6 +1471,7 @@ export function smallOptions(model: Provider.Model) {
   if (
     model.providerID === "openai" ||
     model.api.npm === "@ai-sdk/openai" ||
+    model.api.npm === "@ai-sdk/amazon-bedrock/mantle" ||
     model.api.npm === "@ai-sdk/github-copilot"
   ) {
     const base = { store: false }

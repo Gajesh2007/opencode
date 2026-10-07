@@ -2464,6 +2464,71 @@ describe("ProviderTransform.variants", () => {
     ...overrides,
   })
 
+  for (const providerID of ["openai", "codex", "openrouter"]) {
+    for (const suffix of ["", "-2026-09-01", "-mini", "-pro"]) {
+      test(`${providerID} gpt-6-astra${suffix} exposes max only for Astra`, () => {
+        const id = `${providerID === "openrouter" ? "openai/" : ""}gpt-6-astra${suffix}`
+        const result = ProviderTransform.variants(
+          createMockModel({
+            id,
+            providerID,
+            api: {
+              id,
+              url: "https://api.test.com",
+              npm: providerID === "openrouter" ? "@openrouter/ai-sdk-provider" : "@ai-sdk/openai",
+            },
+            release_date: "2026-09-01",
+          }),
+        )
+        if (suffix === "-mini" || suffix === "-pro") {
+          expect(result.max).toBeUndefined()
+          return
+        }
+        expect(result.max).toEqual(
+          providerID === "openrouter"
+            ? { reasoning: { effort: "max" } }
+            : { reasoningEffort: "max", reasoningSummary: "auto", include: ["reasoning.encrypted_content"] },
+        )
+        expect(Object.keys(result).at(-1)).toBe("max")
+      })
+    }
+  }
+
+  for (const npm of ["@ai-sdk/openai", "@ai-sdk/amazon-bedrock/mantle"]) {
+    for (const prefix of ["", "us.", "global."]) {
+      for (const suffix of ["", "-ultrafast"]) {
+        test(`${npm} ${prefix}Astra${suffix} exposes supported Bedrock reasoning variants`, () => {
+          const model = createMockModel({
+            id: `${prefix}openai.gpt-6-astra${suffix}`,
+            providerID: "amazon-bedrock",
+            api: { id: `${prefix}openai.gpt-6-astra`, npm, url: "https://bedrock.test/openai/v1" },
+            release_date: "2026-09-01",
+            options: suffix ? { serviceTier: "ultrafast" } : {},
+          })
+          const variants = ProviderTransform.variants(model)
+          expect(Object.keys(variants)).toEqual(["low", "medium", "high", "xhigh", "max"])
+          expect(variants.max).toEqual({
+            reasoningEffort: "max",
+            reasoningSummary: "auto",
+            include: ["reasoning.encrypted_content"],
+            forceReasoning: true,
+          })
+          const options = ProviderTransform.options({ model, sessionID: "test" })
+          expect(options).toEqual({
+            store: false,
+            forceReasoning: true,
+            reasoningSummary: "auto",
+            include: ["reasoning.encrypted_content"],
+          })
+          expect(ProviderTransform.providerOptions(model, { ...options, ...model.options, ...variants.max })).toEqual({
+            openai: { ...options, ...model.options, ...variants.max },
+          })
+          expect(ProviderTransform.smallOptions({ ...model, variants })).toEqual({ store: false, ...variants.low })
+        })
+      }
+    }
+  }
+
   test("identifies Ultra only for supported gpt-5.6 model paths", () => {
     for (const api of [
       { id: "gpt-5.6", npm: "@ai-sdk/openai" },

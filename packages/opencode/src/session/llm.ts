@@ -26,6 +26,7 @@ import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { LLMAISDK } from "./llm/ai-sdk"
 import { LLMNativeRuntime } from "./llm/native-runtime"
 import { LLMRequestPrep } from "./llm/request"
+import { BedrockRetry } from "./llm/bedrock-retry"
 
 const log = Log.create({ service: "llm" })
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
@@ -42,6 +43,7 @@ export type StreamInput = {
   small?: boolean
   tools: Record<string, Tool>
   retries?: number
+  bedrockRetry?: BedrockRetry.State
   toolChoice?: "auto" | "required" | "none"
   /**
    * Candidate response ID from the prior assistant. Only the opt-in native
@@ -280,6 +282,15 @@ const live: Layer.Layer<
       )
       // Default runtime path: AI SDK owns provider execution and tool dispatch;
       // LLMAISDK.toLLMEvents below normalizes fullStream parts for the processor.
+      const retry =
+        !Object.values(prepared.tools).some((tool) => tool.type === "provider") &&
+        BedrockRetry.enabled({
+          providerID: input.model.providerID,
+          npm: input.model.api.npm,
+          options: item.options,
+          url: input.model.api.url,
+        })
+      const retryState = input.bedrockRetry ?? BedrockRetry.state()
       return {
         type: "ai-sdk" as const,
         result: streamText({
@@ -319,7 +330,7 @@ const live: Layer.Layer<
           maxOutputTokens: prepared.params.maxOutputTokens,
           abortSignal: input.abort,
           headers: prepared.headers,
-          maxRetries: input.retries ?? 0,
+          maxRetries: retry ? 0 : (input.retries ?? 0),
           messages: prepared.messages,
           model: wrapLanguageModel({
             model: language ?? (yield* provider.getLanguage(input.model)),
@@ -337,6 +348,9 @@ const live: Layer.Layer<
                   }
                   return args.params
                 },
+                wrapStream: retry
+                  ? ({ model, params }) => BedrockRetry.stream({ model, params, state: retryState })
+                  : undefined,
               },
             ],
           }),

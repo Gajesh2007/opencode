@@ -261,7 +261,7 @@ export const RunCommand = effectCmd({
     const agentSvc = yield* Agent.Service
     const flags = yield* RuntimeFlags.Service
     const localInstance = yield* InstanceRef
-    yield* Effect.promise(async () => {
+    yield* Effect.promise(async (signal) => {
       const rawMessage = [...args.message, ...(args["--"] || [])].join(" ")
       const thinking = args.interactive ? (args.thinking ?? true) : (args.thinking ?? false)
       const die = (message: string): never => {
@@ -648,7 +648,11 @@ export const RunCommand = effectCmd({
         // to stdout/UI. `client` is passed explicitly because attach mode may
         // rebind the SDK to the session's directory after the subscription is
         // created, and replies issued from inside the loop must use that client.
-        async function loop(client: OpencodeClient, events: Awaited<ReturnType<typeof sdk.event.subscribe>>) {
+        async function loop(
+          client: OpencodeClient,
+          events: Awaited<ReturnType<typeof sdk.event.subscribe>>,
+          signal: AbortSignal,
+        ) {
           const toggles = new Map<string, boolean>()
           let error: string | undefined
           // Goal mode (GoalDriver) keeps a session resuming across turns, so a
@@ -766,20 +770,14 @@ export const RunCommand = effectCmd({
               if (permission.sessionID !== sessionID) continue
 
               if (args["dangerously-skip-permissions"]) {
-                await client.permission.reply({
-                  requestID: permission.id,
-                  reply: "once",
-                })
+                await client.permission.reply({ requestID: permission.id, reply: "once" }, { signal })
               } else {
                 UI.println(
                   UI.Style.TEXT_WARNING_BOLD + "!",
                   UI.Style.TEXT_NORMAL +
                     `permission requested: ${permission.permission} (${permission.patterns.join(", ")}); auto-rejecting`,
                 )
-                await client.permission.reply({
-                  requestID: permission.id,
-                  reply: "reject",
-                })
+                await client.permission.reply({ requestID: permission.id, reply: "reject" }, { signal })
               }
             }
           }
@@ -794,39 +792,51 @@ export const RunCommand = effectCmd({
         await share(client, sessionID)
 
         if (!args.interactive) {
-          const events = await client.event.subscribe()
-          loop(client, events).catch((e) => {
+          const controller = new AbortController()
+          const abort = AbortSignal.any([signal, controller.signal])
+          const events = await client.event.subscribe(undefined, { signal: abort })
+          const output = loop(client, events, abort).catch((e) => {
+            if (abort.aborted) return
             console.error(e)
-            process.exit(1)
+            process.exitCode = 1
+            controller.abort()
           })
 
-          if (args.command) {
-            const result = await client.session.command({
-              sessionID,
-              agent,
-              model: args.model,
-              command: args.command,
-              arguments: message,
-              variant: args.variant,
-            })
+          try {
+            const result = args.command
+              ? await client.session.command(
+                  {
+                    sessionID,
+                    agent,
+                    model: args.model,
+                    command: args.command,
+                    arguments: message,
+                    variant: args.variant,
+                  },
+                  { signal: abort },
+                )
+              : await client.session.prompt(
+                  {
+                    sessionID,
+                    agent,
+                    model: pick(args.model),
+                    variant: args.variant,
+                    parts: [...files, { type: "text", text: message }],
+                  },
+                  { signal: abort },
+                )
+            if (abort.aborted) return
             if (result.error) {
               if (!emit("error", { error: result.error })) UI.error(formatRunError(result.error))
               process.exitCode = 1
+              return
             }
-            return
-          }
 
-          const model = pick(args.model)
-          const result = await client.session.prompt({
-            sessionID,
-            agent,
-            model,
-            variant: args.variant,
-            parts: [...files, { type: "text", text: message }],
-          })
-          if (result.error) {
-            if (!emit("error", { error: result.error })) UI.error(formatRunError(result.error))
-            process.exitCode = 1
+            // The request can finish before its final events reach the output loop.
+            await output
+          } finally {
+            controller.abort()
+            await output
           }
           return
         }

@@ -9,6 +9,7 @@ import { Plugin } from "@/plugin"
 import { Snapshot } from "@/snapshot"
 import * as Session from "./session"
 import { LLM } from "./llm"
+import { BedrockRetry } from "./llm/bedrock-retry"
 import { MessageV2 } from "./message-v2"
 import { isOverflow } from "./overflow"
 import { PartID } from "./schema"
@@ -920,6 +921,7 @@ export const layer = Layer.effect(
         slog.info("process")
         ctx.needsCompaction = false
         ctx.shouldBreak = (yield* config.get()).experimental?.continue_loop_on_deny !== true
+        const retry = streamInput.bedrockRetry ?? BedrockRetry.state()
 
         return yield* Effect.gen(function* () {
           yield* Effect.gen(function* () {
@@ -929,7 +931,7 @@ export const layer = Layer.effect(
             ctx.preempted = false
             publishedDeltas.clear()
             yield* status.set(ctx.sessionID, { type: "busy" })
-            const stream = llm.stream(streamInput)
+            const stream = llm.stream({ ...streamInput, bedrockRetry: retry })
 
             yield* Effect.gen(function* () {
               const lock = yield* Semaphore.make(1)
@@ -951,6 +953,12 @@ export const layer = Layer.effect(
               Effect.ensuring(flushAllDeltas()),
             )
 
+            // The SDK can turn an abort into EOF. Preserve the raw guard's terminal
+            // outcome, but not cancellation caused by our own early stop boundary.
+            if (retry.active && retry.error && !ctx.needsCompaction && !ctx.preempted) {
+              return yield* Effect.fail(retry.error)
+            }
+
             // A provider/gateway sometimes ends a turn "successfully" (finish
             // reason, no error) without producing ANY output — no text, reasoning,
             // or tool call — e.g. an early stream close or a hiccup where inference
@@ -959,6 +967,7 @@ export const layer = Layer.effect(
             // request (bounded, with backoff) by failing with a retryable sentinel.
             // Aborts and compaction are legitimate stops, not hollow completions.
             if (
+              !retry.active &&
               !aborted &&
               !ctx.needsCompaction &&
               !ctx.streamedAny &&
@@ -981,6 +990,9 @@ export const layer = Layer.effect(
               (cause) => !Cause.hasInterruptsOnly(cause),
               (cause) => Effect.fail(Cause.squash(cause)),
             ),
+            // Guarded Bedrock requests own a single bounded wire-attempt budget.
+            // Never restart it through the unbounded legacy retry policy.
+            Effect.catch((error) => (retry.active ? halt(retry.error ?? error) : Effect.fail(error))),
             Effect.retry(
               SessionRetry.policy({
                 provider: input.model.providerID,

@@ -20,6 +20,18 @@ export const Parameters = Schema.Struct({
   agent_type: Schema.optional(Schema.String).annotate({
     description: "Optional agent type. By default the child uses the current agent identity.",
   }),
+  model: Schema.optional(Schema.String).annotate({
+    description:
+      "Model for this child only, in provider/model format. Omit to use the selected agent's model or the parent model.",
+  }),
+  variant: Schema.optional(Schema.String).annotate({
+    description:
+      "Model-specific reasoning effort/variant for this child. Use a variant supported by the selected model, or 'default' to clear named effort.",
+  }),
+  reset_model: Schema.optional(Schema.Boolean).annotate({
+    description:
+      "When true, use the current agent/parent model defaults for this child. Cannot be combined with model or variant.",
+  }),
 })
 
 type Metadata = {
@@ -30,6 +42,8 @@ type Metadata = {
   parentSessionId: string
   background: true
   status: Collaboration.Status
+  model: SubagentRun.Result["model"]
+  variant: string
 }
 
 export const SpawnAgentTool = Tool.define(
@@ -48,6 +62,9 @@ export const SpawnAgentTool = Tool.define(
             message: params.message,
             forkTurns: params.fork_turns,
             agentType: params.agent_type,
+            model: params.model,
+            variant: params.variant,
+            resetModel: params.reset_model,
           })
           const member = yield* collaboration.member(result.sessionID)
           return {
@@ -60,8 +77,10 @@ export const SpawnAgentTool = Tool.define(
               parentSessionId: ctx.sessionID,
               background: true as const,
               status: member?.status ?? "pending",
+              model: result.model,
+              variant: result.variant,
             },
-            output: `task_path: ${result.path}\nsession_id: ${result.sessionID}\nstatus: ${member?.status ?? "pending"}\n\nUse task_status with task_id=${result.sessionID} to check status and read the final output. Open the child session to view its live chat.`,
+            output: `task_path: ${result.path}\nsession_id: ${result.sessionID}\nstatus: ${member?.status ?? "pending"}\nmodel: ${result.model.providerID}/${result.model.modelID}\nvariant: ${result.variant}\n\nUse task_status with task_id=${result.sessionID} to check status and read the final output. Open the child session to view its live chat.`,
           }
         }).pipe(Effect.orDie),
     } satisfies Tool.DefWithoutID<typeof Parameters, Metadata>

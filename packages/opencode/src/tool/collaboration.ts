@@ -12,6 +12,18 @@ const FollowupParameters = Schema.Struct({
   message: Schema.String.check(Schema.isMaxLength(MAX_MAILBOX_PAYLOAD_CHARS)).annotate({
     description: `The next task or steering instruction for the child agent (maximum ${MAX_MAILBOX_PAYLOAD_CHARS.toLocaleString()} characters).`,
   }),
+  model: Schema.optional(Schema.String).annotate({
+    description:
+      "Model for this child only, in provider/model format. Only its direct parent may change the selection. Omit to keep the child's latest model.",
+  }),
+  variant: Schema.optional(Schema.String).annotate({
+    description:
+      "Model-specific reasoning effort/variant for this child. Use a supported variant, or 'default' to clear named effort. Omit to preserve it when the model is unchanged; a model change uses the destination agent default or 'default'.",
+  }),
+  reset_model: Schema.optional(Schema.Boolean).annotate({
+    description:
+      "When true, reselect the current agent/parent model defaults instead of preserving the child's selection. Cannot be combined with model or variant.",
+  }),
 })
 
 const WaitParameters = Schema.Struct({
@@ -41,6 +53,8 @@ type Metadata = {
   status?: string
   root_session_id?: string
   count?: number
+  model?: SubagentRun.Result["model"]
+  variant?: string
 }
 
 export const FollowupTaskTool = Tool.define(
@@ -50,11 +64,18 @@ export const FollowupTaskTool = Tool.define(
     const collaboration = yield* Collaboration.Service
     return {
       description:
-        "Start a new turn for an idle child agent. The child receives the message as new work and reports its final answer to its direct parent.",
+        "Start a new turn for an idle child agent. The child receives the message as new work and reports its final answer to its direct parent. Omitted model/variant preserves its latest selection; only the direct parent can change it. Active children are rejected without changing their selection. Success reports the effective model and variant.",
       parameters: FollowupParameters,
       execute: (params, ctx) =>
         Effect.gen(function* () {
-          const result = yield* run.followup({ context: ctx, target: params.target, message: params.message })
+          const result = yield* run.followup({
+            context: ctx,
+            target: params.target,
+            message: params.message,
+            model: params.model,
+            variant: params.variant,
+            resetModel: params.reset_model,
+          })
           const member = yield* collaboration.member(result.sessionID)
           return {
             title: `follow up ${result.path}`,
@@ -66,8 +87,10 @@ export const FollowupTaskTool = Tool.define(
               parentSessionId: ctx.sessionID,
               background: true,
               status: member?.status ?? "pending",
+              model: result.model,
+              variant: result.variant,
             },
-            output: `task_path: ${result.path}\nsession_id: ${result.sessionID}\nstatus: ${member?.status ?? "pending"}`,
+            output: `task_path: ${result.path}\nsession_id: ${result.sessionID}\nstatus: ${member?.status ?? "pending"}\nmodel: ${result.model.providerID}/${result.model.modelID}\nvariant: ${result.variant}`,
           }
         }).pipe(Effect.orDie),
     } satisfies Tool.DefWithoutID<typeof FollowupParameters, Metadata>
