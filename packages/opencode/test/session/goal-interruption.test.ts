@@ -1,5 +1,6 @@
 import { expect } from "bun:test"
 import { Context, Deferred, Effect, Fiber, Latch, Layer } from "effect"
+import * as TestClock from "effect/testing/TestClock"
 import { BackgroundJob } from "@/background/job"
 import { Bus } from "@/bus"
 import { Goal } from "@/session/goal"
@@ -12,7 +13,7 @@ import { MessageID, PartID, SessionID } from "@/session/schema"
 import { Steering } from "@/session/steering"
 import { SessionStatus } from "@/session/status"
 import { ModelID, ProviderID } from "@/provider/schema"
-import { TestInstance } from "../fixture/fixture"
+import { TestInstance, withTmpdirInstance } from "../fixture/fixture"
 import { awaitWithTimeout, testEffect } from "../lib/effect"
 
 class Harness extends Context.Service<
@@ -86,6 +87,7 @@ const deps = Layer.mergeAll(
   Goal.defaultLayer,
   Session.defaultLayer,
   SessionRunState.defaultLayer,
+  SessionStatus.defaultLayer,
   BackgroundJob.defaultLayer,
   steering.pipe(Layer.provide(harness)),
   prompt,
@@ -381,6 +383,40 @@ const delayedSessions = Layer.effect(
 const boundaries = testEffect(
   GoalDriver.layer.pipe(Layer.provideMerge(Layer.mergeAll(deps, delayedSessions, boundary))),
 )
+
+for (const point of ["message", "part"] as const) {
+  boundaries.effect(`goal replacement during rate-limit ${point} injection retracts the old continuation`, () =>
+    Effect.gen(function* () {
+      const driver = yield* GoalDriver.Service
+      const goals = yield* Goal.Service
+      const sessions = yield* Session.Service
+      const status = yield* SessionStatus.Service
+      const test = yield* Harness
+      const gate = yield* Boundary
+      const id = yield* setup()
+      const current = MessageV2.latest(yield* MessageV2.filterCompactedEffect(id)).assistant!
+      yield* sessions.updateMessage({
+        ...current,
+        finish: undefined,
+        error: new MessageV2.APIError({ message: "Rate limit", statusCode: 429, isRetryable: true }).toObject(),
+      })
+      gate.point = point
+      const pending = yield* driver.onIdle(id).pipe(Effect.forkChild)
+      while ((yield* status.get(id)).type !== "retry" && pending.pollUnsafe() === undefined)
+        yield* Effect.promise(() => Bun.sleep(5))
+      expect((yield* status.get(id)).type).toBe("retry")
+      yield* TestClock.adjust("1 minute")
+      yield* Deferred.await(gate.entered)
+      yield* goals.create({ sessionID: id, objective: "Replacement goal" })
+      yield* Deferred.succeed(gate.release, undefined)
+      yield* Fiber.join(pending)
+      expect(test.loops).toEqual([])
+      expect(
+        (yield* MessageV2.filterCompactedEffect(id)).filter((message) => message.info.role === "user"),
+      ).toHaveLength(1)
+    }).pipe(withTmpdirInstance()),
+  )
+}
 
 for (const budget of [undefined, 1]) {
   boundaries.instance(`stop at injection boundary suppresses ${budget ? "budget" : "continuation"} text`, () =>
