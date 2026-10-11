@@ -20,6 +20,7 @@ import { Workspace } from "../../src/control-plane/workspace"
 import { InstanceRef, WorkspaceRef } from "../../src/effect/instance-ref"
 import { InstanceLayer } from "../../src/project/instance-layer"
 import { Project } from "../../src/project/project"
+import { GoalDriver } from "../../src/session/goal-driver"
 import { instanceRouterMiddleware } from "../../src/server/routes/instance/httpapi/middleware/instance-context"
 import { workspaceRouterMiddleware } from "../../src/server/routes/instance/httpapi/middleware/workspace-routing"
 import { resetDatabase } from "../fixture/db"
@@ -48,6 +49,7 @@ const it = testEffect(
     NodeServices.layer,
     InstanceLayer.layer,
     Project.defaultLayer,
+    GoalDriver.defaultLayer,
     workspaceLayer,
   ),
 )

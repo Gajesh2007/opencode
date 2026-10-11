@@ -1,6 +1,7 @@
 import { Effect, Layer, Context, Stream } from "effect"
 import { Bus } from "@/bus"
 import { InstanceState } from "@/effect/instance-state"
+import { WorkspaceRef } from "@/effect/instance-ref"
 import { Goal } from "./goal"
 import { Steering } from "./steering"
 import * as Session from "./session"
@@ -263,8 +264,15 @@ export const layer = Layer.effect(
       Effect.fn("GoalDriver.initState")(function* () {
         yield* InstanceState.get(throttles)
         yield* (yield* bus.subscribe(SessionStatus.Event.Idle)).pipe(
+          // One directory subscription can serve sessions from different workspaces.
           Stream.runForEach((evt) =>
-            onIdle(evt.properties.sessionID).pipe(
+            sessions.get(evt.properties.sessionID).pipe(
+              Effect.orElseSucceed(() => undefined),
+              Effect.flatMap((session) =>
+                session
+                  ? onIdle(session.id).pipe(Effect.provideService(WorkspaceRef, session.workspaceID))
+                  : Effect.void,
+              ),
               Effect.catchCause((cause) =>
                 Effect.sync(() =>
                   log.error("onIdle failed", { sessionID: evt.properties.sessionID, cause: String(cause) }),

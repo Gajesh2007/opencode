@@ -44,6 +44,7 @@ import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
 import { Goal } from "@/session/goal"
+import { GoalDriver } from "@/session/goal-driver"
 import { Steering } from "@/session/steering"
 import { SessionShare } from "@/share/session"
 import { ShareNext } from "@/share/share-next"
@@ -230,6 +231,7 @@ export function createRoutes(
       Skill.defaultLayer,
       Todo.defaultLayer,
       Goal.defaultLayer,
+      GoalDriver.defaultLayer,
       Steering.defaultLayer,
       ToolRegistry.defaultLayer,
       Vcs.defaultLayer,

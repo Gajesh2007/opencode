@@ -235,6 +235,28 @@ it.effect("goal rate limits wait for a cooldown and resume without another user 
   ),
 )
 
+it.effect("idle events drive rate-limit cooldown after initialization", () =>
+  provideTmpdirServer(
+    ({ dir }) =>
+      Effect.gen(function* () {
+        loopCalls = []
+        const { driver, chat } = yield* setup(dir)
+        yield* throttle(chat.id)
+        const status = yield* SessionStatus.Service
+        yield* driver.init()
+        yield* status.set(chat.id, { type: "idle" })
+        for (let attempt = 0; attempt < 100 && (yield* status.get(chat.id)).type !== "retry"; attempt++)
+          yield* Effect.promise(() => Bun.sleep(5))
+        expect((yield* status.get(chat.id)).type).toBe("retry")
+        yield* TestClock.adjust("1 minute")
+        for (let attempt = 0; attempt < 100 && loopCalls.length === 0; attempt++)
+          yield* Effect.promise(() => Bun.sleep(5))
+        expect(loopCalls).toEqual([chat.id])
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
 for (const reason of ["cancel", "new input", "goal completed", "goal replaced", "budget exhausted"] as const) {
   it.effect(`rate-limit cooldown does not resume after ${reason}`, () =>
     provideTmpdirServer(
