@@ -370,6 +370,12 @@ export function Prompt(props: PromptProps) {
     interrupt: 0,
   })
 
+  const hasInput = createMemo(() => store.prompt.input !== "")
+  const cursorAtStart = createMemo(() => {
+    cursorVersion()
+    return inputTarget()?.visualCursor.offset === 0
+  })
+
   createEffect(
     on(
       () => props.sessionID,
@@ -801,7 +807,7 @@ export function Prompt(props: PromptProps) {
         title: "Stash prompt",
         name: "prompt.stash",
         category: "Prompt",
-        enabled: !!store.prompt.input,
+        enabled: hasInput(),
         run: () => {
           if (!store.prompt.input) return
           stash.push({
@@ -870,7 +876,7 @@ export function Prompt(props: PromptProps) {
   useBindings(() => {
     return {
       target: inputTarget,
-      enabled: inputTarget() !== undefined && !props.disabled && store.prompt.input !== "",
+      enabled: inputTarget() !== undefined && !props.disabled && hasInput(),
       bindings: tuiConfig.keybinds.get("prompt.clear"),
     }
   })
@@ -878,16 +884,12 @@ export function Prompt(props: PromptProps) {
   useBindings(() => {
     return {
       target: inputTarget,
-      enabled: (() => {
-        cursorVersion()
-        return (
-          inputTarget() !== undefined &&
-          !props.disabled &&
-          store.mode === "normal" &&
-          !auto()?.visible &&
-          input?.visualCursor.offset === 0
-        )
-      })(),
+      enabled:
+        inputTarget() !== undefined &&
+        !props.disabled &&
+        store.mode === "normal" &&
+        !auto()?.visible &&
+        cursorAtStart(),
       bindings: [
         {
           key: "!",
@@ -913,10 +915,7 @@ export function Prompt(props: PromptProps) {
   useBindings(() => {
     return {
       target: inputTarget,
-      enabled: (() => {
-        cursorVersion()
-        return inputTarget() !== undefined && store.mode === "shell" && input?.visualCursor.offset === 0
-      })(),
+      enabled: inputTarget() !== undefined && store.mode === "shell" && cursorAtStart(),
       bindings: [{ key: "backspace", desc: "Exit shell mode", group: "Prompt", cmd: () => setStore("mode", "normal") }],
     }
   })
@@ -924,10 +923,7 @@ export function Prompt(props: PromptProps) {
   useBindings(() => {
     return {
       target: inputTarget,
-      enabled: (() => {
-        cursorVersion()
-        return inputTarget() !== undefined && !props.disabled && !auto()?.visible && input !== undefined
-      })(),
+      enabled: inputTarget() !== undefined && !props.disabled && !auto()?.visible && input !== undefined,
       commands: [
         {
           name: "prompt.history.previous",
@@ -956,10 +952,7 @@ export function Prompt(props: PromptProps) {
   useBindings(() => {
     return {
       target: inputTarget,
-      enabled: (() => {
-        cursorVersion()
-        return inputTarget() !== undefined && !props.disabled && !auto()?.visible && input !== undefined
-      })(),
+      enabled: inputTarget() !== undefined && !props.disabled && !auto()?.visible && input !== undefined,
       commands: [
         {
           name: "prompt.history.next",
