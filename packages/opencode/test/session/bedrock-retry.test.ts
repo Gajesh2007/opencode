@@ -182,6 +182,69 @@ const progress: Part[] = [
 ]
 
 describe("Bedrock raw pre-output retry deadlines", () => {
+  test("structured temporary provider errors retry before semantic output", async () => {
+    const h = harness(async (_params, attempt) => {
+      if (attempt === 1) throw { type: "error", error: { code: "server_error", message: "Temporarily unavailable" } }
+      const raw = source()
+      raw.push({ type: "text-start", id: "answer" })
+      raw.push({ type: "text-delta", id: "answer", delta: "OK" })
+      raw.push(finish)
+      raw.close()
+      return { stream: raw.stream }
+    })
+    const done = outcome(h.start().then(collect))
+    await flush()
+    await h.time.advance(2099)
+    expect(h.calls).toHaveLength(1)
+    await h.time.advance(1)
+    expect((await done).value).toContainEqual({ type: "text-delta", id: "answer", delta: "OK" })
+    expect(h.calls).toHaveLength(2)
+    expect(h.state.error).toBeUndefined()
+  })
+
+  test.each(["insufficient_quota", "invalid_prompt", "context_length_exceeded"])(
+    "structured %s errors are not retried",
+    async (code) => {
+      const h = harness(async () => {
+        throw { type: "error", error: { code, message: "Request needs correction" } }
+      })
+      const done = outcome(h.start().then(collect))
+      await flush()
+      expect((await done).error).toBeDefined()
+      await h.time.advance(100_000)
+      expect(h.calls).toHaveLength(1)
+    },
+  )
+
+  test("structured provider failures retain the three-attempt budget", async () => {
+    const error = { type: "error", error: { code: "server_error", message: "Temporarily unavailable" } }
+    const h = harness(async () => {
+      throw error
+    })
+    const done = outcome(h.start().then(collect))
+    await flush()
+    await h.time.advance(6200)
+    expect((await done).error).toMatchObject({ reason: "provider", cause: error })
+    expect(h.calls).toHaveLength(3)
+    await h.time.advance(100_000)
+    expect(h.calls).toHaveLength(3)
+  })
+
+  test.each(["circular", "bigint"])("unserializable %s errors keep their original cause", async (kind) => {
+    const metadata: { self?: unknown } = {}
+    metadata.self = metadata
+    const error = Object.assign(new Error("Original provider failure"), {
+      metadata: kind === "circular" ? metadata : 1n,
+    })
+    const h = harness(async () => {
+      throw error
+    })
+    const done = outcome(h.start().then(collect))
+    expect((await done).error).toBe(error)
+    expect(h.state.error).toBe(error)
+    expect(h.calls).toHaveLength(1)
+  })
+
   test.each(["before headers", "metadata only", "metadata with fetch-like abort"])(
     "10/20/40 second windows %s, with separate backoff",
     async (phase) => {
@@ -410,6 +473,20 @@ describe("Bedrock local teardown acknowledgement", () => {
 })
 
 describe("Bedrock raw semantic commitment", () => {
+  test("structured provider errors after a tool call never replay the request", async () => {
+    const raw = source()
+    const h = harness(async () => ({ stream: raw.stream }))
+    const done = outcome(h.start().then(collect))
+    raw.push(call)
+    await flush()
+    raw.push({ type: "error", error: { type: "error", error: { code: "server_error", message: "Unavailable" } } })
+    raw.close()
+    expect((await done).error).toBeDefined()
+    await h.time.advance(100_000)
+    expect(h.state.committed).toBe(true)
+    expect(h.calls).toHaveLength(1)
+  })
+
   test.each(progress.map((part, index) => [`${part.type} (${index})`, part] as const))(
     "%s fences retries and completion deadlines",
     async (_name, part) => {

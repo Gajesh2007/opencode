@@ -39,15 +39,9 @@ export interface Interface {
     costBudget?: number
   }) => Effect.Effect<Info>
   readonly get: (sessionID: SessionID) => Effect.Effect<Info | undefined>
-  readonly update: (input: {
-    sessionID: SessionID
-    status: "completed" | "blocked"
-  }) => Effect.Effect<Info | undefined>
-  readonly addUsage: (input: {
-    sessionID: SessionID
-    tokens: number
-    cost: number
-  }) => Effect.Effect<Info | undefined>
+  readonly generation: (sessionID: SessionID) => Effect.Effect<number | undefined>
+  readonly update: (input: { sessionID: SessionID; status: "completed" | "blocked" }) => Effect.Effect<Info | undefined>
+  readonly addUsage: (input: { sessionID: SessionID; tokens: number; cost: number }) => Effect.Effect<Info | undefined>
   readonly setBudgetLimited: (sessionID: SessionID) => Effect.Effect<Info | undefined>
   readonly incrementBlockedTurns: (sessionID: SessionID) => Effect.Effect<number>
   readonly resetBlockedTurns: (sessionID: SessionID) => Effect.Effect<void>
@@ -77,9 +71,14 @@ export const layer = Layer.effect(
     const publish = (goal: Info) => bus.publish(Event.Updated, { sessionID: goal.sessionID, goal })
 
     const create: Interface["create"] = Effect.fn("Goal.create")(function* (input) {
-      const now = Date.now()
-      yield* Effect.sync(() =>
+      const now = yield* Effect.sync(() =>
         Database.transaction((db) => {
+          const previous = db
+            .select({ createdAt: GoalTable.time_created })
+            .from(GoalTable)
+            .where(eq(GoalTable.session_id, input.sessionID))
+            .get()
+          const now = Math.max(Date.now(), (previous?.createdAt ?? 0) + 1)
           db.delete(GoalTable).where(eq(GoalTable.session_id, input.sessionID)).run()
           db.insert(GoalTable)
             .values({
@@ -95,6 +94,7 @@ export const layer = Layer.effect(
               time_updated: now,
             })
             .run()
+          return now
         }),
       )
       const goal: Info = {
@@ -117,6 +117,19 @@ export const layer = Layer.effect(
       )
       if (!row) return undefined
       return rowToInfo(row)
+    })
+
+    const generation: Interface["generation"] = Effect.fn("Goal.generation")(function* (sessionID) {
+      return yield* Effect.sync(() =>
+        Database.use(
+          (db) =>
+            db
+              .select({ value: GoalTable.time_created })
+              .from(GoalTable)
+              .where(eq(GoalTable.session_id, sessionID))
+              .get()?.value,
+        ),
+      )
     })
 
     const update: Interface["update"] = Effect.fn("Goal.update")(function* (input) {
@@ -153,23 +166,21 @@ export const layer = Layer.effect(
       return yield* get(input.sessionID)
     })
 
-    const setBudgetLimited: Interface["setBudgetLimited"] = Effect.fn("Goal.setBudgetLimited")(
-      function* (sessionID) {
-        const now = Date.now()
-        yield* Effect.sync(() =>
-          Database.use((db) =>
-            db
-              .update(GoalTable)
-              .set({ status: "budget_limited", time_updated: now })
-              .where(eq(GoalTable.session_id, sessionID))
-              .run(),
-          ),
-        )
-        const goal = yield* get(sessionID)
-        if (goal) yield* publish(goal)
-        return goal
-      },
-    )
+    const setBudgetLimited: Interface["setBudgetLimited"] = Effect.fn("Goal.setBudgetLimited")(function* (sessionID) {
+      const now = Date.now()
+      yield* Effect.sync(() =>
+        Database.use((db) =>
+          db
+            .update(GoalTable)
+            .set({ status: "budget_limited", time_updated: now })
+            .where(eq(GoalTable.session_id, sessionID))
+            .run(),
+        ),
+      )
+      const goal = yield* get(sessionID)
+      if (goal) yield* publish(goal)
+      return goal
+    })
 
     const incrementBlockedTurns: Interface["incrementBlockedTurns"] = Effect.fn("Goal.incrementBlockedTurns")(
       function* (sessionID) {
@@ -211,7 +222,17 @@ export const layer = Layer.effect(
       )
     })
 
-    return Service.of({ create, get, update, addUsage, setBudgetLimited, incrementBlockedTurns, resetBlockedTurns, clear })
+    return Service.of({
+      create,
+      get,
+      generation,
+      update,
+      addUsage,
+      setBudgetLimited,
+      incrementBlockedTurns,
+      resetBlockedTurns,
+      clear,
+    })
   }),
 )
 

@@ -1,6 +1,7 @@
 import { Effect, Layer, Context, Stream } from "effect"
 import { Bus } from "@/bus"
 import { InstanceState } from "@/effect/instance-state"
+import { WorkspaceRef } from "@/effect/instance-ref"
 import { Goal } from "./goal"
 import { Steering } from "./steering"
 import * as Session from "./session"
@@ -8,6 +9,7 @@ import { SessionPrompt } from "./prompt"
 import { SessionStatus } from "./status"
 import { SessionRunState } from "./run-state"
 import { MessageV2 } from "./message-v2"
+import { SessionRetry } from "./retry"
 import { MessageID, PartID, type SessionID } from "./schema"
 import GOAL_CONTINUATION from "./prompt/goal-continuation.txt"
 import GOAL_BUDGET_LIMIT from "./prompt/goal-budget-limit.txt"
@@ -49,7 +51,11 @@ export const layer = Layer.effect(
     const sessions = yield* Session.Service
     const prompt = yield* SessionPrompt.Service
     const runs = yield* SessionRunState.Service
+    const status = yield* SessionStatus.Service
     const turns = yield* InstanceState.make(() => Effect.succeed(new Map<SessionID, MessageID>()))
+    const throttles = yield* InstanceState.make(() =>
+      Effect.succeed(new Map<SessionID, { generation: number; attempts: number }>()),
+    )
 
     // Append a synthetic user message carrying the continuation/budget prompt,
     // reusing the session's last-user agent/model so the next turn runs identically.
@@ -58,8 +64,9 @@ export const layer = Layer.effect(
       lastUser: MessageV2.User,
       text: string,
       signal: AbortSignal,
+      isCurrent: Effect.Effect<boolean> = Effect.succeed(true),
     ) {
-      if (signal.aborted) return
+      if (signal.aborted || !(yield* isCurrent)) return
       const msg = yield* sessions.updateMessage({
         id: MessageID.ascending(),
         role: "user",
@@ -68,7 +75,7 @@ export const layer = Layer.effect(
         model: lastUser.model,
         time: { created: Date.now() },
       })
-      if (signal.aborted) {
+      if (signal.aborted || !(yield* isCurrent)) {
         yield* sessions.removeMessage({ sessionID, messageID: msg.id })
         return
       }
@@ -80,14 +87,19 @@ export const layer = Layer.effect(
         text,
         synthetic: true,
       })
-      if (signal.aborted) yield* sessions.removeMessage({ sessionID, messageID: msg.id })
+      if (signal.aborted || !(yield* isCurrent)) yield* sessions.removeMessage({ sessionID, messageID: msg.id })
     })
 
     const onIdle = Effect.fn("GoalDriver.onIdle")(function* (sessionID: SessionID) {
       const signal = yield* runs.continuation(sessionID)
       if (signal.aborted) return
+      const attempts = yield* InstanceState.get(throttles)
+      const generation = yield* goals.generation(sessionID)
       const goal = yield* goals.get(sessionID)
-      if (!goal || goal.status !== "active") return
+      if (generation === undefined || !goal || goal.status !== "active") return
+      const previous = attempts.get(sessionID)
+      const retry = previous?.generation === generation ? previous : { generation, attempts: 0 }
+      attempts.set(sessionID, retry)
 
       // Only drive top-level sessions; a subagent/child session self-stops.
       const session = yield* sessions.get(sessionID).pipe(Effect.orElseSucceed(() => undefined))
@@ -96,12 +108,85 @@ export const layer = Layer.effect(
       const msgs = yield* MessageV2.filterCompactedEffect(sessionID)
       const { user: lastUser, assistant: lastAssistant } = MessageV2.latest(msgs)
       if (!lastUser) return
-      // Only continue after a clean assistant turn responded to the latest user
-      // message. Skips aborts/errors and idle transitions with no fresh turn
-      // (e.g. a manual cancel), mirroring the old inline `!error` guard.
-      if (!lastAssistant || lastAssistant.error || lastAssistant.id < lastUser.id) return
+      if (!lastAssistant || lastAssistant.id < lastUser.id) return
       const seen = yield* InstanceState.get(turns)
-      if (signal.aborted || seen.get(sessionID) === lastAssistant.id) return
+      if (signal.aborted || attempts.get(sessionID) !== retry || seen.get(sessionID) === lastAssistant.id) return
+
+      if (lastAssistant.error) {
+        const error = lastAssistant.error
+        // A rejected request can cool down safely only if no model output or
+        // tool action escaped. Never replay a partial turn or a manual stop.
+        if (
+          !MessageV2.APIError.isInstance(error) ||
+          error.data.statusCode !== 429 ||
+          !error.data.isRetryable ||
+          lastAssistant.time.completed === undefined ||
+          msgs
+            .find((msg) => msg.info.id === lastAssistant.id)
+            ?.parts.some((part) => part.type !== "step-start" && part.type !== "step-finish")
+        )
+          return
+        seen.set(sessionID, lastAssistant.id)
+        const attempt = ++retry.attempts
+        if (attempt > 3) {
+          yield* goals.update({ sessionID, status: "blocked" })
+          return
+        }
+        if (
+          (goal.tokenBudget !== undefined && goal.tokensUsed >= goal.tokenBudget) ||
+          (goal.costBudget !== undefined && goal.costUsed >= goal.costBudget)
+        ) {
+          yield* goals.setBudgetLimited(sessionID)
+          return
+        }
+        const delay = Math.max(60_000 * 2 ** (attempt - 1), SessionRetry.delay(attempt, error))
+        const next = Date.now() + delay
+        yield* status.set(sessionID, {
+          type: "retry",
+          attempt,
+          message: "Provider rate limit reached; cooling down before continuing the goal",
+          next,
+        })
+        yield* Effect.raceFirst(
+          Effect.sleep(delay),
+          Effect.callback<void>((resume) => {
+            if (signal.aborted) return resume(Effect.void)
+            const abort = () => resume(Effect.void)
+            signal.addEventListener("abort", abort, { once: true })
+            return Effect.sync(() => signal.removeEventListener("abort", abort))
+          }),
+        )
+        if (signal.aborted || attempts.get(sessionID) !== retry) return
+        const current = MessageV2.latest(yield* MessageV2.filterCompactedEffect(sessionID))
+        if (current.assistant?.id !== lastAssistant.id || current.user?.id !== lastUser.id) return
+        const currentStatus = yield* status.get(sessionID)
+        if (currentStatus.type !== "retry" || currentStatus.attempt !== attempt || currentStatus.next !== next) return
+        if ((yield* goals.generation(sessionID)) !== generation) return
+        const currentGoal = yield* goals.get(sessionID)
+        if (!currentGoal || currentGoal.status !== "active") {
+          yield* status.set(sessionID, { type: "idle" })
+          return
+        }
+        if (
+          (currentGoal.tokenBudget !== undefined && currentGoal.tokensUsed >= currentGoal.tokenBudget) ||
+          (currentGoal.costBudget !== undefined && currentGoal.costUsed >= currentGoal.costBudget)
+        ) {
+          yield* goals.setBudgetLimited(sessionID)
+          yield* status.set(sessionID, { type: "idle" })
+          return
+        }
+        const isCurrent = Effect.gen(function* () {
+          if ((yield* goals.generation(sessionID)) !== generation) return false
+          const current = yield* goals.get(sessionID)
+          return current?.status === "active" && attempts.get(sessionID) === retry
+        })
+        yield* inject(sessionID, lastUser, renderGoalPrompt(GOAL_CONTINUATION, currentGoal), signal, isCurrent)
+        if (!signal.aborted && (yield* isCurrent))
+          yield* prompt.loop(new SessionPrompt.LoopInput({ sessionID }), signal)
+        return
+      }
+
+      retry.attempts = 0
       seen.set(sessionID, lastAssistant.id)
 
       // Account the finished turn's tokens and cost.
@@ -177,9 +262,17 @@ export const layer = Layer.effect(
     // swallowed so a single bad turn can't tear down the subscription.
     const initState = yield* InstanceState.make(
       Effect.fn("GoalDriver.initState")(function* () {
+        yield* InstanceState.get(throttles)
         yield* (yield* bus.subscribe(SessionStatus.Event.Idle)).pipe(
+          // One directory subscription can serve sessions from different workspaces.
           Stream.runForEach((evt) =>
-            onIdle(evt.properties.sessionID).pipe(
+            sessions.get(evt.properties.sessionID).pipe(
+              Effect.orElseSucceed(() => undefined),
+              Effect.flatMap((session) =>
+                session
+                  ? onIdle(session.id).pipe(Effect.provideService(WorkspaceRef, session.workspaceID))
+                  : Effect.void,
+              ),
               Effect.catchCause((cause) =>
                 Effect.sync(() =>
                   log.error("onIdle failed", { sessionID: evt.properties.sessionID, cause: String(cause) }),
@@ -227,6 +320,7 @@ export const defaultLayer = layer.pipe(
   Layer.provide(Session.defaultLayer),
   Layer.provide(SessionPrompt.defaultLayer),
   Layer.provide(SessionRunState.defaultLayer),
+  Layer.provide(SessionStatus.defaultLayer),
 )
 
 export * as GoalDriver from "./goal-driver"

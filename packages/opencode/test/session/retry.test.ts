@@ -5,6 +5,7 @@ import { setTimeout as sleep } from "node:timers/promises"
 import { Effect, Layer, Schedule, Schema } from "effect"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { SessionRetry } from "../../src/session/retry"
+import { BedrockRetry } from "../../src/session/llm/bedrock-retry"
 import { MessageV2 } from "../../src/session/message-v2"
 import { ProviderID } from "../../src/provider/schema"
 import { SessionID } from "../../src/session/schema"
@@ -380,6 +381,27 @@ describe("session.retry.retryable", () => {
 })
 
 describe("session.message-v2.fromError", () => {
+  test("preserves structured Bedrock provider error classification", () => {
+    const cause = { type: "error", error: { code: "server_error", message: "Temporarily unavailable" } }
+    const result = MessageV2.fromError(new BedrockRetry.BedrockRetryError("provider", { cause }), { providerID })
+    expect(result).toMatchObject({
+      name: "APIError",
+      data: { message: "Temporarily unavailable", isRetryable: true },
+    })
+  })
+
+  test("preserves context overflow through a Bedrock provider wrapper", () => {
+    const cause = { type: "error", error: { code: "context_length_exceeded", message: "Input too large" } }
+    const result = MessageV2.fromError(new BedrockRetry.BedrockRetryError("provider", { cause }), { providerID })
+    expect(MessageV2.ContextOverflowError.isInstance(result)).toBe(true)
+  })
+
+  test("keeps Bedrock quota failures nonretryable", () => {
+    const cause = { type: "error", error: { code: "insufficient_quota", message: "Quota exhausted" } }
+    const result = MessageV2.fromError(new BedrockRetry.BedrockRetryError("provider", { cause }), { providerID })
+    expect(result).toMatchObject({ name: "APIError", data: { isRetryable: false } })
+  })
+
   test.concurrent(
     "converts ECONNRESET socket errors to retryable APIError",
     async () => {

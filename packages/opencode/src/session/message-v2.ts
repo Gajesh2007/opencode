@@ -26,6 +26,7 @@ import { NonNegativeInt } from "@opencode-ai/core/schema"
 import * as EffectLogger from "@opencode-ai/core/effect/logger"
 import { MessageError } from "./message-error"
 import { AuthError, OutputLengthError } from "./message-error"
+import { BedrockRetry } from "./llm/bedrock-retry"
 export { AuthError, OutputLengthError } from "./message-error"
 
 /** Error shape thrown by Bun's fetch() when gzip/br decompression fails mid-stream */
@@ -1156,6 +1157,9 @@ export function fromError(
   e: unknown,
   ctx: { providerID: ProviderID; aborted?: boolean },
 ): NonNullable<Assistant["error"]> {
+  if (e instanceof BedrockRetry.BedrockRetryError && e.reason === "provider" && e.cause !== undefined && e.cause !== e)
+    return fromError(e.cause, ctx)
+
   switch (true) {
     case e instanceof DOMException && e.name === "AbortError":
       return new AbortedError(

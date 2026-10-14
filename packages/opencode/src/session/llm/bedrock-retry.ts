@@ -6,6 +6,7 @@ import {
   type LanguageModelV3StreamResult,
 } from "@ai-sdk/provider"
 import * as Log from "@opencode-ai/core/util/log"
+import { ProviderError } from "@/provider/error"
 
 const log = Log.create({ service: "bedrock-retry" })
 const windows = [10_000, 20_000, 40_000]
@@ -283,13 +284,22 @@ export async function stream(input: {
     if (parent?.aborted) return fail(parent.reason)
     if (!closed) return fail(new BedrockRetryError("teardown", { cause: result.error }))
     if (state.committed) return fail(result.error)
+    const streamError = (() => {
+      if (APICallError.isInstance(result.error)) return
+      try {
+        return ProviderError.parseStreamError(result.error)
+      } catch {
+        return
+      }
+    })()
     const retry =
       (result.error instanceof BedrockRetryError &&
         (result.error.reason === "deadline" || result.error.reason === "empty")) ||
       (APICallError.isInstance(result.error) &&
         (result.error.isRetryable ||
           (result.error.statusCode !== undefined &&
-            ([408, 409, 425, 429].includes(result.error.statusCode) || result.error.statusCode >= 500))))
+            ([408, 409, 425, 429].includes(result.error.statusCode) || result.error.statusCode >= 500)))) ||
+      (streamError?.type === "api_error" && streamError.isRetryable)
     if (!retry) return fail(result.error)
     if (state.attempts >= windows.length)
       return fail(
@@ -301,7 +311,9 @@ export async function stream(input: {
     const delay =
       (APICallError.isInstance(result.error)
         ? (retryAfter(result.error.responseHeaders, clock.timestamp()) ?? 2000 * 2 ** (state.attempts - 1))
-        : 0) +
+        : streamError?.type === "api_error"
+          ? 2000 * 2 ** (state.attempts - 1)
+          : 0) +
       100 +
       Math.floor(Math.max(0, Math.min(1, clock.random())) * 200)
     if (delay >= budget - (clock.now() - started)) return fail(new BedrockRetryError("budget", { cause: result.error }))

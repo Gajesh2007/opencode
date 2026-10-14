@@ -1,6 +1,7 @@
 import { NodeFileSystem } from "@effect/platform-node"
 import { expect } from "bun:test"
-import { Effect, Layer } from "effect"
+import { Effect, Fiber, Layer } from "effect"
+import * as TestClock from "effect/testing/TestClock"
 import path from "path"
 import { Agent as AgentSvc } from "../../src/agent/agent"
 import { Bus } from "../../src/bus"
@@ -175,6 +176,191 @@ const setup = Effect.fn("test.setup")(function* (
   yield* goals.create({ sessionID: chat.id, objective: "finish the thing", ...goalInput })
   return { driver, goals, sessions, chat }
 })
+
+const throttle = Effect.fn("test.throttle")(function* (
+  sessionID: SessionID,
+  options?: { statusCode?: number; partial?: boolean },
+) {
+  const sessions = yield* Session.Service
+  const msgs = yield* MessageV2.filterCompactedEffect(sessionID)
+  const current = MessageV2.latest(msgs).assistant!
+  yield* sessions.updateMessage({
+    ...current,
+    finish: undefined,
+    time: { ...current.time, completed: Date.now() },
+    error: new MessageV2.APIError({
+      message: "Input token rate limit exceeded",
+      statusCode: options?.statusCode ?? 429,
+      isRetryable: options?.statusCode === undefined || options.statusCode === 429,
+    }).toObject(),
+  })
+  if (options?.partial)
+    yield* sessions.updatePart({
+      id: PartID.ascending(),
+      messageID: current.id,
+      sessionID,
+      type: "text",
+      text: "Partial output already delivered",
+    })
+})
+
+const cooling = Effect.fn("test.cooling")(function* (driver: GoalDriver.Interface, sessionID: SessionID) {
+  const status = yield* SessionStatus.Service
+  const fiber = yield* driver.onIdle(sessionID).pipe(Effect.forkChild)
+  while ((yield* status.get(sessionID)).type !== "retry" && fiber.pollUnsafe() === undefined)
+    yield* Effect.promise(() => Bun.sleep(5))
+  return fiber
+})
+
+it.effect("goal rate limits wait for a cooldown and resume without another user message", () =>
+  provideTmpdirServer(
+    ({ dir }) =>
+      Effect.gen(function* () {
+        loopCalls = []
+        const { driver, goals, chat } = yield* setup(dir)
+        yield* throttle(chat.id)
+        const status = yield* SessionStatus.Service
+        const fiber = yield* cooling(driver, chat.id)
+        expect((yield* status.get(chat.id)).type).toBe("retry")
+        yield* driver.onIdle(chat.id)
+        expect(loopCalls).toEqual([])
+        yield* TestClock.adjust("59 seconds")
+        expect(loopCalls).toEqual([])
+        yield* TestClock.adjust("1 second")
+        yield* Fiber.join(fiber)
+        expect(loopCalls).toEqual([chat.id])
+        expect((yield* goals.get(chat.id))?.status).toBe("active")
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
+it.effect("idle events drive rate-limit cooldown after initialization", () =>
+  provideTmpdirServer(
+    ({ dir }) =>
+      Effect.gen(function* () {
+        loopCalls = []
+        const { driver, chat } = yield* setup(dir)
+        yield* throttle(chat.id)
+        const status = yield* SessionStatus.Service
+        yield* driver.init()
+        yield* status.set(chat.id, { type: "idle" })
+        for (let attempt = 0; attempt < 100 && (yield* status.get(chat.id)).type !== "retry"; attempt++)
+          yield* Effect.promise(() => Bun.sleep(5))
+        expect((yield* status.get(chat.id)).type).toBe("retry")
+        yield* TestClock.adjust("1 minute")
+        for (let attempt = 0; attempt < 100 && loopCalls.length === 0; attempt++)
+          yield* Effect.promise(() => Bun.sleep(5))
+        expect(loopCalls).toEqual([chat.id])
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
+for (const reason of ["cancel", "new input", "goal completed", "goal replaced", "budget exhausted"] as const) {
+  it.effect(`rate-limit cooldown does not resume after ${reason}`, () =>
+    provideTmpdirServer(
+      ({ dir }) =>
+        Effect.gen(function* () {
+          loopCalls = []
+          const { driver, goals, chat } = yield* setup(dir, { tokenBudget: 1 })
+          yield* throttle(chat.id)
+          const fiber = yield* cooling(driver, chat.id)
+          const runs = yield* SessionRunState.Service
+          if (reason === "cancel") yield* runs.cancel(chat.id)
+          if (reason === "new input") {
+            yield* runs.resume(chat.id)
+            yield* user(chat.id, "A new instruction supersedes this retry")
+          }
+          if (reason === "goal completed") yield* goals.update({ sessionID: chat.id, status: "completed" })
+          if (reason === "goal replaced")
+            yield* goals.create({ sessionID: chat.id, objective: "finish the thing", tokenBudget: 1 })
+          if (reason === "budget exhausted") yield* goals.addUsage({ sessionID: chat.id, tokens: 1, cost: 0 })
+          yield* TestClock.adjust("1 minute")
+          yield* Fiber.join(fiber)
+          expect(loopCalls).toEqual([])
+          if (reason === "budget exhausted") expect((yield* goals.get(chat.id))?.status).toBe("budget_limited")
+        }),
+      { config: (url) => providerCfg(url) },
+    ),
+  )
+}
+
+for (const options of [{ statusCode: 401 }, { statusCode: 403 }, { partial: true }]) {
+  it.effect(`goal errors are not replayed: ${JSON.stringify(options)}`, () =>
+    provideTmpdirServer(
+      ({ dir }) =>
+        Effect.gen(function* () {
+          loopCalls = []
+          const { driver, chat } = yield* setup(dir)
+          yield* throttle(chat.id, options)
+          yield* driver.onIdle(chat.id)
+          expect(loopCalls).toEqual([])
+          expect((yield* (yield* SessionStatus.Service).get(chat.id)).type).toBe("idle")
+        }),
+      { config: (url) => providerCfg(url) },
+    ),
+  )
+}
+
+it.effect("goal rate-limit retries stop after three consecutive cooldowns", () =>
+  provideTmpdirServer(
+    ({ dir }) =>
+      Effect.gen(function* () {
+        loopCalls = []
+        const { driver, goals, chat } = yield* setup(dir)
+        const status = yield* SessionStatus.Service
+        for (let attempt = 0; attempt < 4; attempt++) {
+          const current = MessageV2.latest(yield* MessageV2.filterCompactedEffect(chat.id))
+          yield* assistant(chat.id, current.user!.id, path.resolve(dir))
+          yield* throttle(chat.id)
+          yield* status.set(chat.id, { type: "idle" })
+          const fiber = yield* cooling(driver, chat.id)
+          if (attempt < 3) {
+            expect((yield* status.get(chat.id)).type).toBe("retry")
+            yield* TestClock.adjust(`${60 * 2 ** attempt} seconds`)
+          }
+          yield* Fiber.join(fiber)
+        }
+        expect(loopCalls).toHaveLength(3)
+        expect((yield* goals.get(chat.id))?.status).toBe("blocked")
+
+        yield* goals.create({ sessionID: chat.id, objective: "finish the thing" })
+        const current = MessageV2.latest(yield* MessageV2.filterCompactedEffect(chat.id))
+        yield* assistant(chat.id, current.user!.id, path.resolve(dir))
+        yield* throttle(chat.id)
+        const fresh = yield* cooling(driver, chat.id)
+        expect(yield* status.get(chat.id)).toMatchObject({ type: "retry", attempt: 1 })
+        yield* TestClock.adjust("1 minute")
+        yield* Fiber.join(fresh)
+        expect(loopCalls).toHaveLength(4)
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
+it.effect("a stale cooldown does not clear a newer synthetic turn's busy status", () =>
+  provideTmpdirServer(
+    ({ dir }) =>
+      Effect.gen(function* () {
+        loopCalls = []
+        const { driver, goals, sessions, chat } = yield* setup(dir)
+        yield* throttle(chat.id)
+        const fiber = yield* cooling(driver, chat.id)
+        const next = yield* user(chat.id, "New synthetic continuation")
+        const running = yield* assistant(chat.id, next.id, path.resolve(dir))
+        yield* sessions.updateMessage({ ...running, finish: undefined })
+        const status = yield* SessionStatus.Service
+        yield* status.set(chat.id, { type: "busy" })
+        yield* goals.update({ sessionID: chat.id, status: "completed" })
+        yield* TestClock.adjust("1 minute")
+        yield* Fiber.join(fiber)
+        expect(yield* status.get(chat.id)).toEqual({ type: "busy" })
+        expect(loopCalls).toEqual([])
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
 
 it.live("session.goal-driver continues an active goal by re-prompting", () =>
   provideTmpdirServer(
