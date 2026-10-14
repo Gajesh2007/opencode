@@ -1945,17 +1945,17 @@ const argsRegex = /(?:\[Image\s+\d+\]|"[^"]*"|'[^']*'|[^\s"']+)/gi
 const placeholderRegex = /\$(\d+)/g
 const quoteTrimRegex = /^["']|["']$/g
 
+// The reminder must stay byte-stable across steps: it lives in the system
+// prompt, which providers with prefix caching (Anthropic breakpoints, OpenAI
+// implicit caching, Bedrock cachePoint) treat as the cached prefix anchor.
+// Volatile figures like usage/cost totals change after every request and
+// invalidate the whole prefix cache — exact usage is surfaced on demand via
+// the goal tool instead.
 function formatGoalReminder(goal: Goal.Info): string {
-  const budget = goal.costBudget
-    ? `Cost: $${goal.costUsed.toFixed(4)} / $${goal.costBudget.toFixed(2)} budget`
-    : goal.tokenBudget
-      ? `Tokens used: ${goal.tokensUsed} / ${goal.tokenBudget}`
-      : `Cost: $${goal.costUsed.toFixed(4)}`
   return [
     "<active_goal>",
     `Objective: ${goal.objective}`,
     `Status: ${goal.status}`,
-    budget,
     "",
     "Keep this objective in mind as you work. Call the goal tool with action 'update' and status 'completed' when the objective is fully achieved.",
     "</active_goal>",

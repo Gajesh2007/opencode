@@ -598,6 +598,56 @@ it.instance("loop calls LLM and returns assistant message", () =>
   }),
 )
 
+it.instance("active goal reminder stays byte-stable across the steps of a turn", () =>
+  Effect.gen(function* () {
+    const { dir, llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({
+      title: "Goal cache anchor",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+    const file = path.join(dir, "probe.txt")
+    yield* writeText(file, "probe")
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      model: ref,
+      noReply: true,
+      parts: [{ type: "text", text: "find text files" }],
+    })
+    // The reminder lives in the system prompt, which providers with prefix
+    // caching (Anthropic breakpoints, Bedrock cachePoint, OpenAI implicit)
+    // treat as the cached-prefix anchor. Embedding live usage figures made it
+    // mutate after every request and invalidated the whole prefix cache.
+    yield* Effect.gen(function* () {
+      yield* (yield* Goal.Service).create({
+        sessionID: chat.id,
+        objective: "find every file",
+        tokenBudget: 100_000,
+      })
+    }).pipe(Effect.provide(Goal.defaultLayer))
+    yield* llm.tool("glob", { pattern: "**/*.txt" })
+    yield* llm.text("done")
+
+    yield* prompt.loop({ sessionID: chat.id })
+
+    const systems = (yield* llm.inputs)
+      .flatMap((body) => (Array.isArray(body.messages) ? body.messages : []))
+      .filter((message): message is Record<string, unknown> => typeof message === "object" && message !== null)
+      .filter((message) => message["role"] === "system")
+      .map((message) => message["content"])
+      .filter((content): content is string => typeof content === "string" && content.includes("<active_goal>"))
+    expect(systems).toHaveLength(2)
+    expect(systems[0]).toContain("Objective: find every file")
+    // No live usage figures inside the cached system prefix.
+    expect(systems[0]).not.toContain("Tokens used:")
+    expect(systems[0]).not.toContain("Cost: $")
+    // Byte-identical across steps even though usage accumulated between them.
+    expect(systems[1]).toBe(systems[0])
+  }),
+)
+
 parallelPreparation.instance("prepares independent prompt inputs concurrently without reordering them", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig(providerCfg)
