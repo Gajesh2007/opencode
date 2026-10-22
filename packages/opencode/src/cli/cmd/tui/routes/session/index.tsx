@@ -85,6 +85,7 @@ import { QuestionPrompt } from "./question"
 import { DialogExportOptions } from "../../ui/dialog-export-options"
 import * as Model from "../../util/model"
 import { formatTranscript } from "../../util/transcript"
+import { serviceTier } from "../../util/service-tier"
 import { UI } from "@/cli/ui.ts"
 import { useTuiConfig } from "../../context/tui-config"
 import { nextThinkingMode, reasoningTitle, useThinkingMode, type ThinkingMode } from "../../context/thinking"
@@ -1163,7 +1164,7 @@ export function Session() {
                                     onSelect: async (dialog) => {
                                       try {
                                         await sdk.client.session.unrevert(
-                                          { sessionID: route.sessionID, restoreFiles: false },
+                                          { sessionID: route.sessionID, restoreFiles: "false" },
                                           { throwOnError: true },
                                         )
                                         prompt?.set({ input: "", parts: [] })
@@ -1187,7 +1188,7 @@ export function Session() {
                                     onSelect: async (dialog) => {
                                       try {
                                         await sdk.client.session.unrevert(
-                                          { sessionID: route.sessionID, restoreFiles: true },
+                                          { sessionID: route.sessionID, restoreFiles: "true" },
                                           { throwOnError: true },
                                         )
                                         prompt?.set({ input: "", parts: [] })
@@ -1467,6 +1468,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
   const sync = useSync()
   const messages = createMemo(() => sync.data.message[props.message.sessionID] ?? [])
   const model = createMemo(() => Model.name(ctx.providers(), props.message.providerID, props.message.modelID))
+  const tier = createMemo(() => serviceTier(props.message))
 
   const final = createMemo(() => {
     return props.message.finish && !["tool-calls", "unknown"].includes(props.message.finish)
@@ -1537,6 +1539,12 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
               </span>{" "}
               <span style={{ fg: theme.text }}>{Locale.titlecase(props.message.mode)}</span>
               <span style={{ fg: theme.textMuted }}> · {model()}</span>
+              <Show when={props.message.model_resolved}>
+                <span style={{ fg: theme.textMuted }}> · served model: {props.message.model_resolved}</span>
+              </Show>
+              <Show when={tier().text}>
+                <span style={{ fg: tier().downgraded ? theme.warning : theme.textMuted }}> · {tier().text}</span>
+              </Show>
               <Show when={duration()}>
                 <span style={{ fg: theme.textMuted }}> · {Locale.duration(duration())}</span>
               </Show>

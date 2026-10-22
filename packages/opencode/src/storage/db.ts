@@ -102,9 +102,9 @@ export const Client = Object.assign(
 
     const db = init(dbPath)
 
+    db.run("PRAGMA busy_timeout = 5000")
     db.run("PRAGMA journal_mode = WAL")
     db.run("PRAGMA synchronous = NORMAL")
-    db.run("PRAGMA busy_timeout = 5000")
     db.run("PRAGMA cache_size = -64000")
     db.run("PRAGMA foreign_keys = ON")
     db.run("PRAGMA wal_checkpoint(PASSIVE)")
@@ -191,7 +191,8 @@ export function transaction<T>(
     if (err instanceof LocalContext.NotFound) {
       const effects: (() => void | Promise<void>)[] = []
       const txCallback = EffectBridge.bind((tx: TxOrDb) => ctx.provide({ tx, effects }, () => callback(tx)))
-      const result = Client().transaction(txCallback, { behavior: options?.behavior })
+      // Deferred read-to-write upgrades can fail immediately despite busy_timeout.
+      const result = Client().transaction(txCallback, { behavior: options?.behavior ?? "immediate" })
       for (const effect of effects) effect()
       return result as NotPromise<T>
     }

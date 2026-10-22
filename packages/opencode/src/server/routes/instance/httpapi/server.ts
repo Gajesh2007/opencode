@@ -38,6 +38,7 @@ import { Question } from "@/question"
 import { Session } from "@/session/session"
 import { SessionCompaction } from "@/session/compaction"
 import { SessionPrompt } from "@/session/prompt"
+import { LLM } from "@/session/llm"
 import { SessionRevert } from "@/session/revert"
 import { SessionRunState } from "@/session/run-state"
 import { SessionStatus } from "@/session/status"
@@ -59,7 +60,7 @@ import { Workspace } from "@/control-plane/workspace"
 import { CorsConfig, isAllowedCorsOrigin, type CorsOptions } from "@/server/cors"
 import { serveUIEffect } from "@/server/shared/ui"
 import { ServerAuth } from "@/server/auth"
-import { InstanceHttpApi, RootHttpApi } from "./api"
+import { InstanceHttpApi, RootHttpApi, PairingConnectApi } from "./api"
 import { PublicApi } from "./public"
 import { authorizationLayer, authorizationRouterMiddleware, v2AuthorizationLayer } from "./middleware/authorization"
 import { EventApi } from "./groups/event"
@@ -76,6 +77,7 @@ import { projectHandlers } from "./handlers/project"
 import { providerHandlers } from "./handlers/provider"
 import { ptyConnectRoute, ptyHandlers } from "./handlers/pty"
 import { questionHandlers } from "./handlers/question"
+import { serverHandlers, pairingConnectHandlers } from "./handlers/server"
 import { sessionHandlers } from "./handlers/session"
 import { syncHandlers } from "./handlers/sync"
 import { tuiHandlers } from "./handlers/tui"
@@ -111,7 +113,8 @@ const authOnlyRouterLayer = authorizationRouterMiddleware.layer.pipe(Layer.provi
 const httpApiAuthLayer = authorizationLayer.pipe(Layer.provide(ServerAuth.Config.defaultLayer))
 const v2HttpApiAuthLayer = v2AuthorizationLayer.pipe(Layer.provide(ServerAuth.Config.defaultLayer))
 const rootApiRoutes = HttpApiBuilder.layer(RootHttpApi).pipe(
-  Layer.provide([controlHandlers, globalHandlers]),
+  Layer.provide([controlHandlers, globalHandlers, serverHandlers]),
+  Layer.provide(ServerAuth.Config.defaultLayer),
   Layer.provide(schemaErrorLayer),
   Layer.provide(httpApiAuthLayer),
 )
@@ -154,6 +157,14 @@ const instanceRoutes = Layer.mergeAll(rawInstanceRoutes, instanceApiRoutes).pipe
   ]),
 )
 
+// No auth middleware here: redeeming a pairing link is how a device first
+// authenticates, so the one-time code is the credential.
+const pairingConnectRoutes = HttpApiBuilder.layer(PairingConnectApi).pipe(
+  Layer.provide(pairingConnectHandlers),
+  Layer.provide(ServerAuth.Config.defaultLayer),
+  Layer.provide(schemaErrorLayer),
+)
+
 // `OpenApi.fromApi` is non-trivial; defer until /doc is actually hit so
 // processes that never serve it (CLI, scripts) don't pay at module load.
 // `HttpServerResponse.jsonUnsafe` runs JSON.stringify eagerly, so caching
@@ -186,7 +197,7 @@ type RouteRequirements =
 export function createRoutes(
   corsOptions?: CorsOptions,
 ): Layer.Layer<never, EffectConfig.ConfigError, RouteRequirements> {
-  return Layer.mergeAll(rootApiRoutes, eventApiRoutes, instanceRoutes, docRoute, uiRoute).pipe(
+  return Layer.mergeAll(rootApiRoutes, eventApiRoutes, instanceRoutes, docRoute, uiRoute, pairingConnectRoutes).pipe(
     Layer.provide([
       errorLayer,
       compressionLayer,
@@ -202,6 +213,7 @@ export function createRoutes(
       FileWatcher.defaultLayer,
       Format.defaultLayer,
       LSP.defaultLayer,
+      LLM.defaultLayer,
       Installation.defaultLayer,
       MCP.defaultLayer,
       ModelsDev.defaultLayer,

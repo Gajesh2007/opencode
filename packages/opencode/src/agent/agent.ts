@@ -473,6 +473,8 @@ export const layer = Layer.effect(
           },
         }
 
+        if (!flags.experimentalWorkflow) delete agents.review
+
         for (const [key, value] of Object.entries(cfg.agent ?? {})) {
           if (value.disable) {
             delete agents[key]
@@ -504,7 +506,7 @@ export const layer = Layer.effect(
           item.steps = value.steps ?? item.steps
           item.options = mergeDeep(item.options, value.options ?? {})
           item.permission = Permission.merge(item.permission, Permission.fromConfig(value.permission ?? {}))
-          if (value.workflow) {
+          if (value.workflow && flags.experimentalWorkflow) {
             // A declared workflow turns this agent into a fan-out orchestrator:
             // append the directive to its prompt and grant the `workflow` tool so
             // it works even when spawned as a subagent (which denies it by default).

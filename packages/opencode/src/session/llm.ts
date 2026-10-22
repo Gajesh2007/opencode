@@ -1,7 +1,7 @@
 import { Provider } from "@/provider/provider"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import * as Log from "@opencode-ai/core/util/log"
-import { Context, Effect, Layer } from "effect"
+import { Cause, Context, Effect, Exit, Layer } from "effect"
 import * as Stream from "effect/Stream"
 import { streamText, wrapLanguageModel, type ModelMessage, type Tool } from "ai"
 import type { LLMEvent } from "@opencode-ai/llm"
@@ -17,6 +17,7 @@ import { Permission } from "@/permission"
 import { PermissionID } from "@/permission/schema"
 import { Bus } from "@/bus"
 import { Wildcard } from "@/util/wildcard"
+import { isRecord } from "@/util/record"
 import { SessionID } from "@/session/schema"
 import { Auth } from "@/auth"
 import { EffectBridge } from "@/effect/bridge"
@@ -27,6 +28,9 @@ import { LLMAISDK } from "./llm/ai-sdk"
 import { LLMNativeRuntime } from "./llm/native-runtime"
 import { LLMRequestPrep } from "./llm/request"
 import { BedrockRetry } from "./llm/bedrock-retry"
+import { LLMWarm } from "./llm/warm"
+import { SessionUsage } from "./usage"
+import { SessionTiming } from "./timing"
 
 const log = Log.create({ service: "llm" })
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
@@ -41,6 +45,7 @@ export type StreamInput = {
   system: string[]
   messages: ModelMessage[]
   small?: boolean
+  usageKind?: "assistant" | "reviewer" | "steering" | "auxiliary"
   tools: Record<string, Tool>
   retries?: number
   bedrockRetry?: BedrockRetry.State
@@ -51,6 +56,8 @@ export type StreamInput = {
    * Unknown IDs, changed context, and AI SDK requests use full history.
    */
   previousResponseId?: string
+  onRequest?: (info: { serviceTier?: string }) => void
+  timing?: SessionTiming.Handle
 }
 
 export type StreamRequest = StreamInput & {
@@ -59,6 +66,8 @@ export type StreamRequest = StreamInput & {
 
 export interface Interface {
   readonly stream: (input: StreamInput) => Stream.Stream<LLMEvent, unknown>
+  readonly warm?: LLMWarm.Interface["warm"]
+  readonly cancelWarm?: LLMWarm.Interface["cancel"]
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/LLM") {}
@@ -75,6 +84,7 @@ const live: Layer.Layer<
   | Permission.Service
   | LLMClientService
   | RuntimeFlags.Service
+  | LLMWarm.Service
 > = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -85,6 +95,7 @@ const live: Layer.Layer<
     const perm = yield* Permission.Service
     const llmClient = yield* LLMClient.Service
     const flags = yield* RuntimeFlags.Service
+    const warming = yield* LLMWarm.Service
     const continuation = LLMNativeRuntime.createContinuationState()
 
     const run = Effect.fn("LLM.run")(function* (input: StreamRequest) {
@@ -100,11 +111,16 @@ const live: Layer.Layer<
         modelID: input.model.id,
         providerID: input.model.providerID,
       })
+      if (!input.small) yield* warming.cancel(input.sessionID)
 
       const [language, cfg, item, info] = yield* Effect.all(
         [
           // Native OpenAI does not use an AI SDK model. Resolve it only on fallback.
-          flags.experimentalNativeLlm && input.model.providerID === "openai" && input.model.api.npm === "@ai-sdk/openai"
+          (flags.experimentalNativeLlm ||
+            input.user.model.serviceTier === "ultrafast" ||
+            input.model.options.serviceTier === "ultrafast") &&
+          input.model.providerID === "openai" &&
+          input.model.api.npm === "@ai-sdk/openai"
             ? Effect.succeed(undefined)
             : provider.getLanguage(input.model),
           config.get(),
@@ -122,6 +138,40 @@ const live: Layer.Layer<
         plugin,
         flags,
         isWorkflow,
+      })
+      const providerOptions = ProviderTransform.providerOptions(input.model, prepared.params.options)
+      if (providerOptions.openai?.promptCacheOptions?.prewarm === true)
+        throw new Error("Cache prewarming must use a separate API request, not a conversational response")
+      const capture = (native: boolean) =>
+        input.small
+          ? Effect.void
+          : warming.capture({
+              native,
+              toolChoice: input.toolChoice,
+              selection: {
+                sessionID: input.sessionID,
+                parentSessionID: input.parentSessionID,
+                providerID: input.model.providerID,
+                modelID: input.model.id,
+                agent: input.agent.name,
+                variant: input.user.model.variant,
+                serviceTier: input.user.model.serviceTier,
+                upstream: input.user.model.upstream,
+              },
+              model: input.model,
+              provider: item,
+              auth: info,
+              prepared,
+            })
+      const tier = providerOptions.openai?.serviceTier ?? providerOptions.bedrock?.serviceTier
+      input.timing?.metadata({ requestedTier: typeof tier === "string" ? tier : tier?.type })
+      input.timing?.requestPrepared()
+      input.onRequest?.({ serviceTier: typeof tier === "string" ? tier : tier?.type })
+      const autoNative = LLMNativeRuntime.autoNative({
+        model: input.model,
+        provider: item,
+        auth: info,
+        providerOptions: prepared.params.options,
       })
 
       // Wire up toolExecutor for DWS workflow models so that tool calls
@@ -229,7 +279,7 @@ const live: Layer.Layer<
 
       // Runtime seam: native is an opt-in adapter over @opencode-ai/llm. It
       // either returns a ready LLMEvent stream or a concrete fallback reason.
-      if (flags.experimentalNativeLlm) {
+      if (flags.experimentalNativeLlm || autoNative) {
         const native = LLMNativeRuntime.stream({
           continuation: input.small ? undefined : continuation,
           sessionID: input.sessionID,
@@ -250,6 +300,7 @@ const live: Layer.Layer<
           abort: input.abort,
         })
         if (native.type === "supported") {
+          yield* capture(true)
           yield* Effect.logInfo("llm runtime selected").pipe(
             Effect.annotateLogs({
               "llm.runtime": "native",
@@ -282,6 +333,7 @@ const live: Layer.Layer<
       )
       // Default runtime path: AI SDK owns provider execution and tool dispatch;
       // LLMAISDK.toLLMEvents below normalizes fullStream parts for the processor.
+      yield* capture(false)
       const retry =
         !Object.values(prepared.tools).some((tool) => tool.type === "provider") &&
         BedrockRetry.enabled({
@@ -323,7 +375,7 @@ const live: Layer.Layer<
           temperature: prepared.params.temperature,
           topP: prepared.params.topP,
           topK: prepared.params.topK,
-          providerOptions: ProviderTransform.providerOptions(input.model, prepared.params.options),
+          providerOptions,
           activeTools: Object.keys(prepared.tools).filter((x) => x !== "invalid"),
           tools: prepared.tools,
           toolChoice: input.toolChoice,
@@ -371,33 +423,117 @@ const live: Layer.Layer<
       Stream.scoped(
         Stream.unwrap(
           Effect.gen(function* () {
+            const timing =
+              input.timing ??
+              SessionTiming.start(
+                {
+                  sessionID: input.sessionID,
+                  messageID: input.user.id,
+                  providerID: input.model.providerID,
+                  modelID: input.model.id,
+                  variant: input.small ? undefined : input.user.model.variant,
+                  requestedTier: input.small ? undefined : input.user.model.serviceTier,
+                  purpose:
+                    input.agent.name === "compaction"
+                      ? "compaction"
+                      : (input.usageKind ?? (input.small ? "auxiliary" : "assistant")),
+                },
+                { enabled: !flags.disableTiming },
+              )
+            if (!input.timing) timing.request()
+            let outcome: "completed" | "error" | "incomplete" | "truncated" = "incomplete"
+            if (!input.timing) {
+              yield* Effect.addFinalizer((exit) =>
+                Effect.sync(() =>
+                  timing.finish(
+                    Exit.isFailure(exit) ? (Cause.hasInterruptsOnly(exit.cause) ? "interrupted" : "error") : outcome,
+                  ),
+                ),
+              )
+            }
             const ctrl = yield* Effect.acquireRelease(
               Effect.sync(() => new AbortController()),
               (ctrl) => Effect.sync(() => ctrl.abort()),
             )
 
-            const result = yield* run({ ...input, abort: ctrl.signal })
-
-            if (result.type === "native") return result.stream
-
-            // Adapter seam: both runtimes expose the same LLMEvent stream. Native
-            // already returns one; AI SDK streams are converted here.
+            const result = yield* run({ ...input, timing, abort: ctrl.signal })
+            timing.metadata({ runtime: result.type })
             const state = LLMAISDK.adapterState()
-            return Stream.fromAsyncIterable(LLMAISDK.fullStream(result.result), (e) =>
-              e instanceof Error ? e : new Error(String(e)),
-            ).pipe(
-              Stream.mapEffect((event) => LLMAISDK.toLLMEvents(state, event)),
-              Stream.flattenIterable,
+            // Both adapters expose the same application-observed semantic milestones.
+            const source =
+              result.type === "native"
+                ? result.stream
+                : Stream.fromAsyncIterable(LLMAISDK.fullStream(result.result), (e) =>
+                    e instanceof Error ? e : new Error(String(e)),
+                  ).pipe(
+                    Stream.mapEffect((event) => LLMAISDK.toLLMEvents(state, event)),
+                    Stream.flattenIterable,
+                  )
+            return source.pipe(
+              Stream.tap((event) =>
+                Effect.sync(() => {
+                  if (event.type === "text-delta" && event.text.length) timing.firstText()
+                  if (event.type === "reasoning-delta" && event.text.length) timing.firstReasoning()
+                  if (event.type === "tool-input-start") timing.toolInputStart(event.id, event.name)
+                  if (event.type === "tool-call") timing.toolReady(event.id, event.name)
+                  if (event.type === "provider-error") outcome = "error"
+                  if (event.type === "finish" || event.type === "step-finish") {
+                    if (outcome !== "error")
+                      outcome =
+                        event.reason === "unknown"
+                          ? "incomplete"
+                          : event.reason === "length"
+                            ? "truncated"
+                            : event.reason === "error" || event.reason === "content-filter"
+                              ? "error"
+                              : "completed"
+                    const openai = event.providerMetadata?.openai
+                    const bedrock = event.providerMetadata?.bedrock
+                    // Anthropic reports the served speed ("fast" | "standard") in raw
+                    // usage. Timing-only: it verifies fast mode without changing pricing.
+                    const anthropic = event.providerMetadata?.anthropic
+                    const speed =
+                      isRecord(anthropic) && isRecord(anthropic.usage) && typeof anthropic.usage.speed === "string"
+                        ? anthropic.usage.speed
+                        : undefined
+                    const tier = openai?.serviceTier ?? bedrock?.serviceTier ?? speed
+                    const returnedTier =
+                      typeof tier === "string"
+                        ? tier
+                        : tier && typeof tier === "object" && "type" in tier && typeof tier.type === "string"
+                          ? tier.type
+                          : undefined
+                    timing.metadata({
+                      ...(returnedTier !== undefined ? { returnedTier } : {}),
+                      ...(typeof openai?.modelId === "string" ? { resolvedModelID: openai.modelId } : {}),
+                    })
+                  }
+                }),
+              ),
+              Stream.onExit((exit) =>
+                Effect.sync(() =>
+                  timing.requestOutcome(
+                    Exit.isFailure(exit) ? (Cause.hasInterruptsOnly(exit.cause) ? "interrupted" : "error") : outcome,
+                  ),
+                ),
+              ),
             )
           }),
         ),
+      ).pipe(
+        SessionUsage.track({
+          sessionID: SessionID.make(input.sessionID),
+          kind: input.usageKind ?? (input.small ? "auxiliary" : "assistant"),
+          model: input.model,
+          serviceTier: input.user.model.serviceTier,
+        }),
       )
 
-    return Service.of({ stream })
+    return Service.of({ stream, warm: warming.warm, cancelWarm: warming.cancel })
   }),
 )
 
-export const layer = live.pipe(Layer.provide(Permission.defaultLayer))
+export const layer = live.pipe(Layer.provide([Permission.defaultLayer, LLMWarm.layer]))
 
 export const defaultLayer = Layer.suspend(() =>
   layer.pipe(
@@ -412,7 +548,7 @@ export const defaultLayer = Layer.suspend(() =>
       // connection-scoped server cache (the article's biggest optimization)
       // would be cold on every request. See
       // packages/llm/src/route/transport/websocket.ts for the pool's lifetime
-      // rules (60-minute hard limit, 30s idle TTL).
+      // rules (55-minute maximum reuse age, five-minute idle retention).
       LLMClient.layer.pipe(Layer.provide(Layer.mergeAll(RequestExecutor.defaultLayer, WebSocketExecutor.poolLayer()))),
     ),
     Layer.provide(RuntimeFlags.defaultLayer),

@@ -1,4 +1,5 @@
-import { describe, expect } from "bun:test"
+import { describe, expect, test } from "bun:test"
+import type { Provider } from "../../src/provider/provider"
 import { Effect, Layer } from "effect"
 import type { Agent } from "../../src/agent/agent"
 import { NamedError } from "@opencode-ai/core/util/error"
@@ -62,6 +63,16 @@ const it = testEffect(
 )
 
 describe("session.system", () => {
+  for (const id of ["gpt-6.1-sol", "us.openai.gpt-6.1-sol", "gpt-6-astra", "gpt-6.1-codex"]) {
+    test(`${id} describes useful native tool batching without an unavailable wrapper`, () => {
+      const prompt = SystemPrompt.provider({ api: { id } } as Provider.Model).join("\n")
+      expect(prompt).toContain("independent tool calls together")
+      expect(prompt).toContain("read_many")
+      expect(prompt).toContain("unknown paths")
+      expect(prompt).not.toContain("multi_tool_use.parallel")
+    })
+  }
+
   it.effect("skills output is sorted by name and stable across calls", () =>
     Effect.gen(function* () {
       const prompt = yield* SystemPrompt.Service

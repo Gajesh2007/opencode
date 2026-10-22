@@ -8,6 +8,7 @@ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { createOpencodeClient } from "@opencode-ai/sdk/v2"
 import { validateSession } from "../../src/cli/cmd/tui/validate-session"
+import { Auth } from "../../src/auth"
 import { InstanceBootstrap } from "../../src/project/bootstrap-service"
 import { InstanceStore } from "../../src/project/instance-store"
 import { HttpApiApp } from "../../src/server/routes/instance/httpapi/server"
@@ -17,6 +18,7 @@ import { MessageV2 } from "../../src/session/message-v2"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import type { Config } from "@/config/config"
 import { Session as SessionNs } from "@/session/session"
+import { SessionUsage } from "@/session/usage"
 import { errorMessage } from "../../src/util/error"
 import { TestLLMServer } from "../lib/llm-server"
 import path from "path"
@@ -335,6 +337,146 @@ afterEach(async () => {
 })
 
 describe("HttpApi SDK", () => {
+  httpapiInstance(
+    "session usage includes descendants, preserves deleted work, and exposes unknown attempts",
+    { serverPath: "raw" },
+    ({ sdk, directory }) =>
+      Effect.gen(function* () {
+        const parent = yield* call(() => sdk.session.create({ title: "Usage parent" }))
+        const parentID = SessionID.make(parent.data!.id)
+        const child = yield* call(() => sdk.session.create({ title: "Usage child", parentID }))
+        const childID = SessionID.make(child.data!.id)
+        for (const [id, sessionID, amount] of [
+          ["usage-parent", parentID, 1],
+          ["usage-child", childID, 2],
+        ] as const) {
+          yield* SessionUsage.record({
+            id,
+            sessionID,
+            startedAt: Date.now(),
+            data: {
+              kind: "assistant",
+              tokens: {
+                total: amount * 3,
+                input: amount,
+                output: amount * 2,
+                reasoning: 0,
+                cache: { read: 0, write: 0 },
+              },
+              cost: amount / 10,
+              pricing: "catalog_estimate",
+            },
+          })
+        }
+        yield* SessionUsage.record({
+          id: "usage-unknown",
+          sessionID: parentID,
+          startedAt: Date.now(),
+          data: { kind: "assistant", pricing: "unknown" },
+        })
+        const usage = yield* call(() => sdk.session.usage({ sessionID: parentID }))
+        expect(usage.response.status).toBe(200)
+        expect(usage.data).toMatchObject({
+          tokens: 9,
+          attempts: 3,
+          unknownAttempts: 1,
+          unknownCosts: 1,
+          pricing: "unknown",
+          external: "unknown",
+          coverage: "recorded_attempts_only",
+        })
+        expect(usage.data!.cost).toBeCloseTo(0.3)
+        const childUsage = yield* call(() => sdk.session.usage({ sessionID: childID }))
+        expect(childUsage.data).toMatchObject({ tokens: 6, attempts: 1 })
+        expect((yield* call(() => sdk.session.delete({ sessionID: childID }))).response.status).toBe(200)
+        expect((yield* call(() => sdk.session.usage({ sessionID: parentID }))).data).toEqual(usage.data)
+        expect((yield* call(() => sdk.session.usage({ sessionID: "ses_missing" }))).response.status).toBe(404)
+        const unauthorized = yield* call(async () =>
+          app("raw", { password: "secret" }).request(
+            `/session/${parentID}/usage?directory=${encodeURIComponent(directory)}`,
+          ),
+        )
+        expect(unauthorized.status).toBe(401)
+      }),
+  )
+
+  httpapiInstance(
+    "session warm accepts only selection IDs, requires a session, and sanitizes unsupported models",
+    { serverPath: "raw" },
+    ({ sdk, directory }) =>
+      Effect.gen(function* () {
+        const created = yield* call(() => sdk.session.create({ title: "Warm endpoint" }))
+        expect(created.response.status).toBe(200)
+        const sessionID = created.data!.id
+        const server = app("raw")
+        const warm = async (id: string, payload: unknown) =>
+          server.request(`/session/${id}/warm?directory=${encodeURIComponent(directory)}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          })
+        const selection = { providerID: "missing-provider", modelID: "missing-model" }
+        const response = yield* call(() => warm(sessionID, selection))
+        expect(response.status).toBe(200)
+        expect(yield* call(() => response.json())).toEqual({ connection: "failed", context: "skipped" })
+        expect((yield* call(() => warm("ses_missing", selection))).status).toBe(404)
+        expect((yield* call(() => warm(sessionID, { providerID: "missing-provider" }))).status).toBe(400)
+        for (const extra of ["text", "url", "headers", "credentials", "attachments", "parentSessionID", "context"]) {
+          const invalid = yield* call(() => warm(sessionID, { ...selection, [extra]: "private data" }))
+          expect(invalid.status).toBe(400)
+          expect(yield* call(() => invalid.text())).not.toContain("private data")
+        }
+        const protectedServer = app("raw", { password: "secret" })
+        const unauthorized = yield* call(async () =>
+          protectedServer.request(`/session/${sessionID}/warm?directory=${encodeURIComponent(directory)}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(selection),
+          }),
+        )
+        expect(unauthorized.status).toBe(401)
+      }),
+  )
+
+  httpapi(
+    "conditionally sets auth credentials through If-Match without replacing a switched account",
+    Effect.gen(function* () {
+      const sdk = client("raw")
+      const auth = yield* Auth.Service.pipe(Effect.provide(Auth.defaultLayer))
+      const original = { type: "oauth" as const, access: "account-a", refresh: "refresh-a", expires: 0 }
+      const replacement = { ...original, access: "account-b", refresh: "refresh-b" }
+      expect(
+        (yield* call(() => sdk.auth.set({ providerID: "conditional-http", auth: original }))).response.status,
+      ).toBe(200)
+      const expectedA = Auth.fingerprint(yield* auth.get("conditional-http"))
+      expect(
+        (yield* call(() => sdk.auth.set({ providerID: "conditional-http", auth: replacement }))).response.status,
+      ).toBe(200)
+      const expectedB = Auth.fingerprint(yield* auth.get("conditional-http"))
+      yield* expectStatus(
+        () =>
+          sdk.auth.set(
+            { providerID: "conditional-http", auth: original },
+            {
+              headers: { "If-Match": expectedA },
+            },
+          ),
+        409,
+      )
+      yield* expectStatus(
+        () =>
+          sdk.auth.set(
+            { providerID: "conditional-http", auth: { ...replacement, access: "refreshed-b" } },
+            {
+              headers: { "If-Match": expectedB },
+            },
+          ),
+        200,
+      )
+      yield* expectStatus(() => sdk.auth.remove({ providerID: "conditional-http" }), 200)
+    }),
+  )
+
   httpapi(
     "uses the generated SDK for global and control routes",
     Effect.gen(function* () {

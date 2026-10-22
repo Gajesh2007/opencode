@@ -194,6 +194,80 @@ it.live("continues multiple tool steps and turns with only the verified suffix a
   }),
 )
 
+it.live("reports malformed tool input without execution or caching an incompatible continuation", () =>
+  Effect.gen(function* () {
+    const test = yield* setup([
+      sse([
+        {
+          type: "response.output_item.done",
+          item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "lookup", arguments: "{" },
+        },
+        completed("resp_bad"),
+      ]),
+      toolResponse("resp_fixed"),
+    ])
+    const events = yield* test.send([user("search")])
+    const failure = events.find((event) => event.type === "tool-error")
+    expect(failure?.message).toContain("Retry the tool call with valid JSON")
+    expect(test.executions.count).toBe(0)
+    expect(test.continuation.size).toBe(0)
+    if (!failure) throw new Error("missing recoverable tool error")
+
+    yield* test.send(
+      [
+        user("search"),
+        { role: "assistant", content: [{ ...call, input: { value: "{" } }] },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call_1",
+              toolName: "lookup",
+              output: { type: "error-text", value: failure.message },
+            },
+          ],
+        },
+      ],
+      "resp_bad",
+    )
+    expect(test.bodies[1]).not.toHaveProperty("previous_response_id")
+    expect(test.bodies[1].input).toEqual(
+      expect.arrayContaining([{ type: "function_call_output", call_id: "call_1", output: failure.message }]),
+    )
+    expect(test.executions.count).toBe(1)
+  }),
+)
+
+it.live("does not trim assistant cache breakpoints before full request validation", () =>
+  Effect.gen(function* () {
+    const test = yield* setup([text("resp_1")])
+    yield* test.send([user("first")])
+    const error = yield* test
+      .send(
+        [
+          user("first"),
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "text",
+                text: "hello",
+                providerOptions: { openai: { promptCacheBreakpoint: { mode: "explicit" } } },
+              },
+            ],
+          },
+          user("next"),
+        ],
+        "resp_1",
+      )
+      .pipe(Effect.flip)
+    expect(String(error)).toContain("promptCacheBreakpoint requires input_text")
+    expect(test.bodies).toHaveLength(1)
+    expect(test.continuation.size).toBe(0)
+  }),
+)
+
 for (const mode of ["http", "stream", "failed"] as const) {
   it.live(`retries ${mode} stale response errors once with full history before tool execution`, () =>
     Effect.gen(function* () {

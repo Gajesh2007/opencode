@@ -3,6 +3,7 @@ import * as Tool from "./tool"
 import DESCRIPTION from "./metaagent.txt"
 import { MetaAgent } from "../session/metaagent"
 import { ProviderID, ModelID } from "@/provider/schema"
+import { RuntimeFlags } from "@/effect/runtime-flags"
 
 export const Parameters = Schema.Struct({
   action: Schema.Literals(["set", "get", "clear"]).annotate({
@@ -28,16 +29,26 @@ type MetaAgentMetadata = {
   metaagent?: MetaAgent.Info
 }
 
-export const MetaAgentTool = Tool.define<typeof Parameters, MetaAgentMetadata, MetaAgent.Service>(
+export const MetaAgentTool = Tool.define<
+  typeof Parameters,
+  MetaAgentMetadata,
+  MetaAgent.Service | RuntimeFlags.Service
+>(
   "metaagent",
   Effect.gen(function* () {
     const svc = yield* MetaAgent.Service
+    const flags = yield* RuntimeFlags.Service
 
     return {
       description: DESCRIPTION,
       parameters: Parameters,
       execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context<MetaAgentMetadata>) =>
         Effect.gen(function* () {
+          if (!flags.experimentalMetaAgent) {
+            return yield* Effect.die(
+              new MetaAgent.DisabledError({ message: "Meta-agent requires OPENCODE_EXPERIMENTAL_METAAGENT=true" }),
+            )
+          }
           if (params.action === "get") {
             const current = yield* svc.get(ctx.sessionID)
             if (!current) {
@@ -51,7 +62,7 @@ export const MetaAgentTool = Tool.define<typeof Parameters, MetaAgentMetadata, M
           }
 
           if (params.action === "clear") {
-            yield* svc.clear(ctx.sessionID)
+            yield* svc.clear(ctx.sessionID).pipe(Effect.orDie)
             return {
               title: "Meta agent cleared",
               output: "The reasoning reviewer is disabled for this session.",
@@ -60,13 +71,15 @@ export const MetaAgentTool = Tool.define<typeof Parameters, MetaAgentMetadata, M
           }
 
           // action === "set"
-          const result = yield* svc.set({
-            sessionID: ctx.sessionID,
-            enabled: params.enabled,
-            basePrompt: params.base_prompt,
-            model: parseModel(params.model),
-            effort: params.effort,
-          })
+          const result = yield* svc
+            .set({
+              sessionID: ctx.sessionID,
+              enabled: params.enabled,
+              basePrompt: params.base_prompt,
+              model: parseModel(params.model),
+              effort: params.effort,
+            })
+            .pipe(Effect.orDie)
           return { title: "Meta agent set", output: format(result), metadata: { action: "set", metaagent: result } }
         }),
     } satisfies Tool.DefWithoutID<typeof Parameters, MetaAgentMetadata>

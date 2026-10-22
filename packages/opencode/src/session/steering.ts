@@ -1,4 +1,4 @@
-import { Effect, Layer, Context, Stream } from "effect"
+import { Effect, Layer, Context } from "effect"
 import { LLM } from "./llm"
 import { Agent } from "../agent/agent"
 import { Provider } from "@/provider/provider"
@@ -7,13 +7,10 @@ import { MessageV2 } from "./message-v2"
 import { MessageID, type SessionID } from "./schema"
 import type { ProviderID, ModelID } from "@/provider/schema"
 import { jsonSchema, tool } from "ai"
-import { LLMEvent } from "@opencode-ai/llm"
-import * as Log from "@opencode-ai/core/util/log"
-
-const log = Log.create({ service: "steering" })
+import * as Auxiliary from "./auxiliary"
 
 export interface SteerResult {
-  readonly type: "continue" | "complete" | "blocked"
+  readonly type: "continue" | "complete" | "blocked" | "unavailable"
   readonly message: string
 }
 
@@ -24,9 +21,12 @@ type SteerInput = {
   readonly modelID: ModelID
 }
 
-export class Service extends Context.Service<Service, {
-  readonly steer: (input: SteerInput) => Effect.Effect<SteerResult>
-}>()("@opencode/Steering") {}
+export class Service extends Context.Service<
+  Service,
+  {
+    readonly steer: (input: SteerInput) => Effect.Effect<SteerResult>
+  }
+>()("@opencode/Steering") {}
 
 export const layer = Layer.effect(
   Service,
@@ -35,11 +35,10 @@ export const layer = Layer.effect(
     const agents = yield* Agent.Service
     const prov = yield* Provider.Service
 
-    const steer = Effect.fn("Steering.steer")(function* (input: SteerInput): Generator<any, SteerResult, any> {
+    const steer = Effect.fn("Steering.steer")(function* (input: SteerInput) {
       const ag = yield* agents.get("steer")
       if (!ag) {
-        log.warn("steer agent not found, falling back to template continuation")
-        return { type: "continue", message: "" }
+        return { type: "unavailable" as const, message: "" }
       }
 
       // Use the same model the main chat is using so the steering agent has
@@ -68,8 +67,8 @@ export const layer = Layer.effect(
         }),
         execute: async (args) => {
           const msgs = [...MessageV2.stream(input.sessionID)]
-          const offset = args.offset ?? 0
-          const limit = args.limit ?? 20
+          const offset = Math.max(0, Math.trunc(args.offset ?? 0))
+          const limit = Math.max(0, Math.min(20, Math.trunc(args.limit ?? 20)))
           const slice = msgs.slice(offset, offset + limit)
 
           const lines = slice.map((msg, i) => {
@@ -103,8 +102,7 @@ export const layer = Layer.effect(
               {
                 type: "text" as const,
                 text:
-                  `Showing messages ${offset}-${offset + slice.length - 1} of ${msgs.length}\n\n` +
-                  lines.join("\n\n"),
+                  `Showing messages ${offset}-${offset + slice.length - 1} of ${msgs.length}\n\n` + lines.join("\n\n"),
               },
             ],
           }
@@ -140,35 +138,26 @@ export const layer = Layer.effect(
           model: mdl,
           sessionID: input.sessionID,
           retries: 1,
+          usageKind: "steering",
           messages: [...modelMsgs, { role: "user" as const, content: steerPrompt }],
         })
-        .pipe(
-          Stream.filter(LLMEvent.is.textDelta),
-          Stream.map((e) => e.text),
-          Stream.mkString,
-          Effect.orDie,
-        )
+        .pipe(Auxiliary.text)
 
       const cleaned = text.replace(/<think>[\s\S]*?<\/think>\s*/g, "").trim()
-      log.info("steering result", { text: cleaned.slice(0, 200) })
-
-      if (cleaned === "GOAL_COMPLETE") return { type: "complete", message: cleaned }
-      if (cleaned === "GOAL_BLOCKED") return { type: "blocked", message: cleaned }
-      return { type: "continue", message: cleaned }
+      if (!cleaned || /<\/?think>/.test(cleaned)) return { type: "unavailable" as const, message: "" }
+      if (cleaned === "GOAL_COMPLETE") return { type: "complete" as const, message: cleaned }
+      if (cleaned === "GOAL_BLOCKED") return { type: "blocked" as const, message: cleaned }
+      return { type: "continue" as const, message: cleaned }
     })
 
     return Service.of({
-      steer: (input: SteerInput) => steer(input).pipe(Effect.orDie) as Effect.Effect<SteerResult>,
+      steer: (input) => Auxiliary.recover(steer(input), { type: "unavailable" as const, message: "" }),
     })
   }),
 )
 
 export const defaultLayer = Layer.suspend(() =>
-  layer.pipe(
-    Layer.provide(LLM.defaultLayer),
-    Layer.provide(Agent.defaultLayer),
-    Layer.provide(Provider.defaultLayer),
-  ),
+  layer.pipe(Layer.provide(LLM.defaultLayer), Layer.provide(Agent.defaultLayer), Layer.provide(Provider.defaultLayer)),
 )
 
 export * as Steering from "./steering"

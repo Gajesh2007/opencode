@@ -273,7 +273,7 @@ const lowerToolCall = (part: ToolCallPart): AnthropicToolUseBlock => ({
   type: "tool_use",
   id: part.id,
   name: part.name,
-  input: part.input,
+  input: part.inputError !== undefined ? { value: part.input } : part.input,
 })
 
 const lowerServerToolCall = (part: ToolCallPart): AnthropicServerToolUseBlock => ({

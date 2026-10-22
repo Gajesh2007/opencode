@@ -38,10 +38,11 @@ function validateCredential<A, E, R>(
   effect: Effect.Effect<A, E, R>,
   credential: ServerAuth.DecodedCredentials,
   config: ServerAuth.Info,
+  request: HttpServerRequest.HttpServerRequest,
 ) {
   return Effect.gen(function* () {
     if (!ServerAuth.required(config)) return yield* effect
-    if (!ServerAuth.authorized(credential, config)) {
+    if (!ServerAuth.authorized(credential, config) && !authorizedSessionCookie(request, config)) {
       yield* HttpEffect.appendPreResponseHandler((_request, response) =>
         Effect.succeed(HttpServerResponse.setHeader(response, "www-authenticate", WWW_AUTHENTICATE)),
       )
@@ -79,13 +80,24 @@ function credentialFromURL(url: URL, request: HttpServerRequest.HttpServerReques
   return Effect.succeed(emptyCredential())
 }
 
+// Session cookies issued by pairing links are accepted anywhere the password is.
+function authorizedSessionCookie(request: HttpServerRequest.HttpServerRequest, config: ServerAuth.Info) {
+  const token = request.cookies[ServerAuth.sessionCookieName(request.headers.host)]
+  if (!token) return false
+  // Same-site pages on other ports still send this cookie, so only same-origin requests may use it.
+  const origin = request.headers.origin
+  if (origin !== undefined && URL.parse(origin)?.host !== request.headers.host) return false
+  return ServerAuth.verifySession(token, config)
+}
+
 function validateRawCredential<A, E, R>(
   effect: Effect.Effect<A, E, R>,
   credential: ServerAuth.DecodedCredentials,
   config: ServerAuth.Info,
+  request: HttpServerRequest.HttpServerRequest,
 ) {
   if (!ServerAuth.required(config)) return effect
-  if (!ServerAuth.authorized(credential, config))
+  if (!ServerAuth.authorized(credential, config) && !authorizedSessionCookie(request, config))
     return Effect.succeed(
       HttpServerResponse.empty({
         status: UNAUTHORIZED,
@@ -107,7 +119,7 @@ export const authorizationRouterMiddleware = HttpRouter.middleware()(
         if (isPublicUIPath(request.method, url.pathname)) return yield* effect
         if (hasPtyConnectTicketURL(url)) return yield* effect
         return yield* credentialFromURL(url, request).pipe(
-          Effect.flatMap((credential) => validateRawCredential(effect, credential, config)),
+          Effect.flatMap((credential) => validateRawCredential(effect, credential, config, request)),
         )
       })
   }),
@@ -122,7 +134,7 @@ export const authorizationLayer = Layer.effect(
       Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest
         return yield* credentialFromRequest(request).pipe(
-          Effect.flatMap((credential) => validateCredential(effect, credential, config)),
+          Effect.flatMap((credential) => validateCredential(effect, credential, config, request)),
         )
       }),
     )
@@ -140,7 +152,8 @@ export const v2AuthorizationLayer = Layer.effect(
         return yield* credentialFromRequest(request).pipe(
           Effect.flatMap((credential) =>
             Effect.gen(function* () {
-              if (ServerAuth.authorized(credential, config)) return yield* effect
+              if (ServerAuth.authorized(credential, config) || authorizedSessionCookie(request, config))
+                return yield* effect
               yield* HttpEffect.appendPreResponseHandler((_request, response) =>
                 Effect.succeed(HttpServerResponse.setHeader(response, "www-authenticate", WWW_AUTHENTICATE)),
               )

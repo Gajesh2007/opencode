@@ -41,7 +41,7 @@ const layer = (flags: Partial<RuntimeFlags.Info> = {}) =>
     SessionStatus.defaultLayer,
     Truncate.defaultLayer,
     ToolRegistry.defaultLayer,
-    RuntimeFlags.layer(flags),
+    RuntimeFlags.layer({ experimentalWorkflow: true, ...flags }),
   )
 
 const it = testEffect(layer())

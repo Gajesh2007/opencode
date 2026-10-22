@@ -35,6 +35,14 @@ export interface Tool<Parameters extends ToolSchema<any>, Success extends ToolSc
   readonly parameters: Parameters
   readonly success: Success
   readonly execute?: ToolExecute<Parameters, Success>
+  /**
+   * Dispatch during model streaming. Only opt in read-only handlers that are
+   * safe to run speculatively, independently of other calls in the response.
+   * Calls after an unclassified tool still wait for model completion.
+   * Deferred calls retain normal concurrency: dependent reads/writes must use
+   * separate model rounds, since the runtime cannot infer their dependencies.
+   */
+  readonly execution?: "eager"
   /** @internal */
   readonly _decode: (input: unknown) => Effect.Effect<Schema.Schema.Type<Parameters>, Schema.SchemaError>
   /** @internal */
@@ -61,12 +69,14 @@ type TypedToolConfig = {
   readonly parameters: ToolSchema<any>
   readonly success: ToolSchema<any>
   readonly execute?: ToolExecute<ToolSchema<any>, ToolSchema<any>>
+  readonly execution?: "eager"
 }
 
 type DynamicToolConfig = {
   readonly description: string
   readonly jsonSchema: JsonSchema.JsonSchema
   readonly execute?: (params: unknown, context?: ToolExecuteContext) => Effect.Effect<unknown, ToolFailure>
+  readonly execution?: "eager"
 }
 
 /**
@@ -105,22 +115,26 @@ export function make<Parameters extends ToolSchema<any>, Success extends ToolSch
   readonly parameters: Parameters
   readonly success: Success
   readonly execute: ToolExecute<Parameters, Success>
+  readonly execution?: "eager"
 }): ExecutableTool<Parameters, Success>
 export function make<Parameters extends ToolSchema<any>, Success extends ToolSchema<any>>(config: {
   readonly description: string
   readonly parameters: Parameters
   readonly success: Success
   readonly execute?: undefined
+  readonly execution?: "eager"
 }): Tool<Parameters, Success>
 export function make(config: {
   readonly description: string
   readonly jsonSchema: JsonSchema.JsonSchema
   readonly execute: (params: unknown, context?: ToolExecuteContext) => Effect.Effect<unknown, ToolFailure>
+  readonly execution?: "eager"
 }): AnyExecutableTool
 export function make(config: {
   readonly description: string
   readonly jsonSchema: JsonSchema.JsonSchema
   readonly execute?: undefined
+  readonly execution?: "eager"
 }): AnyTool
 export function make(config: TypedToolConfig | DynamicToolConfig): AnyTool {
   if ("jsonSchema" in config) {
@@ -129,6 +143,7 @@ export function make(config: TypedToolConfig | DynamicToolConfig): AnyTool {
       parameters: Schema.Unknown as ToolSchema<unknown>,
       success: Schema.Unknown as ToolSchema<unknown>,
       execute: config.execute,
+      execution: config.execution,
       _decode: Effect.succeed,
       _encode: Effect.succeed,
       _definition: new ToolDefinition({
@@ -143,6 +158,7 @@ export function make(config: TypedToolConfig | DynamicToolConfig): AnyTool {
     parameters: config.parameters,
     success: config.success,
     execute: config.execute,
+    execution: config.execution,
     _decode: Schema.decodeUnknownEffect(config.parameters),
     _encode: Schema.encodeEffect(config.success),
     _definition: new ToolDefinition({

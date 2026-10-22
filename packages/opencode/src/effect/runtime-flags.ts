@@ -19,6 +19,7 @@ export class Service extends ConfigService.Service<Service>()("@opencode/Runtime
   disableEmbeddedWebUi: bool("OPENCODE_DISABLE_EMBEDDED_WEB_UI"),
   disableExternalSkills: bool("OPENCODE_DISABLE_EXTERNAL_SKILLS"),
   disableLspDownload: bool("OPENCODE_DISABLE_LSP_DOWNLOAD"),
+  disableTiming: bool("OPENCODE_DISABLE_TIMING"),
   skipMigrations: bool("OPENCODE_SKIP_MIGRATIONS"),
   disableClaudeCodePrompt: Config.all({
     broad: bool("OPENCODE_DISABLE_CLAUDE_CODE"),
@@ -51,6 +52,8 @@ export class Service extends ConfigService.Service<Service>()("@opencode/Runtime
   bashDefaultTimeoutMs: positiveInteger("OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS"),
   subagentConcurrency: positiveInteger("OPENCODE_SUBAGENT_CONCURRENCY"),
   experimentalNativeLlm: bool("OPENCODE_EXPERIMENTAL_NATIVE_LLM"),
+  experimentalWorkflow: bool("OPENCODE_EXPERIMENTAL_WORKFLOW"),
+  experimentalMetaAgent: bool("OPENCODE_EXPERIMENTAL_METAAGENT"),
   dangerouslySkipPermissions: bool("OPENCODE_DANGEROUSLY_SKIP_PERMISSIONS"),
   yolo: bool("OPENCODE_YOLO"),
   yoloForever: Config.string("OPENCODE_YOLO_FOREVER").pipe(

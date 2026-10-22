@@ -63,14 +63,21 @@ const inputDelta = (tool: PendingTool, text: string) =>
     text,
   })
 
-const toolCall = (route: string, tool: PendingTool, inputOverride?: string) =>
-  parseToolInput(route, tool.name, inputOverride ?? tool.input).pipe(
+const toolCall = (route: string, tool: PendingTool, raw = tool.input) =>
+  parseToolInput(route, tool.name, raw).pipe(
+    Effect.match({
+      onSuccess: (input) => ({ input }),
+      onFailure: (error) => ({
+        input: raw,
+        inputError: `${error.reason.message}. Retry the tool call with valid JSON arguments.`,
+      }),
+    }),
     Effect.map(
       (input): ToolCall =>
         LLMEvent.toolCall({
           id: tool.id,
           name: tool.name,
-          input,
+          ...input,
           providerExecuted: tool.providerExecuted ? true : undefined,
           providerMetadata: tool.providerMetadata,
         }),

@@ -5,6 +5,13 @@ export type ClientOptions = {
 }
 
 export type Event =
+  | EventTuiPromptAppend
+  | EventTuiCommandExecute
+  | EventTuiToastShow1
+  | EventTuiSessionSelect
+  | EventTuiSubagentDemote
+  | EventServerConnected
+  | EventGlobalDisposed
   | EventServerInstanceDisposed
   | EventFileEdited
   | EventFileWatcherUpdated
@@ -19,13 +26,9 @@ export type Event =
   | EventQuestionReplied
   | EventQuestionRejected
   | EventTodoUpdated
+  | EventGoalUpdated
   | EventSessionStatus
   | EventSessionIdle
-  | EventTuiPromptAppend
-  | EventTuiCommandExecute
-  | EventTuiToastShow1
-  | EventTuiSessionSelect
-  | EventTuiSubagentDemote
   | EventMcpToolsChanged
   | EventMcpBrowserOpenFailed
   | EventCommandExecuted
@@ -76,13 +79,11 @@ export type Event =
   | EventSessionNextCompactionStarted
   | EventSessionNextCompactionDelta
   | EventSessionNextCompactionEnded
-  | EventServerConnected
-  | EventGlobalDisposed
+  | EventCatalogModelUpdated
   | EventModelsDevRefreshed
   | EventAccountAdded
   | EventAccountRemoved
   | EventAccountSwitched
-  | EventCatalogModelUpdated
 
 export type OAuth = {
   type: "oauth"
@@ -118,6 +119,85 @@ export type InvalidRequestError = {
   message: string
   kind?: string
   field?: string
+}
+
+export type EffectHttpApiErrorConflict = {
+  _tag: "Conflict"
+}
+
+export type GlobalInfo = {
+  version: string
+  pid: number
+  urls: Array<string>
+  paths: {
+    tmp: string
+  }
+}
+
+export type EventTuiPromptAppend = {
+  id: string
+  type: "tui.prompt.append"
+  properties: {
+    text: string
+  }
+}
+
+export type EventTuiCommandExecute = {
+  id: string
+  type: "tui.command.execute"
+  properties: {
+    command:
+      | "session.list"
+      | "session.new"
+      | "session.share"
+      | "session.interrupt"
+      | "session.compact"
+      | "session.page.up"
+      | "session.page.down"
+      | "session.line.up"
+      | "session.line.down"
+      | "session.half.page.up"
+      | "session.half.page.down"
+      | "session.first"
+      | "session.last"
+      | "prompt.clear"
+      | "prompt.submit"
+      | "agent.cycle"
+      | string
+  }
+}
+
+export type EventTuiToastShow = {
+  id: string
+  type: "tui.toast.show"
+  properties: {
+    title?: string
+    message: string
+    variant: "info" | "success" | "warning" | "error"
+    duration?: number
+  }
+}
+
+export type EventTuiSessionSelect = {
+  id: string
+  type: "tui.session.select"
+  properties: {
+    /**
+     * Session ID to navigate to
+     */
+    sessionID: string
+  }
+}
+
+export type EventTuiSubagentDemote = {
+  id: string
+  type: "tui.subagent.demote"
+  properties: {
+    /**
+     * Parent session whose in-flight subagent tool calls should be moved to the background
+     */
+    sessionID: string
+  }
 }
 
 export type PermissionRequest = {
@@ -276,6 +356,40 @@ export type Todo = {
   priority: string
 }
 
+export type Goal = {
+  sessionID: string
+  objective: string
+  status: "active" | "completed" | "blocked" | "budget_limited" | "abandoned"
+  tokenBudget?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  tokensUsed: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  costBudget?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  costUsed: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  blockedTurns: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  createdAt?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  usage?: {
+    tokens: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    cost: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    attempts: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    unknownAttempts: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    unknownCosts: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    pricing: "catalog_estimate" | "provider_reported" | "tier_unverified" | "unknown"
+    external: "unknown"
+    coverage: "recorded_attempts_only"
+    auxiliary: "partial"
+  }
+  wholeTaskUsage?: {
+    tokens: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    cost: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    attempts: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    unknownAttempts: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    unknownCosts: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    pricing: "catalog_estimate" | "provider_reported" | "tier_unverified" | "unknown"
+    external: "unknown"
+    coverage: "recorded_attempts_only"
+    auxiliary: "partial"
+  }
+}
+
 export type SessionStatus =
   | {
       type: "idle"
@@ -297,72 +411,6 @@ export type SessionStatus =
   | {
       type: "busy"
     }
-
-export type EventTuiPromptAppend = {
-  id: string
-  type: "tui.prompt.append"
-  properties: {
-    text: string
-  }
-}
-
-export type EventTuiCommandExecute = {
-  id: string
-  type: "tui.command.execute"
-  properties: {
-    command:
-      | "session.list"
-      | "session.new"
-      | "session.share"
-      | "session.interrupt"
-      | "session.compact"
-      | "session.page.up"
-      | "session.page.down"
-      | "session.line.up"
-      | "session.line.down"
-      | "session.half.page.up"
-      | "session.half.page.down"
-      | "session.first"
-      | "session.last"
-      | "prompt.clear"
-      | "prompt.submit"
-      | "agent.cycle"
-      | string
-  }
-}
-
-export type EventTuiToastShow = {
-  id: string
-  type: "tui.toast.show"
-  properties: {
-    title?: string
-    message: string
-    variant: "info" | "success" | "warning" | "error"
-    duration?: number
-  }
-}
-
-export type EventTuiSessionSelect = {
-  id: string
-  type: "tui.session.select"
-  properties: {
-    /**
-     * Session ID to navigate to
-     */
-    sessionID: string
-  }
-}
-
-export type EventTuiSubagentDemote = {
-  id: string
-  type: "tui.subagent.demote"
-  properties: {
-    /**
-     * Parent session whose in-flight subagent tool calls should be moved to the background
-     */
-    sessionID: string
-  }
-}
 
 export type Project = {
   id: string
@@ -483,6 +531,10 @@ export type AssistantMessage = {
   variant?: string
   finish?: string
   provider_resolved?: string
+  provider_response_id?: string
+  service_tier_requested?: string
+  service_tier?: string
+  model_resolved?: string
 }
 
 export type Message = UserMessage | AssistantMessage
@@ -822,6 +874,13 @@ export type GlobalEvent = {
   project?: string
   workspace?: string
   payload:
+    | EventTuiPromptAppend
+    | EventTuiCommandExecute
+    | EventTuiToastShow
+    | EventTuiSessionSelect
+    | EventTuiSubagentDemote
+    | EventServerConnected
+    | EventGlobalDisposed
     | EventServerInstanceDisposed
     | EventFileEdited
     | EventFileWatcherUpdated
@@ -836,13 +895,9 @@ export type GlobalEvent = {
     | EventQuestionReplied
     | EventQuestionRejected
     | EventTodoUpdated
+    | EventGoalUpdated
     | EventSessionStatus
     | EventSessionIdle
-    | EventTuiPromptAppend
-    | EventTuiCommandExecute
-    | EventTuiToastShow
-    | EventTuiSessionSelect
-    | EventTuiSubagentDemote
     | EventMcpToolsChanged
     | EventMcpBrowserOpenFailed
     | EventCommandExecuted
@@ -893,13 +948,11 @@ export type GlobalEvent = {
     | EventSessionNextCompactionStarted
     | EventSessionNextCompactionDelta
     | EventSessionNextCompactionEnded
-    | EventServerConnected
-    | EventGlobalDisposed
+    | EventCatalogModelUpdated
     | EventModelsDevRefreshed
     | EventAccountAdded
     | EventAccountRemoved
     | EventAccountSwitched
-    | EventCatalogModelUpdated
     | SyncEventMessageUpdated
     | SyncEventMessageRemoved
     | SyncEventMessagePartUpdated
@@ -1004,10 +1057,37 @@ export type PermissionConfig =
 
 export type AgentConfig = {
   model?: string
+  workflow?: {
+    /**
+     * The lenses applied to every unit when this agent runs its workflow.
+     */
+    passes: Array<{
+      /**
+       * Name of this lens/pass, e.g. 'security'
+       */
+      name: string
+      /**
+       * The subagent_type to run for this pass
+       */
+      agent: string
+      prompt?: string
+    }>
+    synthesis?: {
+      agent: string
+      prompt?: string
+    }
+    format?: "text" | "findings"
+    instructions?: string
+  }
   variant?: string
+  effort?: "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
   temperature?: number
   top_p?: number
   prompt?: string
+  skills?: Array<string>
+  initialPrompt?: string
+  mcpServers?: Array<string>
+  memory?: "user" | "project" | "local"
   tools?: {
     [key: string]: boolean
   }
@@ -1028,7 +1108,40 @@ export type AgentConfig = {
   [key: string]:
     | unknown
     | string
+    | {
+        /**
+         * The lenses applied to every unit when this agent runs its workflow.
+         */
+        passes: Array<{
+          /**
+           * Name of this lens/pass, e.g. 'security'
+           */
+          name: string
+          /**
+           * The subagent_type to run for this pass
+           */
+          agent: string
+          prompt?: string
+        }>
+        synthesis?: {
+          agent: string
+          prompt?: string
+        }
+        format?: "text" | "findings"
+        instructions?: string
+      }
+    | "low"
+    | "medium"
+    | "high"
+    | "xhigh"
+    | "max"
+    | "ultra"
     | number
+    | Array<string>
+    | Array<string>
+    | "user"
+    | "project"
+    | "local"
     | {
         [key: string]: boolean
       }
@@ -1065,6 +1178,7 @@ export type ProviderConfig = {
     baseURL?: string
     enterpriseUrl?: string
     setCacheKey?: boolean
+    responsesContinuation?: boolean
     /**
      * Timeout in milliseconds for requests to this provider. Default is 300000 (5 minutes). Set to false to disable timeout.
      */
@@ -1344,7 +1458,13 @@ export type Config = {
     primary_tools?: Array<string>
     continue_loop_on_deny?: boolean
     mcp_timeout?: number
+    subagent_concurrency?: number
   }
+}
+
+export type PairingCode = {
+  code: string
+  expires_in: number
 }
 
 export type Model = {
@@ -1410,6 +1530,7 @@ export type Model = {
       }
     }
   }
+  costKnown?: boolean
   limit: {
     context: number
     input?: number
@@ -1679,7 +1800,11 @@ export type Agent = {
     providerID: string
   }
   variant?: string
+  serviceTier?: string
   prompt?: string
+  initialPrompt?: string
+  mcpServers?: Array<string>
+  memory?: "user" | "project" | "local"
   options: {
     [key: string]: unknown
   }
@@ -1819,6 +1944,18 @@ export type ProviderAuthError1 = {
     message?: string
     kind?: string
   }
+}
+
+export type SessionSearchResult = {
+  items: Array<{
+    session: Session
+    match: {
+      type: "title" | "summary" | "message"
+      text: string
+      messageID?: string
+    }
+  }>
+  next?: string
 }
 
 export type NotFoundError = {
@@ -2013,6 +2150,44 @@ export type WorkspaceWarpError = {
 
 export type EffectHttpApiErrorForbidden = {
   _tag: "Forbidden"
+}
+
+export type PairingSession = {
+  token: string
+}
+
+export type Goal1 = {
+  sessionID: string
+  objective: string
+  status: "active" | "completed" | "blocked" | "budget_limited" | "abandoned"
+  tokenBudget?: number | "NaN" | "Infinity" | "-Infinity"
+  tokensUsed: number | "NaN" | "Infinity" | "-Infinity"
+  costBudget?: number | "NaN" | "Infinity" | "-Infinity"
+  costUsed: number | "NaN" | "Infinity" | "-Infinity"
+  blockedTurns: number | "NaN" | "Infinity" | "-Infinity"
+  createdAt?: number | "NaN" | "Infinity" | "-Infinity"
+  usage?: {
+    tokens: number | "NaN" | "Infinity" | "-Infinity"
+    cost: number | "NaN" | "Infinity" | "-Infinity"
+    attempts: number | "NaN" | "Infinity" | "-Infinity"
+    unknownAttempts: number | "NaN" | "Infinity" | "-Infinity"
+    unknownCosts: number | "NaN" | "Infinity" | "-Infinity"
+    pricing: "catalog_estimate" | "provider_reported" | "tier_unverified" | "unknown"
+    external: "unknown"
+    coverage: "recorded_attempts_only"
+    auxiliary: "partial"
+  }
+  wholeTaskUsage?: {
+    tokens: number | "NaN" | "Infinity" | "-Infinity"
+    cost: number | "NaN" | "Infinity" | "-Infinity"
+    attempts: number | "NaN" | "Infinity" | "-Infinity"
+    unknownAttempts: number | "NaN" | "Infinity" | "-Infinity"
+    unknownCosts: number | "NaN" | "Infinity" | "-Infinity"
+    pricing: "catalog_estimate" | "provider_reported" | "tier_unverified" | "unknown"
+    external: "unknown"
+    coverage: "recorded_attempts_only"
+    auxiliary: "partial"
+  }
 }
 
 export type SyncEventMessageUpdated = {
@@ -2547,6 +2722,22 @@ export type SyncEventSessionNextCompactionEnded = {
   }
 }
 
+export type EventServerConnected = {
+  id: string
+  type: "server.connected"
+  properties: {
+    [key: string]: unknown
+  }
+}
+
+export type EventGlobalDisposed = {
+  id: string
+  type: "global.disposed"
+  properties: {
+    [key: string]: unknown
+  }
+}
+
 export type EventServerInstanceDisposed = {
   id: string
   type: "server.instance.disposed"
@@ -2666,6 +2857,15 @@ export type EventTodoUpdated = {
   properties: {
     sessionID: string
     todos: Array<Todo>
+  }
+}
+
+export type EventGoalUpdated = {
+  id: string
+  type: "goal.updated"
+  properties: {
+    sessionID: string
+    goal: Goal
   }
 }
 
@@ -3273,80 +3473,6 @@ export type EventSessionNextCompactionEnded = {
   }
 }
 
-export type EventServerConnected = {
-  id: string
-  type: "server.connected"
-  properties: {
-    [key: string]: unknown
-  }
-}
-
-export type EventGlobalDisposed = {
-  id: string
-  type: "global.disposed"
-  properties: {
-    [key: string]: unknown
-  }
-}
-
-export type EventModelsDevRefreshed = {
-  id: string
-  type: "models-dev.refreshed"
-  properties: {
-    [key: string]: unknown
-  }
-}
-
-export type AccountV2oAuthCredential = {
-  type: "oauth"
-  refresh: string
-  access: string
-  expires: number
-}
-
-export type AccountV2ApiKeyCredential = {
-  type: "api"
-  key: string
-  metadata?: {
-    [key: string]: string
-  }
-}
-
-export type AccountV2Credential = AccountV2oAuthCredential | AccountV2ApiKeyCredential
-
-export type AccountV2Info = {
-  id: string
-  serviceID: string
-  description: string
-  credential: AccountV2Credential
-}
-
-export type EventAccountAdded = {
-  id: string
-  type: "account.added"
-  properties: {
-    account: AccountV2Info
-  }
-}
-
-export type EventAccountRemoved = {
-  id: string
-  type: "account.removed"
-  properties: {
-    account: AccountV2Info
-  }
-}
-
-export type EventAccountSwitched = {
-  id: string
-  type: "account.switched"
-  properties: {
-    serviceID: string
-    from?: string
-    to?: string
-  }
-}
-
 export type ModelV2Info = {
   id: string
   apiID: string
@@ -3450,6 +3576,64 @@ export type EventCatalogModelUpdated = {
   type: "catalog.model.updated"
   properties: {
     model: ModelV2Info
+  }
+}
+
+export type EventModelsDevRefreshed = {
+  id: string
+  type: "models-dev.refreshed"
+  properties: {
+    [key: string]: unknown
+  }
+}
+
+export type AccountV2oAuthCredential = {
+  type: "oauth"
+  refresh: string
+  access: string
+  expires: number
+}
+
+export type AccountV2ApiKeyCredential = {
+  type: "api"
+  key: string
+  metadata?: {
+    [key: string]: string
+  }
+}
+
+export type AccountV2Credential = AccountV2oAuthCredential | AccountV2ApiKeyCredential
+
+export type AccountV2Info = {
+  id: string
+  serviceID: string
+  description: string
+  credential: AccountV2Credential
+}
+
+export type EventAccountAdded = {
+  id: string
+  type: "account.added"
+  properties: {
+    account: AccountV2Info
+  }
+}
+
+export type EventAccountRemoved = {
+  id: string
+  type: "account.removed"
+  properties: {
+    account: AccountV2Info
+  }
+}
+
+export type EventAccountSwitched = {
+  id: string
+  type: "account.switched"
+  properties: {
+    serviceID: string
+    from?: string
+    to?: string
   }
 }
 
@@ -3901,6 +4085,9 @@ export type AuthRemoveResponse = AuthRemoveResponses[keyof AuthRemoveResponses]
 
 export type AuthSetData = {
   body?: Auth
+  headers?: {
+    "if-match"?: string
+  }
   path: {
     providerID: string
   }
@@ -3913,6 +4100,10 @@ export type AuthSetErrors = {
    * BadRequest | InvalidRequestError
    */
   400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * Conflict
+   */
+  409: EffectHttpApiErrorConflict
 }
 
 export type AuthSetError = AuthSetErrors[keyof AuthSetErrors]
@@ -3997,6 +4188,31 @@ export type GlobalHealthResponses = {
 }
 
 export type GlobalHealthResponse = GlobalHealthResponses[keyof GlobalHealthResponses]
+
+export type GlobalInfoData = {
+  body?: never
+  path?: never
+  query?: never
+  url: "/global/info"
+}
+
+export type GlobalInfoErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type GlobalInfoError = GlobalInfoErrors[keyof GlobalInfoErrors]
+
+export type GlobalInfoResponses = {
+  /**
+   * Server identity, connection URLs, and paths
+   */
+  200: GlobalInfo
+}
+
+export type GlobalInfoResponse = GlobalInfoResponses[keyof GlobalInfoResponses]
 
 export type GlobalEventData = {
   body?: never
@@ -4132,6 +4348,35 @@ export type GlobalUpgradeResponses = {
 }
 
 export type GlobalUpgradeResponse = GlobalUpgradeResponses[keyof GlobalUpgradeResponses]
+
+export type ServerPairData = {
+  body?: never
+  path?: never
+  query?: never
+  url: "/api/pair"
+}
+
+export type ServerPairErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * Unauthorized
+   */
+  401: unknown
+}
+
+export type ServerPairError = ServerPairErrors[keyof ServerPairErrors]
+
+export type ServerPairResponses = {
+  /**
+   * Short-lived, single-use pairing code
+   */
+  200: PairingCode
+}
+
+export type ServerPairResponse = ServerPairResponses[keyof ServerPairResponses]
 
 export type EventSubscribeData = {
   body?: never
@@ -5023,6 +5268,75 @@ export type AppAgentsResponses = {
 }
 
 export type AppAgentsResponse = AppAgentsResponses[keyof AppAgentsResponses]
+
+export type AgentSetSubagentModelData = {
+  body?: {
+    agent: string
+    providerID?: string
+    modelID?: string
+    variant?: string
+    serviceTier?: string
+  }
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/agent/subagent-model"
+}
+
+export type AgentSetSubagentModelErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type AgentSetSubagentModelError = AgentSetSubagentModelErrors[keyof AgentSetSubagentModelErrors]
+
+export type AgentSetSubagentModelResponses = {
+  /**
+   * Model override set
+   */
+  200: boolean
+}
+
+export type AgentSetSubagentModelResponse = AgentSetSubagentModelResponses[keyof AgentSetSubagentModelResponses]
+
+export type AgentListSubagentModelsData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/agent/subagent-models"
+}
+
+export type AgentListSubagentModelsErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type AgentListSubagentModelsError = AgentListSubagentModelsErrors[keyof AgentListSubagentModelsErrors]
+
+export type AgentListSubagentModelsResponses = {
+  /**
+   * Current subagent model overrides
+   */
+  200: {
+    [key: string]: {
+      providerID: string
+      modelID: string
+      variant?: string
+      serviceTier?: string
+    }
+  }
+}
+
+export type AgentListSubagentModelsResponse = AgentListSubagentModelsResponses[keyof AgentListSubagentModelsResponses]
 
 export type AppSkillsData = {
   body?: never
@@ -6140,6 +6454,38 @@ export type SessionCreateResponses = {
 
 export type SessionCreateResponse = SessionCreateResponses[keyof SessionCreateResponses]
 
+export type SessionSearchData = {
+  body?: never
+  path?: never
+  query: {
+    directory?: string
+    workspace?: string
+    query: string
+    mode?: "all" | "title"
+    limit?: string
+    cursor?: string
+  }
+  url: "/session/search"
+}
+
+export type SessionSearchErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type SessionSearchError = SessionSearchErrors[keyof SessionSearchErrors]
+
+export type SessionSearchResponses = {
+  /**
+   * A page of matching sessions and text snippets
+   */
+  200: SessionSearchResult
+}
+
+export type SessionSearchResponse = SessionSearchResponses[keyof SessionSearchResponses]
+
 export type SessionStatusData = {
   body?: never
   path?: never
@@ -6278,6 +6624,50 @@ export type SessionUpdateResponses = {
 
 export type SessionUpdateResponse = SessionUpdateResponses[keyof SessionUpdateResponses]
 
+export type SessionWarmData = {
+  body?: {
+    providerID: string
+    modelID: string
+    agent?: string
+    variant?: string
+    serviceTier?: string
+    upstream?: string
+  }
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/warm"
+}
+
+export type SessionWarmErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionWarmError = SessionWarmErrors[keyof SessionWarmErrors]
+
+export type SessionWarmResponses = {
+  /**
+   * Best-effort warm status
+   */
+  200: {
+    connection: "warmed" | "skipped" | "failed"
+    context: "scheduled" | "fresh" | "skipped" | "busy"
+  }
+}
+
+export type SessionWarmResponse = SessionWarmResponses[keyof SessionWarmResponses]
+
 export type SessionChildrenData = {
   body?: never
   path: {
@@ -6345,6 +6735,84 @@ export type SessionTodoResponses = {
 }
 
 export type SessionTodoResponse = SessionTodoResponses[keyof SessionTodoResponses]
+
+export type SessionUsageData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/usage"
+}
+
+export type SessionUsageErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionUsageError = SessionUsageErrors[keyof SessionUsageErrors]
+
+export type SessionUsageResponses = {
+  /**
+   * Recorded session and descendant usage
+   */
+  200: {
+    tokens: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    cost: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    attempts: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    unknownAttempts: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    unknownCosts: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    pricing: "catalog_estimate" | "provider_reported" | "tier_unverified" | "unknown"
+    external: "unknown"
+    coverage: "recorded_attempts_only"
+    auxiliary: "partial"
+  }
+}
+
+export type SessionUsageResponse = SessionUsageResponses[keyof SessionUsageResponses]
+
+export type SessionGoalData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/goal"
+}
+
+export type SessionGoalErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionGoalError = SessionGoalErrors[keyof SessionGoalErrors]
+
+export type SessionGoalResponses = {
+  /**
+   * Active goal or null
+   */
+  200: Goal
+}
+
+export type SessionGoalResponse = SessionGoalResponses[keyof SessionGoalResponses]
 
 export type SessionDiffData = {
   body?: never
@@ -6602,6 +7070,10 @@ export type SessionAbortErrors = {
    * BadRequest | InvalidRequestError
    */
   400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
 }
 
 export type SessionAbortError = SessionAbortErrors[keyof SessionAbortErrors]
@@ -6972,7 +7444,7 @@ export type SessionUnrevertData = {
   query?: {
     directory?: string
     workspace?: string
-    restoreFiles?: boolean
+    restoreFiles?: "true" | "false"
   }
   url: "/session/{sessionID}/unrevert"
 }
@@ -8285,3 +8757,30 @@ export type PtyConnectResponses = {
 }
 
 export type PtyConnectResponse = PtyConnectResponses[keyof PtyConnectResponses]
+
+export type ServerConnectData = {
+  body?: never
+  path: {
+    code: string
+  }
+  query?: never
+  url: "/auth/connect/{code}"
+}
+
+export type ServerConnectErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type ServerConnectError = ServerConnectErrors[keyof ServerConnectErrors]
+
+export type ServerConnectResponses = {
+  /**
+   * Session token usable as the server password
+   */
+  200: PairingSession
+}
+
+export type ServerConnectResponse = ServerConnectResponses[keyof ServerConnectResponses]

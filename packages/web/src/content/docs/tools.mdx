@@ -117,6 +117,20 @@ This tool reads files and returns their contents. It supports reading specific l
 
 ---
 
+### read_many
+
+Read several known text files or line ranges together. Each item has a `filePath`
+and optional `offset` and `limit`. The tool accepts up to 16 items, executes up to
+8 reads concurrently, and returns results in input order. Each read defaults to
+200 lines; the combined output is capped at 50 KiB with explicit truncation
+markers. One failed read does not discard the other results.
+
+`read_many` uses the same `read` permission and external-directory checks as
+`read`. Disabling `read` also disables `read_many`. Use `read` instead for image
+or PDF attachments, or to retrieve a larger omitted range.
+
+---
+
 ### grep
 
 Search file contents using regular expressions.
@@ -131,6 +145,11 @@ Search file contents using regular expressions.
 ```
 
 Fast content search across your codebase. Supports full regex syntax and file pattern filtering.
+
+Set `context` to a number from 1 to 10 to include neighboring lines with each
+match. Contextual search bounds matches, lines and total output, and reports
+incomplete results explicitly. Omit `context` or set it to 0 for the original
+matching-lines-only output.
 
 ---
 

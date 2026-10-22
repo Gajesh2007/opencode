@@ -104,6 +104,25 @@ describe("agent.child-model", () => {
     }),
   )
 
+  it.effect("preserves explicit default tier resets through child inheritance and selection changes", () =>
+    Effect.gen(function* () {
+      for (const selection of [
+        {},
+        { variant: "custom" },
+        { model: "fixture/two" },
+        { current: { ...parent, serviceTier: "default" } },
+        { current: { ...parent, serviceTier: "priority" }, resetModel: true },
+      ]) {
+        const result = yield* ChildModel.resolve({
+          agent,
+          parent: { ...parent, serviceTier: "default" },
+          ...selection,
+        })
+        expect(result.serviceTier).toBe("default")
+      }
+    }),
+  )
+
   it.effect("retains compatible named tiers and upstreams without remapping", () =>
     Effect.gen(function* () {
       const result = yield* ChildModel.resolve({

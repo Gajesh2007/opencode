@@ -211,6 +211,48 @@ describe("file.ripgrep", () => {
     }),
   )
 
+  it.live("searches captured stdin with real regex semantics without opening file targets", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdir((dir) => write(path.join(dir, "unrelated.txt"), "private-only 123"))
+      const result = yield* Ripgrep.use.search({
+        cwd: dir,
+        file: [path.join(dir, "unrelated.txt")],
+        stdin: "first\ncaptured-token 123\nlast\n",
+        pattern: "^captured-[a-z]+ \\d+$",
+      })
+      expect(result.partial).toBe(false)
+      expect(result.items).toHaveLength(1)
+      expect(result.items[0]?.line_number).toBe(2)
+      expect(result.items[0]?.lines.text).toBe("captured-token 123\n")
+      expect((yield* Ripgrep.use.search({ cwd: dir, stdin: "", pattern: "private-only" })).items).toEqual([])
+    }),
+  )
+
+  it.live("preserves context, invalid-regex status, and bounded output for stdin", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdir()
+      const result = yield* Ripgrep.use.search({
+        cwd: dir,
+        stdin: "before\nneedle\nafter\n",
+        pattern: "^needle$",
+        context: 1,
+      })
+      expect(result.items.map((item) => item.line_number)).toEqual([2])
+      expect(result.context?.map((item) => item.line_number)).toEqual([1, 3])
+      const invalid = yield* Ripgrep.use.search({ cwd: dir, stdin: "anything", pattern: "[" })
+      expect(invalid).toEqual(yield* Ripgrep.use.search({ cwd: dir, pattern: "[" }))
+      const large = yield* Ripgrep.use.search({
+        cwd: dir,
+        stdin: "needle\n".repeat(200_000),
+        pattern: "needle",
+        context: 1,
+      })
+      expect(large.truncated).toBe(true)
+      // ripgrep can emit one additional matching line as trailing context.
+      expect(large.items.length).toBeLessThanOrEqual(102)
+    }),
+  )
+
   it.live("files returns empty when glob matches no files", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdir((dir) =>

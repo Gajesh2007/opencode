@@ -98,6 +98,21 @@ describe("transcript", () => {
       expect(result).toBe("## Assistant\n\n")
     })
 
+    test("distinguishes requested tier from provider-confirmed tier and model", () => {
+      const result = formatAssistantHeader(
+        { ...baseMsg, service_tier_requested: "ultrafast", service_tier: "default", model_resolved: "wire-model" },
+        true,
+      )
+      expect(result).toContain("served model: wire-model")
+      expect(result).toContain("ultrafast -> default (downgraded)")
+    })
+
+    test("does not present a requested tier as served without confirmation", () => {
+      const result = formatAssistantHeader({ ...baseMsg, service_tier_requested: "ultrafast" }, true)
+      expect(result).toContain("ultrafast requested, served unknown")
+      expect(result).not.toContain("ultrafast (served)")
+    })
+
     test("handles missing completed time", () => {
       const msg = { ...baseMsg, time: { created: 1000000 } }
       const result = formatAssistantHeader(msg as AssistantMessage, true)

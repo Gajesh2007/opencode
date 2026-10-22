@@ -20,6 +20,8 @@ import { testEffect } from "../lib/effect"
 import { reply, TestLLMServer } from "../lib/llm-server"
 import { SyncEvent } from "@/sync"
 import { EventV2Bridge } from "@/event-v2-bridge"
+import { RuntimeFlags } from "@/effect/runtime-flags"
+import { Steering } from "../../src/session/steering"
 
 void Log.init({ print: false })
 
@@ -55,7 +57,13 @@ const cfg = {
 }
 
 function providerCfg(url: string) {
-  return { ...cfg, provider: { ...cfg.provider, test: { ...cfg.provider.test, options: { ...cfg.provider.test.options, baseURL: url } } } }
+  return {
+    ...cfg,
+    provider: {
+      ...cfg.provider,
+      test: { ...cfg.provider.test, options: { ...cfg.provider.test.options, baseURL: url } },
+    },
+  }
 }
 
 const infra = Layer.mergeAll(NodeFileSystem.layer, CrossSpawnSpawner.defaultLayer)
@@ -75,7 +83,12 @@ const deps = Layer.mergeAll(
 ).pipe(Layer.provideMerge(infra))
 // Use ReasoningReviewer.layer (not defaultLayer) so it shares the mock-configured
 // LLM/Provider/Agent instances rather than building its own.
-const env = Layer.mergeAll(TestLLMServer.layer, deps, ReasoningReviewer.layer.pipe(Layer.provide(deps)))
+const env = Layer.mergeAll(
+  TestLLMServer.layer,
+  deps,
+  Steering.layer.pipe(Layer.provide(deps)),
+  ReasoningReviewer.layer.pipe(Layer.provide(deps), Layer.provide(RuntimeFlags.layer({ experimentalMetaAgent: true }))),
+)
 
 const it = testEffect(env)
 
@@ -132,3 +145,73 @@ it.live("session.reasoning-reviewer redirects on a correction", () =>
     { config: (url) => providerCfg(url) },
   ),
 )
+
+for (const text of ["", "<think>unfinished", "x".repeat(8_193)]) {
+  it.live(`session.reasoning-reviewer does not approve invalid output (${text.length} chars)`, () =>
+    provideTmpdirServer(
+      ({ llm }) =>
+        Effect.gen(function* () {
+          const reviewer = yield* ReasoningReviewer.Service
+          const fallback = yield* (yield* Provider.Service).getModel(ref.providerID, ref.modelID)
+          yield* llm.push(reply().text(text).stop())
+          const chat = yield* (yield* Session.Service).create({})
+          expect(yield* reviewer.review(reviewInput(chat.id, fallback, "reasoning"))).toEqual({
+            type: "unavailable",
+            message: "",
+          })
+        }),
+      { config: (url) => providerCfg(url) },
+    ),
+  )
+}
+
+it.live("disabled reviewer skips direct calls without contacting provider", () =>
+  provideTmpdirServer(
+    ({ llm }) =>
+      Effect.gen(function* () {
+        const fallback = yield* (yield* Provider.Service).getModel(ref.providerID, ref.modelID)
+        const chat = yield* (yield* Session.Service).create({})
+        const verdict = yield* Effect.gen(function* () {
+          return yield* (yield* ReasoningReviewer.Service).review(reviewInput(chat.id, fallback, "reasoning"))
+        }).pipe(
+          Effect.provide(
+            Layer.fresh(ReasoningReviewer.layer.pipe(Layer.provide(deps), Layer.provide(RuntimeFlags.layer()))),
+          ),
+        )
+        expect(verdict).toEqual({ type: "skipped", message: "" })
+        expect(yield* llm.calls).toBe(0)
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
+for (const [text, type] of [
+  ["", "unavailable"],
+  ["GOAL_COMPLETE", "complete"],
+  ["GOAL_BLOCKED", "blocked"],
+  ["Keep testing", "continue"],
+] as const) {
+  it.live(`steering distinguishes ${type} from unavailable`, () =>
+    provideTmpdirServer(
+      ({ llm }) =>
+        Effect.gen(function* () {
+          const chat = yield* (yield* Session.Service).create({})
+          yield* llm.push(reply().text(text).stop())
+          const verdict = yield* (yield* Steering.Service).steer({
+            sessionID: chat.id,
+            ...ref,
+            goal: {
+              sessionID: chat.id,
+              objective: "Fix tests",
+              status: "active",
+              tokensUsed: 0,
+              costUsed: 0,
+              blockedTurns: 0,
+            },
+          })
+          expect(verdict.type).toBe(type)
+        }),
+      { config: (url) => providerCfg(url) },
+    ),
+  )
+}

@@ -1,4 +1,4 @@
-import { Cause, Context, Effect, Layer, Random } from "effect"
+import { Cause, Clock, Context, Effect, Layer, Option, Random } from "effect"
 import {
   FetchHttpClient,
   Headers,
@@ -24,6 +24,7 @@ import {
 } from "../schema"
 
 export interface Interface {
+  readonly preconnect?: (request: HttpClientRequest.HttpClientRequest) => Effect.Effect<void, LLMError>
   readonly execute: (
     request: HttpClientRequest.HttpClientRequest,
   ) => Effect.Effect<HttpClientResponse.HttpClientResponse, LLMError>
@@ -33,8 +34,13 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/LL
 
 const BODY_LIMIT = 16_384
 const MAX_RETRIES = 2
+/** Per-call retry budget; set to zero for requests that must not be replayed. */
+export const RetryLimit = Context.Reference<number>("@opencode/LLM/RequestExecutor/RetryLimit", {
+  defaultValue: () => MAX_RETRIES,
+})
 const BASE_DELAY_MS = 500
 const MAX_DELAY_MS = 10_000
+const TOKEN_QUOTA_DELAY_MS = 60_000
 const REDACTED = "<redacted>"
 
 // One source of truth for what counts as a sensitive name across headers,
@@ -89,18 +95,18 @@ const requestId = (headers: Record<string, string>) => {
 
 const retryableStatus = (status: number) => status === 429 || status === 503 || status === 504 || status === 529
 
-const retryAfterMs = (headers: Record<string, string>) => {
-  const millis = Number(headers["retry-after-ms"])
-  if (Number.isFinite(millis)) return Math.max(0, millis)
+const retryAfterMs = (headers: Record<string, string>, now: number) => {
+  const millis = headers["retry-after-ms"]?.trim()
+  if (millis && Number.isFinite(Number(millis)) && Number(millis) >= 0) return Number(millis)
 
-  const value = headers["retry-after"]
+  const value = headers["retry-after"]?.trim()
   if (!value) return undefined
 
-  const seconds = Number(value)
-  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000)
+  const delay = Number(value) * 1000
+  if (!Number.isNaN(delay)) return Number.isFinite(delay) && delay >= 0 ? delay : undefined
 
   const date = Date.parse(value)
-  if (!Number.isNaN(date)) return Math.max(0, date - Date.now())
+  if (Number.isFinite(date) && date > now) return date - now
   return undefined
 }
 
@@ -239,12 +245,22 @@ const statusReason = (input: {
     return new AuthenticationReason({ message: input.message, kind: "insufficient-permissions", http: input.http })
   }
   if (input.status === 429) {
-    if (/insufficient[-_\s]?quota|quota[-_\s]?exceeded/i.test(body)) {
+    // A rolling token quota is capacity throttling, not an exhausted account balance.
+    const tokenQuota = /\b(?:(?:input|output)[-_\s]*)?(?:tpm|tokens?(?:[-_\s]+per[-_\s]+|\/)min(?:ute)?)\b/i.test(body)
+    if (
+      /insufficient[-_\s]?quota|billing[-_\s]+(?:hard[-_\s]+)?limit|payment[-_\s]+required|spend(?:ing)?[-_\s]+limit/i.test(
+        body,
+      ) ||
+      /(?:insufficient|exhausted|depleted)[-_\s]+(?:your[-_\s]+)?(?:credits?|balance)|(?:credits?|balance)[^.\n]{0,32}(?:exhausted|depleted|too[-_\s]+low|insufficient)/i.test(
+        body,
+      ) ||
+      (!tokenQuota && /quota[-_\s]?exceeded/i.test(body))
+    ) {
       return new QuotaExceededReason({ message: input.message, http: input.http })
     }
     return new RateLimitReason({
       message: input.message,
-      retryAfterMs: input.retryAfterMs,
+      retryAfterMs: input.retryAfterMs ?? (tokenQuota ? TOKEN_QUOTA_DELAY_MS : undefined),
       rateLimit: input.rateLimit,
       http: input.http,
     })
@@ -270,7 +286,7 @@ const statusError =
       if (response.status < 400) return response
       const body = yield* response.text.pipe(Effect.catch(() => Effect.void))
       const headers = normalizedHeaders(response.headers)
-      const retryAfter = retryAfterMs(headers)
+      const retryAfter = retryAfterMs(headers, yield* Clock.currentTimeMillis)
       const rateLimit = rateLimitDetails(headers, retryAfter)
       const details = responseBody(body, request)
       return yield* new LLMError({
@@ -332,7 +348,7 @@ const toHttpError = (redactedNames: ReadonlyArray<string | RegExp>) => (error: u
 }
 
 const retryDelay = (error: LLMError, attempt: number) => {
-  if (error.retryAfterMs !== undefined) return Effect.succeed(Math.min(error.retryAfterMs, MAX_DELAY_MS))
+  if (error.retryAfterMs !== undefined) return Effect.succeed(error.retryAfterMs)
   return Random.nextBetween(
     Math.min(BASE_DELAY_MS * 2 ** attempt * 0.8, MAX_DELAY_MS),
     Math.min(BASE_DELAY_MS * 2 ** attempt * 1.2, MAX_DELAY_MS),
@@ -364,11 +380,39 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient> = Layer.e
           .pipe(Effect.mapError(toHttpError(redactedNames)), Effect.flatMap(statusError(request, redactedNames)))
       })
     return Service.of({
-      execute: (request) => retryStatusFailures(executeOnce(request)),
+      execute: (request) => Effect.flatMap(RetryLimit, (retries) => retryStatusFailures(executeOnce(request), retries)),
     })
   }),
 )
 
-export const defaultLayer = layer.pipe(Layer.provide(FetchHttpClient.layer))
+export const defaultLayer = Layer.effect(
+  Service,
+  Effect.gen(function* () {
+    const executor = yield* Service
+    const context = yield* Effect.context<never>()
+    return Service.of({
+      ...executor,
+      preconnect: (request) =>
+        Effect.gen(function* () {
+          const fetch = yield* FetchHttpClient.Fetch
+          // Custom fetch and fetch options may select a different network path.
+          if (fetch !== globalThis.fetch || typeof fetch.preconnect !== "function") return
+          if (Option.isSome(yield* Effect.serviceOption(FetchHttpClient.RequestInit))) return
+          if (!URL.canParse(request.url)) return
+          const url = new URL(request.url)
+          if (url.protocol !== "http:" && url.protocol !== "https:") return
+          yield* Effect.try({
+            try: () => fetch.preconnect(url.origin),
+            catch: () =>
+              new LLMError({
+                module: "RequestExecutor",
+                method: "preconnect",
+                reason: new TransportReason({ message: "HTTP preconnect failed" }),
+              }),
+          })
+        }).pipe(Effect.updateContext((input) => Context.merge(context, input))),
+    })
+  }),
+).pipe(Layer.provide(layer), Layer.provide(FetchHttpClient.layer))
 
 export * as RequestExecutor from "./executor"

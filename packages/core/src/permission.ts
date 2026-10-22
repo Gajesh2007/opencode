@@ -37,7 +37,7 @@ export function merge(...rulesets: Ruleset[]): Ruleset {
 export function disabled(tools: string[], ruleset: Ruleset): Set<string> {
   return new Set(
     tools.filter((tool) => {
-      const permission = EDIT_TOOLS.includes(tool) ? "edit" : tool
+      const permission = EDIT_TOOLS.includes(tool) ? "edit" : tool === "read_many" ? "read" : tool
       const rule = ruleset.findLast((rule) => Wildcard.match(permission, rule.permission))
       return rule?.pattern === "*" && rule.action === "deny"
     }),

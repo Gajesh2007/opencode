@@ -29,6 +29,7 @@ import { sessionTitle } from "@/utils/session-title"
 import { pathKey } from "@/utils/path-key"
 import { messageAgentColor } from "@/utils/agent"
 import { sessionPermissionRequest } from "@/pages/session/composer/session-request-tree"
+import { RecentChats } from "@/pages/home/recent-chats"
 
 const USE_HOME_DESIGN = import.meta.env.VITE_OPENCODE_CHANNEL !== "prod"
 const HOME_SESSION_LIMIT = 15
@@ -173,7 +174,7 @@ function HomeDesign() {
   }
 
   return (
-    <div class="mx-auto grid w-full h-full max-w-[1080px] gap-8 px-6 pb-16 lg:grid-cols-[280px_minmax(0,720px)]">
+    <div class="mx-auto grid w-full h-full max-w-[1080px] gap-8 overflow-y-auto px-4 pb-16 sm:px-6 lg:grid-cols-[280px_minmax(0,720px)] lg:overflow-hidden">
       <HomeProjectColumn
         projects={projects()}
         selected={selectedProject()?.worktree}
@@ -185,15 +186,16 @@ function HomeDesign() {
       />
 
       <section
-        class="min-w-0 flex-1 flex flex-col overflow-y-hidden pt-12"
+        class="min-w-0 flex-1 flex flex-col gap-6 pt-6 lg:min-h-0 lg:overflow-y-auto lg:pt-12"
         aria-label={language.t("sidebar.project.recentSessions")}
       >
+        <RecentChats />
         <HomeSessionSearch
           value={state.search}
           placeholder={language.t("home.sessions.search.placeholder")}
           onInput={(value) => setState("search", value)}
         />
-        <div class="mt-3 overflow-auto flex-1">
+        <div class="mt-3">
           <div class="pt-3 flex flex-col gap-6">
             <Show when={!sessionLoad.isLoading} fallback={<HomeSessionSkeleton label={language.t("common.loading")} />}>
               <Show
@@ -238,7 +240,10 @@ function HomeProjectColumn(props: {
   language: ReturnType<typeof useLanguage>
 }) {
   return (
-    <aside class="flex min-w-0 flex-col lg:pt-[52px]" aria-label={props.language.t("home.projects")}>
+    <aside
+      class="order-2 flex min-w-0 flex-col lg:order-none lg:pt-[52px]"
+      aria-label={props.language.t("home.projects")}
+    >
       <div class="flex h-7 min-w-0 items-center justify-between pl-3">
         <div class={HOME_SECTION_LABEL}>{props.language.t("home.projects")}</div>
         <IconButtonV2
@@ -513,8 +518,8 @@ function LegacyHome() {
   }
 
   return (
-    <div class="mx-auto mt-55 w-full md:w-auto px-4">
-      <Logo class="md:w-xl opacity-12" />
+    <div class="mx-auto mt-8 w-full max-w-xl px-4 pb-12 md:mt-55">
+      <Logo class="w-full opacity-12" />
       <Button
         size="large"
         variant="ghost"
@@ -529,6 +534,9 @@ function LegacyHome() {
         />
         {server.name}
       </Button>
+      <div class="mt-8 min-w-0">
+        <RecentChats />
+      </div>
       <Switch>
         <Match when={sync.data.project.length > 0}>
           <div class="mt-20 w-full flex flex-col gap-4">

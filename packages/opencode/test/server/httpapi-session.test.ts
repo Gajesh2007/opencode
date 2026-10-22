@@ -16,6 +16,7 @@ import { Server } from "../../src/server/server"
 import * as HttpSessionError from "../../src/server/routes/instance/httpapi/handlers/session-errors"
 import { SessionPaths } from "../../src/server/routes/instance/httpapi/groups/session"
 import { Session } from "@/session/session"
+import type { SessionSearch } from "@/session/search"
 import { SessionRunState } from "@/session/run-state"
 import { MessageID, PartID, SessionID, type SessionID as SessionIDType } from "../../src/session/schema"
 import { MessageV2 } from "../../src/session/message-v2"
@@ -226,6 +227,44 @@ afterEach(async () => {
 })
 
 describe("session HttpApi", () => {
+  it.instance("searches persisted folder content and validates pagination", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const headers = { "x-opencode-directory": test.directory }
+      const session = yield* createSession({ title: "Unrelated title" })
+      yield* createTextMessage(session.id, "persisted content needle")
+      yield* Session.use.setArchived({ sessionID: session.id, time: 1 })
+      const result = yield* requestJson<SessionSearch.Result>(`${SessionPaths.search}?query=needle`, { headers })
+      expect(result.items.map((x) => x.session.id)).toEqual([session.id])
+      expect(result.items[0].match.text).toBe("persisted content needle")
+      const titles = yield* requestJson<SessionSearch.Result>(`${SessionPaths.search}?query=needle&mode=title`, {
+        headers,
+      })
+      expect(titles.items).toEqual([])
+      const newer = yield* createSession({ title: "needle newer" })
+      const page = yield* requestJson<SessionSearch.Result>(`${SessionPaths.search}?query=needle&limit=1`, { headers })
+      expect(page.items.map((x) => x.session.id)).toEqual([newer.id])
+      expect(page.next).toBe(newer.id)
+      yield* Session.use.touch(session.id)
+      const remaining = yield* requestJson<SessionSearch.Result>(
+        `${SessionPaths.search}?query=needle&limit=1&cursor=${page.next}`,
+        { headers },
+      )
+      expect(remaining.items.map((x) => x.session.id)).toEqual([session.id])
+      expect(remaining.next).toBeUndefined()
+      for (const query of [
+        "query=needle&limit=0",
+        "query=needle&limit=101",
+        "query=needle&cursor=invalid",
+        "query=needle&mode=invalid",
+        "limit=1",
+      ]) {
+        const response = yield* request(`${SessionPaths.search}?${query}`, { headers })
+        expect(response.status).toBe(400)
+      }
+    }),
+  )
+
   it.effect("maps busy sessions to public session busy errors", () =>
     Effect.gen(function* () {
       const sessionID = SessionID.descending()
@@ -289,8 +328,8 @@ describe("session HttpApi", () => {
           headers,
           method: "POST",
         })
-        expect(abort.status).toBe(200)
-        expect(yield* responseJson(abort)).toBe(true)
+        expect(abort.status).toBe(404)
+        expect(yield* responseJson(abort)).toEqual(missingSessionBody)
 
         const session = yield* createSession({ title: "missing message" })
         const missingMessage = MessageID.ascending()

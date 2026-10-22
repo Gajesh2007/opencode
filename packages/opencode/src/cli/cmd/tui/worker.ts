@@ -13,6 +13,7 @@ import { AppRuntime } from "@/effect/app-runtime"
 import { ensureProcessMetadata } from "@opencode-ai/core/util/opencode-process"
 import { Effect } from "effect"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
+import { createWorkerFetchHandlers } from "./worker-fetch"
 
 ensureProcessMetadata("worker")
 
@@ -45,27 +46,15 @@ GlobalBus.on("event", (event) => {
 })
 
 let server: Awaited<ReturnType<typeof Server.listen>> | undefined
+const requests = createWorkerFetchHandlers((request) => {
+  const auth = ServerAuth.header()
+  if (auth && !request.headers.has("authorization")) request.headers.set("Authorization", auth)
+  return Server.Default().app.fetch(request)
+})
 
 export const rpc = {
-  async fetch(input: { url: string; method: string; headers: Record<string, string>; body?: string }) {
-    const headers = { ...input.headers }
-    const auth = ServerAuth.header()
-    if (auth && !headers["authorization"] && !headers["Authorization"]) {
-      headers["Authorization"] = auth
-    }
-    const request = new Request(input.url, {
-      method: input.method,
-      headers,
-      body: input.body,
-    })
-    const response = await Server.Default().app.fetch(request)
-    const body = await response.text()
-    return {
-      status: response.status,
-      headers: Object.fromEntries(response.headers.entries()),
-      body,
-    }
-  },
+  fetch: requests.fetch,
+  cancelFetch: requests.cancelFetch,
   snapshot() {
     const result = writeHeapSnapshot("server.heapsnapshot")
     return result
@@ -90,6 +79,7 @@ export const rpc = {
   },
   async shutdown() {
     Log.Default.info("worker shutting down")
+    requests.shutdown()
 
     await InstanceRuntime.disposeAllInstances()
     if (server) await server.stop(true)

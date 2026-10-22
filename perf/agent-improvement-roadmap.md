@@ -2,9 +2,18 @@
 
 Consolidated research, product ideas, implementation candidates, and planning estimates from the October 2026 discussion.
 
+**October 8 P1 update:** [P1 implementation and folder search](p1-completion-2026-10-08.md)
+records the subsequent timing, pruning, task-benchmark, auxiliary safety,
+workflow-outcome, and execution-accounting work. Workflow and meta-agent now
+require separate explicit opt-ins and are off by default. The historical
+unresolved-item descriptions below are retained as audit context, not current
+implementation status; the new report includes verification limits.
+
 **Status:** planning document with a working-tree implementation checkpoint below. P1/P2 repairs, F1 per-child selection, the separately requested goal-interruption pause, and the user-approved Bedrock no-output retry policy have been verified locally. This document does not authorize deployment or publication of session material.
 
 **Evidence cutoff:** October 6, 2026, 23:30 UTC. Source references describe the checkout inspected during the discussion, including existing uncommitted work; they are not proof of what every historical session executed.
+
+**October 8 mitigation:** The workflow tool, built-in review orchestrator, and `/review` command now require `OPENCODE_EXPERIMENTAL_WORKFLOW=true`. The general experimental flag does not enable them. Declarative agent workflow instructions and permission grants are inactive without this opt-in. Task, spawn, and batch remain available. This gates exposure while P3/P4 remain unresolved; it does not repair those defects.
 
 Private session IDs, message excerpts, and the full evidence ledger remain in the separate local audit. This repository-facing report retains aggregate observations and sanitized examples, not raw transcripts or credentials.
 

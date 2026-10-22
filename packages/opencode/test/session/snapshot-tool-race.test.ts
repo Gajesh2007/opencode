@@ -296,3 +296,68 @@ it.live("tool execution produces non-empty session diff (snapshot race)", () =>
     { git: true, config: providerCfg },
   ),
 )
+
+it.live("tool loop carries each step-finish tree into the next step", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ dir, llm }) {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const summary = yield* SessionSummary.Service
+
+      const session = yield* sessions.create({
+        title: "snapshot carry test",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      const file = path.join(dir, "carry.txt")
+      const next = path.join(dir, "next.txt")
+      yield* llm.tool("bash", { command: `echo carried > ${file}`, description: "write file" })
+      // The mock answers instantly, so this write races the previous step's
+      // background snapshot unless mutating tools wait for it.
+      yield* llm.tool("bash", { command: `echo next > ${next}`, description: "write another file" })
+      yield* llm.tool("bash", { command: "echo read-only", description: "no changes" })
+      yield* llm.text("done")
+
+      yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "write then inspect" }],
+      })
+      yield* prompt.loop({ sessionID: session.id })
+
+      const steps = (yield* MessageV2.filterCompactedEffect(session.id))
+        .filter((m) => m.info.role === "assistant")
+        .map((m) => ({
+          start: m.parts.find((p): p is MessageV2.StepStartPart => p.type === "step-start")?.snapshot,
+          finish: m.parts.find((p): p is MessageV2.StepFinishPart => p.type === "step-finish")?.snapshot,
+          patch: m.parts.find((p): p is MessageV2.PatchPart => p.type === "patch"),
+        }))
+      expect(steps).toHaveLength(4)
+      for (const step of steps) {
+        expect(step.start).toBeTruthy()
+        expect(step.finish).toBeTruthy()
+      }
+      // Each write step records exactly its own change: the next step's tool
+      // never ran before the previous step's snapshot was captured.
+      expect(steps[0].start).not.toBe(steps[0].finish)
+      expect(steps[0].patch?.files).toEqual([file.replaceAll("\\", "/")])
+      expect(steps[1].patch?.files).toEqual([next.replaceAll("\\", "/")])
+      // Continuations start from the previous step-finish tree instead of re-scanning.
+      expect(steps[1].start).toBe(steps[0].finish)
+      expect(steps[2].start).toBe(steps[1].finish)
+      expect(steps[3].start).toBe(steps[2].finish)
+      // A read-only step leaves the tree unchanged and records no patch.
+      expect(steps[2].finish).toBe(steps[1].finish)
+      expect(steps[2].patch).toBeUndefined()
+
+      let diff: Array<{ file?: string }> = []
+      for (let i = 0; i < 50; i++) {
+        diff = yield* summary.diff({ sessionID: session.id })
+        if (diff.length > 1) break
+        yield* Effect.sleep("100 millis")
+      }
+      expect(diff.map((item) => item.file).toSorted()).toEqual(["carry.txt", "next.txt"])
+    }),
+    { git: true, config: providerCfg },
+  ),
+)

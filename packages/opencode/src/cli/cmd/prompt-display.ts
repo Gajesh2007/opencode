@@ -35,6 +35,10 @@ export function displayCharAt(value: string, offset: number) {
   }
 }
 
+export function isSessionMention(value: string) {
+  return /^@(?:codex|opencode):/.test(value)
+}
+
 export function mentionTriggerIndex(value: string, offset = promptOffsetWidth(value)) {
   const text = displaySlice(value, 0, offset)
   const index = text.lastIndexOf("@")
@@ -42,6 +46,7 @@ export function mentionTriggerIndex(value: string, offset = promptOffsetWidth(va
 
   const before = index === 0 ? undefined : text[index - 1]
   const query = text.slice(index)
+  if (isSessionMention(query)) return
   if ((before === undefined || /\s/.test(before)) && !/\s/.test(query)) {
     return promptOffsetWidth(text.slice(0, index))
   }

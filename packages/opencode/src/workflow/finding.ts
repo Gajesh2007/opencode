@@ -53,25 +53,22 @@ export function severityWeight(severity: Severity): number {
 }
 
 const decodeFinding = Schema.decodeUnknownOption(Finding)
+const decodeJson = Schema.decodeUnknownOption(Schema.UnknownFromJsonString)
 
 /**
  * Tolerantly extract findings from an LLM's (possibly chatty) text output.
  * Pulls the first JSON array (or fenced ```json block, or a lone object),
  * fills missing severity/lens/file from `defaults`, validates each item against
- * the schema, and silently drops anything malformed. Returns [] on no match.
+ * the schema, and reports incomplete output while retaining valid findings.
  */
-export function parseFindings(text: string, defaults?: { file?: string; lens?: string }): Finding[] {
+export function parseFindings(text: string, defaults?: { file?: string; lens?: string }) {
   const raw = extractJson(text)
-  if (raw === undefined) return []
-  // JSON.parse on untrusted LLM text is the one place a try/catch is warranted.
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw)
-  } catch {
-    return []
+  const parsed = raw === undefined ? Option.none() : decodeJson(raw)
+  if (Option.isNone(parsed)) {
+    return { findings: [], status: text.trim() ? ("malformed" as const) : ("empty" as const), rejected: 0 }
   }
-  const items = Array.isArray(parsed) ? parsed : [parsed]
-  return items.flatMap((item) => {
+  const items = Array.isArray(parsed.value) ? parsed.value : [parsed.value]
+  const findings = items.flatMap((item) => {
     if (typeof item !== "object" || item === null) return []
     const withDefaults = {
       severity: "info",
@@ -82,6 +79,12 @@ export function parseFindings(text: string, defaults?: { file?: string; lens?: s
     const decoded = decodeFinding(withDefaults)
     return Option.isSome(decoded) ? [decoded.value] : []
   })
+  const rejected = items.length - findings.length
+  return {
+    findings,
+    status: rejected === 0 ? ("valid" as const) : findings.length ? ("partial" as const) : ("malformed" as const),
+    rejected,
+  }
 }
 
 /** Collapse findings that point at the same file:line:title, merging the lenses that reported them. */
@@ -98,7 +101,11 @@ export function dedupe(findings: Finding[]): AggregatedFinding[] {
     const sources = [...new Set(members.map((member) => member.lens))]
     const confidence = members.reduce<number | undefined>(
       (max, member) =>
-        member.confidence === undefined ? max : max === undefined ? member.confidence : Math.max(max, member.confidence),
+        member.confidence === undefined
+          ? max
+          : max === undefined
+            ? member.confidence
+            : Math.max(max, member.confidence),
       base.confidence,
     )
     return { ...base, confidence, id: hashKey(key), sources, agreement: sources.length }
@@ -145,6 +152,8 @@ function extractJson(text: string): string | undefined {
   const arrayStart = candidate.indexOf("[")
   const arrayEnd = candidate.lastIndexOf("]")
   if (arrayStart !== -1 && arrayEnd > arrayStart) return candidate.slice(arrayStart, arrayEnd + 1)
+  // Never mistake a complete object inside a truncated array for complete output.
+  if (arrayStart !== -1) return undefined
   const objectStart = candidate.indexOf("{")
   const objectEnd = candidate.lastIndexOf("}")
   if (objectStart !== -1 && objectEnd > objectStart) return candidate.slice(objectStart, objectEnd + 1)
@@ -154,6 +163,6 @@ function extractJson(text: string): string | undefined {
 // Deterministic, dependency-free djb2 hash → base36, for stable finding ids.
 function hashKey(key: string): string {
   let hash = 5381
-  for (let i = 0; i < key.length; i++) hash = (((hash << 5) + hash) + key.charCodeAt(i)) | 0
+  for (let i = 0; i < key.length; i++) hash = ((hash << 5) + hash + key.charCodeAt(i)) | 0
   return (hash >>> 0).toString(36)
 }

@@ -29,6 +29,7 @@ const syntheticFinish: Part = {
 }
 const call: Part = { type: "tool-call", toolCallId: "call-1", toolName: "lookup", input: '{"query":"offline"}' }
 const prompt: LanguageModelV3CallOptions = { prompt: [{ role: "user", content: [{ type: "text", text: "offline" }] }] }
+const tokenQuota = "quota input-tpm:123456789012:openai.gpt-6.1-sol (InputTokens) exceeded by 119936.47698333337"
 
 // Drain promise continuations without advancing either real or virtual deadlines.
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve))
@@ -183,12 +184,15 @@ const progress: Part[] = [
 
 describe("Bedrock raw pre-output retry deadlines", () => {
   test.each(["before headers", "metadata only", "metadata with fetch-like abort"])(
-    "10/20/40 second windows %s, with separate backoff",
+    "retries %s twice, then leaves the final request waiting",
     async (phase) => {
       const stops: number[] = []
-      const h = harness((params) => {
+      const headers = Promise.withResolvers<Result>()
+      const final = source()
+      const h = harness((params, attempt) => {
         if (phase === "before headers") {
-          return new Promise<Result>((_, reject) => {
+          return new Promise<Result>((resolve, reject) => {
+            if (attempt === 3) void headers.promise.then(resolve, reject)
             params.abortSignal?.addEventListener(
               "abort",
               () => {
@@ -199,9 +203,12 @@ describe("Bedrock raw pre-output retry deadlines", () => {
             )
           })
         }
-        const raw = source(async () => {
-          stops.push(h.time.api.now())
-        })
+        const raw =
+          attempt === 3
+            ? final
+            : source(async () => {
+                stops.push(h.time.api.now())
+              })
         if (phase === "metadata with fetch-like abort")
           params.abortSignal?.addEventListener(
             "abort",
@@ -218,29 +225,47 @@ describe("Bedrock raw pre-output retry deadlines", () => {
       const done = outcome(h.start().then(collect))
       await flush()
 
-      for (const [index, window] of [10_000, 20_000, 40_000].entries()) {
+      for (const [index, window] of [10_000, 20_000].entries()) {
         expect(h.calls).toHaveLength(index + 1)
         await h.time.advance(window - 1)
         expect(stops).toHaveLength(index)
         await h.time.advance(1)
         expect(stops).toHaveLength(index + 1)
         expect(h.calls).toHaveLength(index + 1)
-        if (index === 2) break
         await h.time.advance(99)
         expect(h.calls).toHaveLength(index + 1)
         await h.time.advance(1)
       }
 
-      expect((await done).error).toBeInstanceOf(BedrockRetry.BedrockRetryError)
-      expect(h.state.error).toMatchObject({ reason: "deadline" })
+      await h.time.advance(100_000)
+      expect(h.calls[2].params.abortSignal?.aborted).toBe(false)
+      expect(h.state.error).toBeUndefined()
       expect(h.state.attempts).toBe(3)
-      expect(h.state.unknownUsageAttempts).toBe(3)
+      expect(h.state.unknownUsageAttempts).toBe(2)
       expect(h.state.committed).toBe(false)
       expect(h.calls.map((call) => call.at)).toEqual([0, 10_100, 30_200])
-      expect(stops).toEqual([10_000, 30_100, 70_200])
-      await h.time.advance(100_000)
+      expect(stops).toEqual([10_000, 30_100])
       expect(h.calls).toHaveLength(3)
       expect(h.time.pending()).toEqual([])
+
+      headers.resolve({ stream: final.stream })
+      final.push({ type: "text-start", id: "late" })
+      final.push({ type: "text-delta", id: "late", delta: "late answer" })
+      final.push(finish)
+      final.close()
+      expect((await done).value).toEqual([
+        ...(phase === "before headers"
+          ? []
+          : [
+              { type: "stream-start" as const, warnings: [] },
+              { type: "response-metadata" as const, id: "attempt-3" },
+            ]),
+        { type: "text-start", id: "late" },
+        { type: "text-delta", id: "late", delta: "late answer" },
+        finish,
+      ])
+      expect(h.state.error).toBeUndefined()
+      expect(h.state.committed).toBe(true)
     },
   )
 
@@ -261,7 +286,7 @@ describe("Bedrock raw pre-output retry deadlines", () => {
     expect(h.calls).toHaveLength(1)
   })
 
-  test("the 75 second wall budget includes Retry-After and clips a later attempt window", async () => {
+  test("the retry wall budget does not terminate the final request", async () => {
     const h = harness((params, attempt) => {
       if (attempt === 1)
         return Promise.reject(
@@ -288,30 +313,313 @@ describe("Bedrock raw pre-output retry deadlines", () => {
     await h.time.advance(19_799)
     expect(h.calls[2].params.abortSignal?.aborted).toBe(false)
     await h.time.advance(1)
-    expect((await done).error).toBeInstanceOf(BedrockRetry.BedrockRetryError)
     expect(h.time.api.now()).toBe(75_000)
     expect(h.state.attempts).toBe(3)
-    expect(h.calls[2].params.abortSignal?.aborted).toBe(true)
+    expect(h.calls[2].params.abortSignal?.aborted).toBe(false)
     await h.time.advance(100_000)
+    expect(h.calls).toHaveLength(3)
+    expect(h.time.pending()).toEqual([])
+
+    const error = new DOMException("caller stopped", "AbortError")
+    h.caller.abort(error)
+    expect((await done).error).toBe(error)
+    expect(h.state.error).toBe(error)
+    expect(h.calls[2].params.abortSignal?.aborted).toBe(true)
+    expect(h.time.pending()).toEqual([])
+  })
+
+  test("a late final provider error survives asynchronous teardown", async () => {
+    const failure = new APICallError({
+      message: "Access denied",
+      url: "https://offline.invalid",
+      requestBodyValues: {},
+      statusCode: 403,
+      isRetryable: false,
+    })
+    const final = source(() => new Promise<void>((resolve) => h.time.api.setTimeout(resolve, 5)))
+    const h = harness(async (_params, attempt) => {
+      if (attempt === 3) return { stream: final.stream }
+      const raw = source()
+      raw.close()
+      return { stream: raw.stream }
+    })
+    const done = outcome(h.start().then(collect))
+    await flush()
+    await h.time.advance(100_200)
+    final.push({ type: "error", error: failure })
+    await flush()
+    await h.time.advance(5)
+    expect((await done).error).toBe(failure)
+    expect(h.state.error).toBe(failure)
     expect(h.calls).toHaveLength(3)
     expect(h.time.pending()).toEqual([])
   })
 
-  test("empty completions share the same three wire-attempt budget", async () => {
-    const h = harness(async () => {
+  test.each([429, 503])("preserves the final %i provider error after retries", async (statusCode) => {
+    const failures = Array.from(
+      { length: 3 },
+      (_, attempt) =>
+        new APICallError({
+          message: `Provider failure ${attempt + 1}`,
+          url: "https://offline.invalid",
+          requestBodyValues: {},
+          statusCode,
+          responseHeaders: { "retry-after-ms": "0" },
+          isRetryable: true,
+        }),
+    )
+    const h = harness(async (_params, attempt) => {
+      throw failures[attempt - 1]
+    })
+    const done = outcome(h.start())
+    await flush()
+    await h.time.advance(200)
+    expect((await done).error).toBe(failures[2])
+    expect(h.state.error).toBe(failures[2])
+    expect(h.calls).toHaveLength(3)
+    expect(h.time.pending()).toEqual([])
+  })
+
+  test.each(["setup", "before output", "after output"])(
+    "preserves non-Error provider messages during %s",
+    async (phase) => {
+      const failure = { message: "Provider rejected the request" }
       const raw = source()
-      raw.push({ type: "stream-start", warnings: [] })
+      const h = harness(async () => {
+        if (phase === "setup") throw failure
+        return { stream: raw.stream }
+      })
+      const done = outcome(h.start().then(collect))
+      if (phase === "after output") {
+        raw.push({ type: "text-start", id: "text" })
+        await flush()
+      }
+      if (phase !== "setup") raw.error(failure)
+      expect((await done).error).toMatchObject({ message: failure.message, cause: failure })
+      expect(h.state.error?.message).toBe(failure.message)
+      expect(h.calls).toHaveLength(1)
+      expect(h.time.pending()).toEqual([])
+    },
+  )
+
+  test.each(["authoritative", "synthetic", "missing"])(
+    "accepts an empty final response with %s finish",
+    async (ending) => {
+      const h = harness(async (_params, attempt) => {
+        const raw = source()
+        raw.push({ type: "stream-start", warnings: [] })
+        raw.push({ type: "response-metadata", id: `attempt-${attempt}` })
+        if (ending !== "missing") raw.push(ending === "authoritative" ? finish : syntheticFinish)
+        raw.close()
+        return {
+          stream: raw.stream,
+          request: { body: `request-${attempt}` },
+          response: { headers: { attempt: `${attempt}` } },
+        }
+      })
+      const done = outcome(h.start().then(async (result) => ({ ...result, parts: await collect(result) })))
+      await flush()
+      await h.time.advance(200)
+      expect((await done).value).toMatchObject({
+        request: { body: "request-3" },
+        response: { headers: { attempt: "3" } },
+        parts: [
+          { type: "stream-start", warnings: [] },
+          { type: "response-metadata", id: "attempt-3" },
+          ...(ending === "missing" ? [] : [ending === "authoritative" ? finish : syntheticFinish]),
+        ],
+      })
+      expect(h.state.error).toBeUndefined()
+      expect(h.state.attempts).toBe(3)
+      expect(h.state.committed).toBe(false)
+      expect(h.state.unknownUsageAttempts).toBe(ending === "authoritative" ? 0 : 3)
+      expect(h.calls.map((call) => call.at)).toEqual([0, 100, 200])
+      expect(h.time.pending()).toEqual([])
+    },
+  )
+})
+
+describe("Bedrock per-minute token quotas", () => {
+  test.each(["setup", "stream", "body"] as const)("waits for token capacity reported during %s", async (phase) => {
+    const failure =
+      phase === "body"
+        ? new APICallError({
+            message: "Too Many Requests",
+            url: "https://offline.invalid",
+            requestBodyValues: {},
+            statusCode: 429,
+            isRetryable: false,
+            responseBody: JSON.stringify({ error: { code: "quota_exceeded", message: tokenQuota } }),
+          })
+        : new Error(phase === "setup" ? tokenQuota : tokenQuota.replace("input-tpm", "output-tpm"))
+    const h = harness(async (_params, attempt) => {
+      if (attempt === 1 && phase !== "stream") throw failure
+      const raw = source()
+      if (attempt === 1) {
+        raw.push({ type: "response-metadata", id: "rejected" })
+        raw.push({ type: "error", error: failure })
+        raw.close()
+        return { stream: raw.stream }
+      }
+      raw.push({ type: "text-start", id: "answer" })
+      raw.push({ type: "text-delta", id: "answer", delta: "retried" })
       raw.push(finish)
       raw.close()
       return { stream: raw.stream }
     })
     const done = outcome(h.start().then(collect))
     await flush()
-    await h.time.advance(200)
-    expect((await done).error).toBeInstanceOf(BedrockRetry.BedrockRetryError)
-    expect(h.state.error).toMatchObject({ reason: "empty" })
-    expect(h.state.attempts).toBe(3)
-    expect(h.calls.map((call) => call.at)).toEqual([0, 100, 200])
+    expect(h.calls).toHaveLength(1)
+    expect(h.time.pending()).toEqual([60_100])
+    await h.time.advance(60_099)
+    expect(h.calls).toHaveLength(1)
+    await h.time.advance(1)
+    expect((await done).value).toEqual([
+      { type: "text-start", id: "answer" },
+      { type: "text-delta", id: "answer", delta: "retried" },
+      finish,
+    ])
+    expect(h.calls.map((call) => call.at)).toEqual([0, 60_100])
+    expect(h.state).toMatchObject({ attempts: 2, committed: true, error: undefined })
+    expect(h.time.pending()).toEqual([])
+  })
+
+  const hints: { headers: Record<string, string>; delay: number }[] = [
+    { headers: { "Retry-After": "12" }, delay: 12_100 },
+    { headers: { "Retry-After-Ms": "3500", "Retry-After": "30" }, delay: 3600 },
+    { headers: { "Retry-After": "Thu, 01 Jan 2026 00:00:20 GMT" }, delay: 20_100 },
+  ]
+  test.each(hints)("honors quota retry headers: $headers", async ({ headers, delay }) => {
+    const failure = new APICallError({
+      message: tokenQuota,
+      url: "https://offline.invalid",
+      requestBodyValues: {},
+      statusCode: 429,
+      responseHeaders: headers,
+    })
+    const h = harness(async (_params, attempt) => {
+      if (attempt === 1) throw failure
+      const raw = source()
+      raw.push({ type: "text-start", id: "answer" })
+      raw.push(finish)
+      raw.close()
+      return { stream: raw.stream }
+    })
+    const done = outcome(h.start().then(collect))
+    await flush()
+    await h.time.advance(delay - 1)
+    expect(h.calls).toHaveLength(1)
+    await h.time.advance(1)
+    expect((await done).error).toBeUndefined()
+    expect(h.calls.map((call) => call.at)).toEqual([0, delay])
+    expect(h.time.pending()).toEqual([])
+  })
+
+  test("preserves the latest quota error when another minute cannot fit in the dispatch budget", async () => {
+    const failures = [new Error(tokenQuota), new Error(tokenQuota.replace("input-tpm", "output-tpm"))]
+    const h = harness(async (_params, attempt) => {
+      throw failures[attempt - 1]
+    })
+    const done = outcome(h.start())
+    await flush()
+    await h.time.advance(60_100)
+    expect((await done).error).toBe(failures[1])
+    expect(h.state.error).toBe(failures[1])
+    expect(h.calls).toHaveLength(2)
+    expect(h.time.pending()).toEqual([])
+  })
+
+  test("preserves the quota error when Retry-After cannot fit in the dispatch budget", async () => {
+    const failure = new APICallError({
+      message: tokenQuota,
+      url: "https://offline.invalid",
+      requestBodyValues: {},
+      statusCode: 429,
+      responseHeaders: { "retry-after": "80" },
+    })
+    const h = harness(async () => {
+      throw failure
+    })
+    expect((await outcome(h.start())).error).toBe(failure)
+    expect(h.state.error).toBe(failure)
+    expect(h.calls).toHaveLength(1)
+    expect(h.time.pending()).toEqual([])
+  })
+
+  test.each(["insufficient_quota", "Credit balance is too low", "billing_hard_limit_reached"])(
+    "does not retry permanent quota: %s",
+    async (message) => {
+      const failure = new APICallError({
+        message: "Too Many Requests",
+        url: "https://offline.invalid",
+        requestBodyValues: {},
+        statusCode: 429,
+        isRetryable: true,
+        responseBody: JSON.stringify({ error: { message: `${message}: ${tokenQuota}` } }),
+      })
+      const h = harness(async () => {
+        throw failure
+      })
+      const done = outcome(h.start())
+      await flush()
+      expect(h.time.pending()).toEqual([])
+      expect((await done).error).toBe(failure)
+      expect(h.calls).toHaveLength(1)
+    },
+  )
+
+  test("caller cancellation interrupts the minute backoff without redispatch", async () => {
+    const h = harness(async () => {
+      throw new Error(tokenQuota)
+    })
+    const done = outcome(h.start())
+    await flush()
+    await h.time.advance(30_000)
+    const reason = new DOMException("caller stopped", "AbortError")
+    h.caller.abort(reason)
+    expect((await done).error).toBe(reason)
+    await h.time.advance(100_000)
+    expect(h.calls).toHaveLength(1)
+    expect(h.time.pending()).toEqual([])
+  })
+
+  test("a quota error after real SDK tool execution cannot replay the tool", async () => {
+    const raw = source()
+    const executed = Promise.withResolvers<void>()
+    const executions: unknown[] = []
+    const h = harness(async () => ({ stream: raw.stream }))
+    const result = streamText({
+      model: wrapLanguageModel({
+        model: h.model,
+        middleware: {
+          specificationVersion: "v3",
+          wrapStream: ({ model, params }) => BedrockRetry.stream({ model, params, state: h.state, clock: h.time.api }),
+        },
+      }),
+      prompt: "offline quota after tool commitment",
+      maxRetries: 0,
+      tools: {
+        lookup: tool({
+          inputSchema: z.object({ query: z.string() }),
+          execute: async (input) => {
+            executions.push(input)
+            executed.resolve()
+            return "found"
+          },
+        }),
+      },
+    })
+    const consumed = result.consumeStream({ onError: () => {} })
+    raw.push({ type: "stream-start", warnings: [] })
+    raw.push(call)
+    await executed.promise
+    const failure = new Error(tokenQuota)
+    raw.error(failure)
+    await consumed
+    await h.time.advance(100_000)
+    expect(h.state).toMatchObject({ attempts: 1, committed: true, error: failure })
+    expect(executions).toEqual([{ query: "offline" }])
+    expect(h.calls).toHaveLength(1)
     expect(h.time.pending()).toEqual([])
   })
 })

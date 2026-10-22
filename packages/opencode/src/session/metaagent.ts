@@ -4,6 +4,7 @@ import { Effect, Layer, Context, Schema } from "effect"
 import { Database } from "@/storage/db"
 import { eq } from "drizzle-orm"
 import { MetaAgentTable } from "./session.sql"
+import { RuntimeFlags } from "@/effect/runtime-flags"
 
 // Per-session configuration for the metacognition layer: a thin reviewer ("meta
 // agent") that grades the model's reasoning after each step against a base prompt
@@ -33,6 +34,10 @@ export const DEFAULT_MODEL: ModelRef = {
 }
 export const DEFAULT_EFFORT: Effort = "medium"
 
+export class DisabledError extends Schema.TaggedErrorClass<DisabledError>()("MetaAgentDisabledError", {
+  message: Schema.String,
+}) {}
+
 export interface Interface {
   readonly get: (sessionID: SessionID) => Effect.Effect<Info | undefined>
   readonly set: (input: {
@@ -41,8 +46,8 @@ export interface Interface {
     basePrompt?: string
     model?: ModelRef
     effort?: Effort
-  }) => Effect.Effect<Info>
-  readonly clear: (sessionID: SessionID) => Effect.Effect<void>
+  }) => Effect.Effect<Info, DisabledError>
+  readonly clear: (sessionID: SessionID) => Effect.Effect<void, DisabledError>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionMetaAgent") {}
@@ -63,7 +68,9 @@ function rowToInfo(row: typeof MetaAgentTable.$inferSelect): Info {
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
+    const flags = yield* RuntimeFlags.Service
     const get: Interface["get"] = Effect.fn("MetaAgent.get")(function* (sessionID) {
+      if (!flags.experimentalMetaAgent) return undefined
       const row = yield* Effect.sync(() =>
         Database.use((db) => db.select().from(MetaAgentTable).where(eq(MetaAgentTable.session_id, sessionID)).get()),
       )
@@ -74,6 +81,9 @@ export const layer = Layer.effect(
     // Merge semantics: only the provided fields change; the rest are preserved.
     // Setting any field activates the meta agent unless `enabled:false` is passed.
     const set: Interface["set"] = Effect.fn("MetaAgent.set")(function* (input) {
+      if (!flags.experimentalMetaAgent) {
+        return yield* new DisabledError({ message: "Meta-agent requires OPENCODE_EXPERIMENTAL_METAAGENT=true" })
+      }
       const existing = yield* get(input.sessionID)
       const now = Date.now()
       const merged: Info = {
@@ -104,6 +114,9 @@ export const layer = Layer.effect(
     })
 
     const clear: Interface["clear"] = Effect.fn("MetaAgent.clear")(function* (sessionID) {
+      if (!flags.experimentalMetaAgent) {
+        return yield* new DisabledError({ message: "Meta-agent requires OPENCODE_EXPERIMENTAL_METAAGENT=true" })
+      }
       yield* Effect.sync(() =>
         Database.use((db) => db.delete(MetaAgentTable).where(eq(MetaAgentTable.session_id, sessionID)).run()),
       )
@@ -113,6 +126,6 @@ export const layer = Layer.effect(
   }),
 )
 
-export const defaultLayer = layer
+export const defaultLayer = layer.pipe(Layer.provide(RuntimeFlags.defaultLayer))
 
 export * as MetaAgent from "./metaagent"

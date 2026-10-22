@@ -1,4 +1,4 @@
-import { Clock, Effect, Fiber, Stream, type FileSystem } from "effect"
+import { Cause, Clock, Effect, Exit, Fiber, Stream, type FileSystem } from "effect"
 import os from "os"
 import * as Tool from "./tool"
 import path from "path"
@@ -445,6 +445,8 @@ export const ShellTool = Tool.define(
       let expired = false
       let aborted = false
       let published = 0
+      let started = false
+      let received = false
 
       yield* ctx.metadata({
         metadata: {
@@ -453,13 +455,27 @@ export const ShellTool = Tool.define(
         },
       })
 
-      const code: number | null = yield* Effect.scoped(
+      const execution = Effect.scoped(
         Effect.gen(function* () {
+          started = true
+          ctx.timing?.start()
           const handle = yield* spawner.spawn(cmd(input.shell, input.command, input.cwd, input.env))
 
           const reader = yield* Effect.forkScoped(
             Stream.runForEach(
-              Stream.decodeText(handle.all),
+              Stream.decodeText(
+                ctx.timing
+                  ? handle.all.pipe(
+                      Stream.tap((chunk) =>
+                        Effect.sync(() => {
+                          if (received || !chunk.byteLength) return
+                          received = true
+                          ctx.timing?.firstOutput()
+                        }),
+                      ),
+                    )
+                  : handle.all,
+              ),
               Effect.fnUntraced(function* (chunk) {
                 // A single read can contain megabytes. Bound the retained tail even then.
                 const suffix = chunk.slice(-keep)
@@ -546,6 +562,28 @@ export const ShellTool = Tool.define(
 
           return exit.kind === "exit" ? exit.code : null
         }),
+      )
+      // Observe the exit after the process and reader finalizers finish.
+      const code: number | null = yield* (
+        ctx.timing
+          ? execution.pipe(
+              Effect.onExit((exit) =>
+                Effect.sync(() => {
+                  if (!started) return
+                  ctx.timing?.end({
+                    exitCode: Exit.isSuccess(exit) ? exit.value : undefined,
+                    status: expired
+                      ? "timeout"
+                      : aborted || (Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause))
+                        ? "interrupted"
+                        : Exit.isFailure(exit) || exit.value !== 0
+                          ? "error"
+                          : "completed",
+                  })
+                }),
+              ),
+            )
+          : execution
       ).pipe(Effect.orDie)
 
       const meta: string[] = []

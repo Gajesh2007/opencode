@@ -1,7 +1,7 @@
 import * as Tool from "./tool"
 import DESCRIPTION from "./workflow.txt"
 import { Agent } from "../agent/agent"
-import { childToolOverrides } from "../agent/child-session"
+import { childResult, childToolOverrides } from "../agent/child-session"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import { SubagentLimit } from "../agent/subagent-limit"
 import { Session } from "@/session/session"
@@ -10,8 +10,9 @@ import { MessageV2 } from "../session/message-v2"
 import { parseFindings, dedupe, rank, type AggregatedFinding } from "../workflow/finding"
 import type { TaskPromptOps } from "./task"
 import { EffectBridge } from "@/effect/bridge"
+import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Global } from "@opencode-ai/core/global"
-import { Effect, Schema } from "effect"
+import { Cause, Effect, Schema } from "effect"
 import * as nodePath from "node:path"
 import * as nodeFs from "node:fs"
 
@@ -73,8 +74,10 @@ type CellResult = {
   unit: string
   pass: string
   agent: string
-  sessionID: SessionID
+  sessionID?: SessionID
   text: string
+  status: "completed" | "empty" | "malformed" | "partial" | "cancelled" | "error"
+  findings?: ReturnType<typeof parseFindings>["findings"]
   error?: string
 }
 
@@ -84,6 +87,8 @@ type CellLive = {
   pass: string
   status: "pending" | "running" | "done" | "error"
   findings?: number
+  outcome?: CellResult["status"]
+  error?: string
 }
 
 export const WorkflowTool = Tool.define(
@@ -92,11 +97,16 @@ export const WorkflowTool = Tool.define(
     const agent = yield* Agent.Service
     const sessions = yield* Session.Service
     const limit = yield* SubagentLimit.Service
+    const flags = yield* RuntimeFlags.Service
 
     const run = Effect.fn("WorkflowTool.execute")(function* (
       params: Schema.Schema.Type<typeof Parameters>,
       ctx: Tool.Context,
     ) {
+      if (!flags.experimentalWorkflow) {
+        return error("workflow requires OPENCODE_EXPERIMENTAL_WORKFLOW=true")
+      }
+      if (ctx.abort.aborted) return yield* Effect.interrupt
       if (params.units.length === 0) return error("workflow received no units to process")
       if (params.passes.length === 0) return error("workflow received no passes to run")
       const cellCount = params.units.length * params.passes.length
@@ -176,6 +186,7 @@ export const WorkflowTool = Tool.define(
         title: string
         prompt: string
       }) {
+        if (ctx.abort.aborted) return yield* Effect.interrupt
         const info = agentInfos.get(input.agent)!
         const child = yield* sessions.create({
           parentID: ctx.sessionID,
@@ -187,22 +198,33 @@ export const WorkflowTool = Tool.define(
           }),
         })
         children.add(child.id)
-        const parts = yield* ops.resolvePromptParts(input.prompt)
-        const result = yield* limit.withPermit(
-          ops.prompt({
-            messageID: MessageID.ascending(),
-            sessionID: child.id,
-            model: info.model ?? parentModel,
-            agent: info.name,
-            variant: info.variant ?? parentUserModel?.variant,
-            serviceTier: info.serviceTier ?? parentUserModel?.serviceTier,
-            upstream: parentUserModel?.upstream,
-            tools: childToolOverrides({ agent: info }),
-            parts,
-          }),
+        const outcome = yield* Effect.gen(function* () {
+          const parts = yield* ops.resolvePromptParts(input.prompt)
+          const result = yield* limit.withPermit(
+            ops.prompt({
+              messageID: MessageID.ascending(),
+              sessionID: child.id,
+              model: info.model ?? parentModel,
+              agent: info.name,
+              variant: info.variant ?? parentUserModel?.variant,
+              serviceTier: info.serviceTier ?? parentUserModel?.serviceTier,
+              upstream: parentUserModel?.upstream,
+              tools: childToolOverrides({ agent: info }),
+              parts,
+            }),
+          )
+          return childResult(result)
+        }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.succeed({
+              text: "",
+              status: Cause.hasInterruptsOnly(cause) ? ("cancelled" as const) : ("error" as const),
+              error: Cause.pretty(cause),
+            }),
+          ),
         )
         children.delete(child.id)
-        return { sessionID: child.id, text: result.parts.findLast((p) => p.type === "text")?.text ?? "" }
+        return { sessionID: child.id, ...outcome }
       })
 
       const cells = params.units
@@ -231,8 +253,7 @@ export const WorkflowTool = Tool.define(
               unit: cell.unit.id,
               pass: cell.pass.name,
               agent: cell.pass.agent,
-              sessionID: res.sessionID,
-              text: res.text,
+              ...res,
             }),
           ),
           Effect.catchCause(
@@ -241,21 +262,31 @@ export const WorkflowTool = Tool.define(
                 unit: cell.unit.id,
                 pass: cell.pass.name,
                 agent: cell.pass.agent,
-                sessionID: SessionID.make("aborted"),
                 text: "",
-                error: causeText(cause),
+                status: Cause.hasInterruptsOnly(cause) ? "cancelled" : "error",
+                error: Cause.pretty(cause),
               }),
           ),
         )
+        if (params.format === "findings") {
+          const parsed = parseFindings(result.text, { file: cell.unit.id, lens: cell.pass.name })
+          result.findings = parsed.findings
+          if (result.status === "completed" && parsed.status !== "valid") {
+            result.status = parsed.status
+            result.error =
+              parsed.status === "partial"
+                ? `${parsed.rejected} malformed finding(s) discarded`
+                : "No valid findings result received"
+          }
+        }
         completed += 1
-        const findings =
-          params.format === "findings" && !result.error
-            ? parseFindings(result.text, { file: cell.unit.id, lens: cell.pass.name }).length
-            : undefined
+        const findings = result.findings?.length
         cellStatus[cell.index] = {
           unit: cell.unit.id,
           pass: cell.pass.name,
           status: result.error ? "error" : "done",
+          outcome: result.status,
+          error: result.error,
           ...(findings !== undefined ? { findings } : {}),
         }
         yield* emitProgress()
@@ -267,7 +298,9 @@ export const WorkflowTool = Tool.define(
 
       const work = Effect.gen(function* () {
         const results = yield* Effect.forEach(cells, runCell, { concurrency })
+        if (ctx.abort.aborted) return yield* Effect.interrupt
         const errors = results.filter((r) => r.error)
+        const coverage = coverageReport(results)
         const runDir = nodePath.join(
           Global.Path.data,
           "workflow",
@@ -278,14 +311,27 @@ export const WorkflowTool = Tool.define(
           params.format === "findings"
             ? yield* buildFindingsSynthesis(results, runDir)
             : buildTextSynthesis(results, runDir)
+        writeArtifact(nodePath.join(runDir, "outcomes.json"), JSON.stringify(results, null, 2))
 
-        const report = params.synthesis
+        const synthesis = params.synthesis
           ? yield* runAgent({
               agent: params.synthesis.agent,
               title: `synthesis: ${params.description}`,
-              prompt: `${params.synthesis.prompt}\n\n${synthesisInput.prompt}`,
-            }).pipe(Effect.map((r) => r.text))
-          : synthesisInput.fallback
+              prompt: `${params.synthesis.prompt}\n\n${coverage}\n\n${synthesisInput.prompt}`,
+            })
+          : undefined
+        if (ctx.abort.aborted) return yield* Effect.interrupt
+        const synthesisError =
+          synthesis && synthesis.status !== "completed"
+            ? `Synthesis incomplete (${synthesis.status}): ${synthesis.error}`
+            : undefined
+        const fallback =
+          errors.length && synthesisInput.fallback === "No findings."
+            ? "No valid findings were recovered; coverage is incomplete."
+            : synthesisInput.fallback
+        const report = [coverage, synthesisError, synthesis?.text, !synthesis || synthesisError ? fallback : undefined]
+          .filter(Boolean)
+          .join("\n\n")
 
         writeArtifact(nodePath.join(runDir, "report.md"), report)
 
@@ -307,6 +353,8 @@ export const WorkflowTool = Tool.define(
           ...baseMeta,
           completed: cellCount,
           failed: errors.length,
+          incomplete: errors.length,
+          ...(synthesis ? { synthesis: synthesis.status } : {}),
           phase: "done" as const,
           cellStatus: cellStatus.slice(0, DISPLAY_CELLS),
           ...(synthesisInput.findings !== undefined ? { findings: synthesisInput.findings } : {}),
@@ -340,7 +388,7 @@ export const WorkflowTool = Tool.define(
 /** Findings mode: parse each cell's JSON, dedupe + rank deterministically, persist, and build a bounded synth prompt. */
 function buildFindingsSynthesis(results: CellResult[], runDir: string) {
   return Effect.sync(() => {
-    const all = results.flatMap((r) => parseFindings(r.text, { file: r.unit, lens: r.pass }))
+    const all = results.flatMap((r) => r.findings ?? [])
     const ranked = rank(dedupe(all))
     writeArtifact(nodePath.join(runDir, "findings.json"), JSON.stringify(ranked, null, 2))
 
@@ -368,7 +416,7 @@ function buildTextSynthesis(results: CellResult[], _runDir: string) {
   const sections: string[] = []
   let total = 0
   for (const r of results) {
-    if (r.error || !r.text.trim()) continue
+    if (!r.text.trim()) continue
     const block = `### ${r.unit} — ${r.pass}\n${r.text.trim()}`
     if (total + block.length > SYNTH_TEXT_LIMIT) {
       sections.push(
@@ -426,9 +474,19 @@ function error(message: string) {
   return { title: "workflow", metadata: {}, output: message }
 }
 
-function causeText(cause: unknown) {
-  if (cause instanceof Error) return cause.message
-  return String(cause)
+function coverageReport(results: CellResult[]) {
+  const incomplete = results.filter((r) => r.status !== "completed")
+  if (!incomplete.length) return `Coverage: complete (${results.length}/${results.length} cells).`
+  return [
+    `Coverage: INCOMPLETE (${results.length - incomplete.length}/${results.length} cells complete). This is not a clean review.`,
+    ...incomplete
+      .slice(0, DISPLAY_CELLS)
+      .map((r) => `- ${r.unit} / ${r.pass}: ${r.status}${r.error ? ` (${r.error})` : ""}`),
+    ...(incomplete.length > DISPLAY_CELLS
+      ? [`${incomplete.length - DISPLAY_CELLS} additional incomplete cells; see outcomes.json.`]
+      : []),
+    "Retained findings and text from incomplete cells are partial evidence, not completed coverage.",
+  ].join("\n")
 }
 
 function slugify(input: string) {

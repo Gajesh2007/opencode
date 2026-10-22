@@ -46,7 +46,11 @@ export interface Interface {
   readonly init: () => Effect.Effect<void>
   readonly cleanup: () => Effect.Effect<void>
   readonly track: () => Effect.Effect<string | undefined>
-  readonly patch: (hash: string) => Effect.Effect<Patch>
+  /**
+   * Files changed since `hash`. When `to` is a tree just returned by `track()`,
+   * the two trees are compared directly instead of re-staging the worktree.
+   */
+  readonly patch: (hash: string, to?: string) => Effect.Effect<Patch>
   readonly restore: (snapshot: string) => Effect.Effect<void>
   readonly revert: (patches: Patch[]) => Effect.Effect<void>
   readonly diff: (hash: string) => Effect.Effect<string>
@@ -303,12 +307,23 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | AppProce
             )
           })
 
-          const patch = Effect.fnUntraced(function* (hash: string) {
+          const patch = Effect.fnUntraced(function* (hash: string, to?: string) {
+            // Identical trees cannot differ; skip the lock and every subprocess.
+            if (to !== undefined && to === hash) return { hash, files: [] }
             return yield* locked(
               Effect.gen(function* () {
-                yield* add()
+                // A caller-supplied tree already reflects a fresh add(); staging again
+                // would repeat the same worktree scan on the step critical path.
+                if (to === undefined) yield* add()
                 const result = yield* git(
-                  [...quote, ...args(["diff", "--cached", "--no-ext-diff", "--name-only", hash, "--", "."])],
+                  [
+                    ...quote,
+                    ...args(
+                      to === undefined
+                        ? ["diff", "--cached", "--no-ext-diff", "--name-only", hash, "--", "."]
+                        : ["diff", "--no-ext-diff", "--name-only", hash, to, "--", "."],
+                    ),
+                  ],
                   {
                     cwd: state.directory,
                   },
@@ -736,8 +751,8 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | AppProce
         track: Effect.fn("Snapshot.track")(function* () {
           return yield* InstanceState.useEffect(state, (s) => s.track())
         }),
-        patch: Effect.fn("Snapshot.patch")(function* (hash: string) {
-          return yield* InstanceState.useEffect(state, (s) => s.patch(hash))
+        patch: Effect.fn("Snapshot.patch")(function* (hash: string, to?: string) {
+          return yield* InstanceState.useEffect(state, (s) => s.patch(hash, to))
         }),
         restore: Effect.fn("Snapshot.restore")(function* (snapshot: string) {
           return yield* InstanceState.useEffect(state, (s) => s.restore(snapshot))

@@ -135,7 +135,29 @@ for (const entry of [
     expectedRegion: "us-east-1",
     serviceTier: undefined,
   })),
+  ...["us.", "global."].map((prefix) => ({
+    name: `OpenAI preserves the ${prefix}Sol 6.1 ultrafast runtime alias`,
+    npm: "@ai-sdk/openai",
+    id: `${prefix}openai.gpt-6.1-sol-ultrafast`,
+    apiID: `${prefix}openai.gpt-6.1-sol`,
+    api: "https://bedrock-runtime.${AWS_REGION}.amazonaws.com/openai/v1",
+    region: "us-east-1",
+    env: "us-west-2",
+    expectedRegion: "us-east-1",
+    serviceTier: "ultrafast",
+  })),
+  ...["", "us.", "global."].map((prefix) => ({
+    name: `Mantle preserves the ${prefix}Sol 6.1 ultrafast tier`,
+    npm: "@ai-sdk/amazon-bedrock/mantle",
+    id: `${prefix}openai.gpt-6.1-sol`,
+    apiID: `${prefix}openai.gpt-6.1-sol`,
+    region: "us-east-1",
+    env: "us-west-2",
+    expectedRegion: "us-east-1",
+    serviceTier: "ultrafast",
+  })),
 ]) {
+  const api = "api" in entry ? entry.api : "https://bedrock-mantle.${AWS_REGION}.api.aws/v1"
   it.instance(
     `Bedrock Responses: ${entry.name}`,
     () =>
@@ -170,7 +192,10 @@ for (const entry of [
           entry.npm === "@ai-sdk/openai" ? "amazon-bedrock.responses" : "bedrock-mantle.responses",
         )
         expect(language.modelId).toBe(entry.apiID)
-        yield* Effect.promise(() =>
+        expect(model.api.id).toBe(entry.apiID)
+        expect(model.api.url).toBe(api)
+        expect(model.serviceTiers?.ultrafast).toEqual({ serviceTier: "ultrafast" })
+        const generated = yield* Effect.promise(() =>
           language.doGenerate({
             maxOutputTokens: 1024,
             prompt: [{ role: "user", content: [{ type: "text", text: "Hello" }] }],
@@ -181,8 +206,9 @@ for (const entry of [
             }),
           }),
         )
+        expect(generated.providerMetadata?.openai?.serviceTier).toBe(entry.serviceTier)
         expect(requests).toHaveLength(1)
-        expect(requests[0].url).toBe(`https://bedrock-mantle.${entry.expectedRegion}.api.aws/v1/responses`)
+        expect(requests[0].url).toBe(`${api.replace("${AWS_REGION}", entry.expectedRegion)}/responses`)
         expect(requests[0].method).toBe("POST")
         expect(requests[0].headers.get("authorization")).toBe("Bearer test-bearer-token")
         const body = yield* Effect.promise(() => requests[0].json())
@@ -217,6 +243,9 @@ for (const entry of [
           }
           expect(chunks.filter((chunk) => chunk.type === "error")).toEqual([])
           expect(chunks.at(-1)?.type).toBe("finish")
+          expect(chunks.find((chunk) => chunk.type === "finish")?.providerMetadata?.openai?.serviceTier).toBe(
+            entry.serviceTier,
+          )
           expect(requests).toHaveLength(2)
           expect(requests[1].url).toBe(requests[0].url)
           expect(await requests[1].json()).toEqual({
@@ -240,7 +269,7 @@ for (const entry of [
                 reasoning: true,
                 provider: {
                   npm: entry.npm,
-                  api: "https://bedrock-mantle.${AWS_REGION}.api.aws/v1",
+                  api,
                 },
                 options: { serviceTier: entry.serviceTier },
               },

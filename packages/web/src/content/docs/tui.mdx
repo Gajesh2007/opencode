@@ -49,6 +49,29 @@ Compare our setup with @docs/README.md
 
 ---
 
+## Conversation references
+
+Reference a local Codex or OpenCode chat by title or session ID:
+
+```text
+@codex:Check machines hitting cache limit
+@opencode:Database lock context
+```
+
+Use quotes for a multi-word title followed by more instructions on the same line:
+
+```text
+Compare @codex:"Check machines hitting cache limit" with @opencode:ses_example.
+```
+
+OpenCode also searches visible conversation text when a topic does not match a title. Ambiguous matches return candidate titles and IDs rather than choosing a chat silently.
+
+The agent receives a bounded preview and the path to a full, filtered transcript it can read with Read or Grep. Only visible user and assistant messages are imported; system instructions, reasoning, and tool payloads are excluded. The original chats are not modified.
+
+Codex chats are read from `CODEX_HOME`, or `~/.codex` by default, on the machine running the OpenCode server. These references also work in CLI and API prompts; they do not upload chats from a remote client's machine.
+
+---
+
 ## Bash commands
 
 Start a message with `!` to run a shell command.

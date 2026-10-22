@@ -1,5 +1,5 @@
 import { Image } from "@/image/image"
-import { Cause, Deferred, Effect, Exit, Layer, Context, Scope, Schema, Semaphore } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Context, Scope, Schema, Semaphore } from "effect"
 import * as Stream from "effect/Stream"
 import { Agent } from "@/agent/agent"
 import { Bus } from "@/bus"
@@ -30,6 +30,7 @@ import * as DateTime from "effect/DateTime"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Collaboration } from "@/agent/collaboration"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
+import { SessionTiming } from "./timing"
 
 const DOOM_LOOP_THRESHOLD = 3
 // Re-issue a request that "succeeded" but produced no output at all — no text,
@@ -37,11 +38,13 @@ const DOOM_LOOP_THRESHOLD = 3
 // turn before inference really ran. Bounded so a persistently-empty provider
 // can't loop forever; after this many retries we accept the empty turn.
 const EMPTY_COMPLETION_MAX_RETRIES = 2
+const PROVIDER_ERROR_MAX_RETRIES = 2
 const log = Log.create({ service: "session.processor" })
 
 export type Result = "compact" | "stop" | "continue"
 
 export interface Handle {
+  readonly timing: SessionTiming.Handle
   readonly message: MessageV2.Assistant
   readonly updateToolCall: (
     toolCallID: string,
@@ -57,12 +60,24 @@ export interface Handle {
     },
   ) => Effect.Effect<void>
   readonly process: (streamInput: LLM.StreamInput) => Effect.Effect<Result>
+  /**
+   * Tree captured at the last step-finish, while it still describes the worktree:
+   * cleared as soon as any tool settles after it. The next step of the same loop
+   * can start from it instead of re-scanning the worktree. A tool-call step
+   * captures it in the background, overlapping the next model request.
+   */
+  readonly snapshot: { snapshot: Effect.Effect<string | undefined>; at: number } | undefined
+  /** Resolves once a carried step-start snapshot exists; mutating tools wait on it. */
+  readonly ready: Effect.Effect<void>
 }
 
 type Input = {
+  timing?: SessionTiming.Handle
   assistantMessage: MessageV2.Assistant
   sessionID: SessionID
   model: Provider.Model
+  /** Step-start tree carried from the previous step-finish, possibly still being captured. */
+  snapshot?: Effect.Effect<string | undefined>
 }
 
 export interface Interface {
@@ -78,10 +93,12 @@ type ToolCall = {
   raw: string
 }
 
-interface ProcessorContext extends Input {
+interface ProcessorContext extends Omit<Input, "snapshot"> {
   toolcalls: Record<string, ToolCall>
   shouldBreak: boolean
   snapshot: string | undefined
+  pending: Effect.Effect<string | undefined> | undefined
+  completed: { snapshot: Effect.Effect<string | undefined>; at: number } | undefined
   blocked: boolean
   needsCompaction: boolean
   currentText: MessageV2.TextPart | undefined
@@ -91,6 +108,8 @@ interface ProcessorContext extends Input {
   streamedAny: boolean
   // Hollow-completion retries used this turn (bounded by EMPTY_COMPLETION_MAX_RETRIES).
   emptyCompletionRetries: number
+  providerError: { error: Error; retryable: boolean | undefined } | undefined
+  providerErrorRetries: number
   preempted: boolean
 }
 
@@ -118,10 +137,24 @@ export const layer = Layer.effect(
     const collaboration = yield* Collaboration.Service
 
     const create = Effect.fn("SessionProcessor.create")(function* (input: Input) {
+      const timing =
+        input.timing ??
+        SessionTiming.start(
+          {
+            sessionID: input.sessionID,
+            messageID: input.assistantMessage.id,
+            providerID: input.model.providerID,
+            modelID: input.model.id,
+            purpose: input.assistantMessage.agent === "compaction" ? "compaction" : "assistant",
+          },
+          { enabled: !flags.disableTiming },
+        )
       // Pre-capture snapshot before the LLM stream starts. The AI SDK
       // may execute tools internally before emitting start-step events,
-      // so capturing inside the event handler can be too late.
-      const initialSnapshot = yield* snapshot.track()
+      // so capturing inside the event handler can be too late. A tree carried
+      // from the previous step-finish already describes this state; mutating
+      // tools wait on `ready` until it has been captured.
+      const initialSnapshot = input.snapshot ? undefined : yield* snapshot.track()
       const ctx: ProcessorContext = {
         assistantMessage: input.assistantMessage,
         sessionID: input.sessionID,
@@ -129,12 +162,16 @@ export const layer = Layer.effect(
         toolcalls: {},
         shouldBreak: false,
         snapshot: initialSnapshot,
+        pending: input.snapshot,
+        completed: undefined,
         blocked: false,
         needsCompaction: false,
         currentText: undefined,
         reasoningMap: {},
         streamedAny: false,
         emptyCompletionRetries: 0,
+        providerError: undefined,
+        providerErrorRetries: 0,
         preempted: false,
       }
       let aborted = false
@@ -201,11 +238,17 @@ export const layer = Layer.effect(
         }
       })
 
-      const parse = (e: unknown) =>
-        MessageV2.fromError(e, {
+      const parse = (e: unknown) => {
+        if (ctx.providerError && ctx.providerError.error === e && ctx.providerError.retryable !== undefined)
+          return new MessageV2.APIError({
+            message: ctx.providerError.error.message,
+            isRetryable: ctx.providerError.retryable,
+          }).toObject()
+        return MessageV2.fromError(e, {
           providerID: input.model.providerID,
           aborted,
         })
+      }
 
       const settleToolCall = Effect.fn("SessionProcessor.settleToolCall")(function* (toolCallID: string) {
         const done = ctx.toolcalls[toolCallID]?.done
@@ -384,6 +427,8 @@ export const layer = Layer.effect(
       const toolInput = (value: unknown): Record<string, any> => (isRecord(value) ? value : { value })
 
       const handleEvent = Effect.fnUntraced(function* (value: StreamEvent) {
+        if (value.type === "text-delta" && value.text.trim()) timing.firstUseful("text")
+        if (value.type === "tool-call") timing.firstUseful("tool")
         // Flush pending coalesced deltas before any non-delta event so the
         // subscriber sees the final batched text strictly before downstream
         // events (text-end / tool-call / finish) that may depend on it.
@@ -567,7 +612,11 @@ export const layer = Layer.effect(
           }
 
           case "tool-result": {
+            // A tool that settles after step-finish (deferred native execution) can
+            // change the worktree, so the step-finish tree no longer describes it.
+            ctx.completed = undefined
             const toolCall = yield* readToolCall(value.id)
+            if (value.result.type === "error" && !toolCall) return
             const rawOutput = toolResultOutput(value)
             const normalized = yield* Effect.forEach(rawOutput.attachments ?? [], (attachment) =>
               attachment.mime.startsWith("image/")
@@ -619,6 +668,7 @@ export const layer = Layer.effect(
           }
 
           case "tool-error": {
+            ctx.completed = undefined
             const toolCall = yield* readToolCall(value.id)
             // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
             if (flags.experimentalEventSystem) {
@@ -639,11 +689,19 @@ export const layer = Layer.effect(
             return
           }
 
-          case "provider-error":
-            throw new Error(value.message)
+          case "provider-error": {
+            const error = new Error(value.message)
+            ctx.providerError = { error, retryable: value.retryable }
+            throw error
+          }
 
           case "step-start":
-            if (!ctx.snapshot) ctx.snapshot = yield* snapshot.track()
+            if (ctx.pending) {
+              // A failed background capture leaves this step without a patch rather
+              // than racing a fresh scan against tools that are already released.
+              ctx.snapshot = yield* ctx.pending
+              ctx.pending = undefined
+            } else if (!ctx.snapshot) ctx.snapshot = yield* snapshot.track()
             if (!ctx.assistantMessage.summary) {
               // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
               if (flags.experimentalEventSystem) {
@@ -670,26 +728,12 @@ export const layer = Layer.effect(
             return
 
           case "step-finish": {
-            const completedSnapshot = yield* snapshot.track()
             yield* Effect.forEach(Object.keys(ctx.reasoningMap), finishReasoning)
             const usage = Session.getUsage({
               model: ctx.model,
               usage: value.usage ?? new Usage({}),
               metadata: value.providerMetadata,
             })
-            if (!ctx.assistantMessage.summary) {
-              // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
-              if (flags.experimentalEventSystem) {
-                yield* events.publish(SessionEvent.Step.Ended, {
-                  sessionID: ctx.sessionID,
-                  finish: value.reason,
-                  cost: usage.cost,
-                  tokens: usage.tokens,
-                  snapshot: completedSnapshot,
-                  timestamp: DateTime.makeUnsafe(Date.now()),
-                })
-              }
-            }
             ctx.assistantMessage.finish = value.reason
             ctx.assistantMessage.cost += usage.cost
             ctx.assistantMessage.tokens = usage.tokens
@@ -709,37 +753,90 @@ export const layer = Layer.effect(
             const openaiMeta = (value.providerMetadata as Record<string, any> | undefined)?.openai
             const responseId = typeof openaiMeta?.responseId === "string" ? openaiMeta.responseId : undefined
             if (responseId) ctx.assistantMessage.provider_response_id = responseId
-            yield* session.updatePart({
-              id: PartID.ascending(),
-              reason: value.reason,
-              snapshot: completedSnapshot,
-              messageID: ctx.assistantMessage.id,
-              sessionID: ctx.assistantMessage.sessionID,
-              type: "step-finish",
-              tokens: usage.tokens,
-              cost: usage.cost,
-            })
-            yield* session.updateMessage(ctx.assistantMessage)
-            if (ctx.snapshot) {
-              const patch = yield* snapshot.patch(ctx.snapshot)
-              if (patch.files.length) {
-                yield* session.updatePart({
-                  id: PartID.ascending(),
-                  messageID: ctx.assistantMessage.id,
-                  sessionID: ctx.sessionID,
-                  type: "patch",
-                  hash: patch.hash,
-                  files: patch.files,
-                })
+            const metadata = value.providerMetadata
+            const openai = metadata?.openai
+            const bedrock = metadata?.bedrock
+            const tier = openai?.serviceTier ?? (isRecord(bedrock?.serviceTier) ? bedrock.serviceTier.type : undefined)
+            const model = openai?.modelId
+            // Each step replaces the previous confirmation, including when it is missing.
+            ctx.assistantMessage.service_tier = typeof tier === "string" ? tier : undefined
+            ctx.assistantMessage.model_resolved = typeof model === "string" ? model : undefined
+            const from = ctx.snapshot
+            ctx.snapshot = undefined
+            const finishPartID = PartID.ascending()
+            const record = Effect.gen(function* () {
+              const completedSnapshot = yield* snapshot.track()
+              if (!ctx.assistantMessage.summary) {
+                // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
+                if (flags.experimentalEventSystem) {
+                  yield* events.publish(SessionEvent.Step.Ended, {
+                    sessionID: ctx.sessionID,
+                    finish: value.reason,
+                    cost: usage.cost,
+                    tokens: usage.tokens,
+                    snapshot: completedSnapshot,
+                    timestamp: DateTime.makeUnsafe(Date.now()),
+                  })
+                }
               }
-              ctx.snapshot = undefined
-            }
-            yield* summary
-              .summarize({
-                sessionID: ctx.sessionID,
-                messageID: ctx.assistantMessage.parentID,
+              yield* session.updatePart({
+                id: finishPartID,
+                reason: value.reason,
+                snapshot: completedSnapshot,
+                messageID: ctx.assistantMessage.id,
+                sessionID: ctx.assistantMessage.sessionID,
+                type: "step-finish",
+                tokens: usage.tokens,
+                cost: usage.cost,
               })
-              .pipe(Effect.ignore, Effect.forkIn(scope))
+              // Unknown until a patch proves the step left the worktree unchanged.
+              let changed = true
+              if (from) {
+                // Compare against the tree just captured instead of staging the
+                // worktree a second time; identical trees resolve without git.
+                const patch = yield* snapshot.patch(from, completedSnapshot || undefined)
+                changed = patch.files.length > 0
+                if (patch.files.length) {
+                  yield* session.updatePart({
+                    id: PartID.ascending(),
+                    messageID: ctx.assistantMessage.id,
+                    sessionID: ctx.sessionID,
+                    type: "patch",
+                    hash: patch.hash,
+                    files: patch.files,
+                  })
+                }
+              }
+              // The session diff spans first step-start to latest step-finish. An
+              // unchanged step leaves that range's tree untouched, so recomputing it
+              // would only hold the snapshot lock against the next step.
+              if (changed)
+                yield* summary
+                  .summarize({
+                    sessionID: ctx.sessionID,
+                    messageID: ctx.assistantMessage.parentID,
+                  })
+                  .pipe(Effect.ignore, Effect.forkIn(scope))
+              return completedSnapshot || undefined
+            })
+            // Every AI SDK tool has settled before finish-step, so after a tool-call
+            // step nothing touches the worktree until the next step's tools, which
+            // wait on `ready`. Capture there in the background, overlapping the next
+            // model request, instead of delaying it by a worktree scan. Final steps,
+            // and native steps with deferred tools still running, capture inline.
+            if (value.reason === "tool-calls" && Object.keys(ctx.toolcalls).length === 0) {
+              const fiber = yield* record.pipe(Effect.forkIn(scope))
+              ctx.completed = {
+                snapshot: Fiber.join(fiber).pipe(Effect.catchCause(() => Effect.succeed(undefined))),
+                at: Date.now(),
+              }
+            } else {
+              const completedSnapshot = yield* record
+              ctx.completed = completedSnapshot
+                ? { snapshot: Effect.succeed(completedSnapshot), at: Date.now() }
+                : undefined
+            }
+            yield* session.updateMessage(ctx.assistantMessage)
             if (
               !ctx.assistantMessage.summary &&
               isOverflow({ cfg: yield* config.get(), tokens: usage.tokens, model: ctx.model })
@@ -826,6 +923,12 @@ export const layer = Layer.effect(
         // Drain any coalesced PartDelta buckets first so subscribers see the
         // final tokens before the text-end / part-updated events written below.
         yield* flushAllDeltas()
+        // An attempt that failed before step-start never resolved its carried
+        // snapshot; tools released by `ready` may still have changed files.
+        if (!ctx.snapshot && ctx.pending) {
+          ctx.snapshot = yield* ctx.pending
+          ctx.pending = undefined
+        }
         if (ctx.snapshot) {
           const patch = yield* snapshot.patch(ctx.snapshot)
           if (patch.files.length) {
@@ -918,6 +1021,7 @@ export const layer = Layer.effect(
       })
 
       const process = Effect.fn("SessionProcessor.process")(function* (streamInput: LLM.StreamInput) {
+        timing.prepared()
         slog.info("process")
         ctx.needsCompaction = false
         ctx.shouldBreak = (yield* config.get()).experimental?.continue_loop_on_deny !== true
@@ -925,13 +1029,29 @@ export const layer = Layer.effect(
 
         return yield* Effect.gen(function* () {
           yield* Effect.gen(function* () {
+            timing.request()
+            ctx.completed = undefined
+            ctx.assistantMessage.service_tier_requested = undefined
+            ctx.assistantMessage.service_tier = undefined
+            ctx.assistantMessage.model_resolved = undefined
             ctx.currentText = undefined
             ctx.reasoningMap = {}
             ctx.streamedAny = false
+            ctx.providerError = undefined
             ctx.preempted = false
             publishedDeltas.clear()
             yield* status.set(ctx.sessionID, { type: "busy" })
-            const stream = llm.stream({ ...streamInput, bedrockRetry: retry })
+            const stream = llm.stream({
+              ...streamInput,
+              bedrockRetry: retry,
+              timing,
+              onRequest: (info) => {
+                ctx.assistantMessage.service_tier_requested = info.serviceTier
+                ctx.assistantMessage.service_tier = undefined
+                ctx.assistantMessage.model_resolved = undefined
+                streamInput.onRequest?.(info)
+              },
+            })
 
             yield* Effect.gen(function* () {
               const lock = yield* Semaphore.make(1)
@@ -992,12 +1112,26 @@ export const layer = Layer.effect(
             ),
             // Guarded Bedrock requests own a single bounded wire-attempt budget.
             // Never restart it through the unbounded legacy retry policy.
-            Effect.catch((error) => (retry.active ? halt(retry.error ?? error) : Effect.fail(error))),
+            Effect.catch((error) => {
+              if (retry.active) return halt(retry.error ?? error)
+              // Only replay a bounded, pre-output failure; hosted tools may have run without emitting an event.
+              if (
+                ctx.providerError &&
+                ctx.providerError.error === error &&
+                (ctx.streamedAny ||
+                  ctx.providerError.retryable === false ||
+                  ctx.providerErrorRetries >= PROVIDER_ERROR_MAX_RETRIES ||
+                  Object.values(streamInput.tools).some((tool) => tool.type === "provider"))
+              )
+                return halt(error)
+              return Effect.fail(error)
+            }),
             Effect.retry(
               SessionRetry.policy({
                 provider: input.model.providerID,
                 parse,
                 set: (info) => {
+                  if (ctx.providerError) ctx.providerErrorRetries++
                   // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
                   const event = flags.experimentalEventSystem
                     ? events.publish(SessionEvent.Retried, {
@@ -1025,7 +1159,25 @@ export const layer = Layer.effect(
               }),
             ),
             Effect.catch(halt),
-            Effect.ensuring(cleanup()),
+            Effect.onExit((exit) =>
+              cleanup().pipe(
+                Effect.onExit((cleanupExit) =>
+                  Effect.sync(() =>
+                    timing.finish(
+                      aborted ||
+                        (Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)) ||
+                        (Exit.isFailure(cleanupExit) && Cause.hasInterruptsOnly(cleanupExit.cause))
+                        ? "interrupted"
+                        : Exit.isFailure(exit) || Exit.isFailure(cleanupExit) || ctx.assistantMessage.error
+                          ? "error"
+                          : ctx.needsCompaction
+                            ? "compact"
+                            : "completed",
+                    ),
+                  ),
+                ),
+              ),
+            ),
           )
 
           if (ctx.needsCompaction) return "compact"
@@ -1036,9 +1188,14 @@ export const layer = Layer.effect(
       })
 
       return {
+        timing,
         get message() {
           return ctx.assistantMessage
         },
+        get snapshot() {
+          return ctx.completed
+        },
+        ready: input.snapshot ? Effect.asVoid(input.snapshot) : Effect.void,
         updateToolCall,
         completeToolCall,
         process,

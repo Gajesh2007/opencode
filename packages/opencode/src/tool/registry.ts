@@ -6,6 +6,7 @@ import { EditTool } from "./edit"
 import { GlobTool } from "./glob"
 import { GrepTool } from "./grep"
 import { ReadTool } from "./read"
+import { ReadManyTool } from "./read-many"
 import { TaskTool } from "./task"
 import { TaskStatusTool } from "./task_status"
 import { WorkflowTool } from "./workflow"
@@ -154,6 +155,7 @@ export const layer: Layer.Layer<
     const memorytool = yield* MemoryTool
     const taskStatus = yield* TaskStatusTool
     const read = yield* ReadTool
+    const readMany = yield* ReadManyTool
     const question = yield* QuestionTool
     const todo = yield* TodoWriteTool
     const goaltool = yield* GoalTool
@@ -265,6 +267,7 @@ export const layer: Layer.Layer<
           invalid: Tool.init(invalid),
           shell: Tool.init(shell),
           read: Tool.init(read),
+          read_many: Tool.init(readMany),
           glob: Tool.init(globtool),
           grep: Tool.init(greptool),
           edit: Tool.init(edit),
@@ -302,12 +305,13 @@ export const layer: Layer.Layer<
             ...(questionEnabled ? [tool.question] : []),
             tool.shell,
             tool.read,
+            tool.read_many,
             tool.glob,
             tool.grep,
             tool.edit,
             tool.write,
             tool.task,
-            tool.workflow,
+            ...(flags.experimentalWorkflow ? [tool.workflow] : []),
             tool.spawn_agent,
             tool.send_message,
             tool.followup_task,
@@ -321,7 +325,7 @@ export const layer: Layer.Layer<
             tool.fetch,
             tool.todo,
             tool.goal,
-            tool.metaagent,
+            ...(flags.experimentalMetaAgent ? [tool.metaagent] : []),
             tool.search,
             ...(flags.experimentalScout ? [tool.repo_clone, tool.repo_overview] : []),
             tool.skill,
@@ -408,6 +412,7 @@ export const layer: Layer.Layer<
               : undefined
           return {
             id: tool.id,
+            readOnly: tool.readOnly,
             description: [
               output.description,
               tool.id === TaskTool.id ? yield* describeTask(input.agent) : undefined,

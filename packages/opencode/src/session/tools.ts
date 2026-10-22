@@ -20,6 +20,8 @@ import * as Log from "@opencode-ai/core/util/log"
 import { EffectBridge } from "@/effect/bridge"
 import { Collaboration } from "@/agent/collaboration"
 import { SpawnAgentTool } from "@/tool/spawn_agent"
+import type { SessionTiming } from "./timing"
+import { readOnlyTools } from "./llm/tool-execution"
 
 const log = Log.create({ service: "session.tools" })
 
@@ -27,7 +29,10 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   agent: Agent.Info
   model: Provider.Model
   session: Session.Info
-  processor: Pick<SessionProcessor.Handle, "message" | "updateToolCall" | "completeToolCall">
+  processor: Pick<SessionProcessor.Handle, "message" | "updateToolCall" | "completeToolCall"> & {
+    timing?: SessionTiming.Handle
+    ready?: SessionProcessor.Handle["ready"]
+  }
   bypassAgentCheck: boolean
   messages: MessageV2.WithParts[]
   promptOps: TaskPromptOps
@@ -51,6 +56,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck, promptOps: input.promptOps },
     agent: input.agent.name,
     messages: input.messages,
+    timing: input.processor.timing?.command(options.toolCallId),
     metadata: (val) =>
       input.processor.updateToolCall(options.toolCallId, (match) => {
         if (!["running", "pending"].includes(match.state.status)) return match
@@ -61,18 +67,24 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             metadata: val.metadata,
             status: "running",
             input: args,
-            time: { start: Date.now() },
+            time: match.state.status === "running" ? match.state.time : { start: Date.now() },
           },
         }
       }),
     ask: (req) =>
       permission
-        .ask({
-          ...req,
-          sessionID: input.session.id,
-          tool: { messageID: input.processor.message.id, callID: options.toolCallId },
-          ruleset: Permission.merge(input.agent.permission, input.session.permission ?? []),
-        })
+        .ask(
+          {
+            ...req,
+            sessionID: input.session.id,
+            tool: { messageID: input.processor.message.id, callID: options.toolCallId },
+            ruleset: Permission.merge(input.agent.permission, input.session.permission ?? []),
+          },
+          () => {
+            const token = input.processor.timing?.permissionStart(options.toolCallId)
+            return (status) => input.processor.timing?.permissionEnd(token, status)
+          },
+        )
         .pipe(Effect.orDie),
   })
 
@@ -91,6 +103,11 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       execute(args, options) {
         return run.promise(
           Effect.gen(function* () {
+            input.processor.timing?.toolReady(options.toolCallId, item.id)
+            // The step-start snapshot may still be captured in the background;
+            // anything that can change the worktree must not run ahead of it.
+            if (!item.readOnly && input.processor.ready) yield* input.processor.ready
+            input.processor.timing?.toolStart(options.toolCallId, item.id)
             const ctx = context(args, options)
             // PreToolUse hook: plugins may rewrite `pre.args` or set `pre.status="deny"`.
             const pre: { args: Record<string, unknown>; status?: "deny"; reason?: string } = { args }
@@ -123,10 +140,21 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               yield* input.processor.completeToolCall(options.toolCallId, output)
             }
             return output
-          }),
+          }).pipe(
+            Effect.onExit((exit) =>
+              Effect.sync(() =>
+                input.processor.timing?.toolEnd(
+                  options.toolCallId,
+                  options.abortSignal?.aborted ? "interrupted" : exit._tag === "Success" ? "completed" : "error",
+                ),
+              ),
+            ),
+          ),
+          item.readOnly ? { signal: options.abortSignal } : undefined,
         )
       },
     })
+    if (item.readOnly) readOnlyTools.add(tools[item.id])
   }
 
   // Per-agent MCP scoping: when an agent declares `mcpServers`, it only sees tools
@@ -143,6 +171,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     item.execute = (args, opts) =>
       run.promise(
         Effect.gen(function* () {
+          input.processor.timing?.toolReady(opts.toolCallId, key)
+          if (input.processor.ready) yield* input.processor.ready
+          input.processor.timing?.toolStart(opts.toolCallId, key)
           const ctx = context(args, opts)
           const pre: { args: Record<string, unknown>; status?: "deny"; reason?: string } = { args }
           yield* plugin.trigger(
@@ -220,7 +251,16 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             yield* input.processor.completeToolCall(opts.toolCallId, output)
           }
           return output
-        }),
+        }).pipe(
+          Effect.onExit((exit) =>
+            Effect.sync(() =>
+              input.processor.timing?.toolEnd(
+                opts.toolCallId,
+                opts.abortSignal?.aborted ? "interrupted" : exit._tag === "Success" ? "completed" : "error",
+              ),
+            ),
+          ),
+        ),
       )
     tools[key] = item
   }

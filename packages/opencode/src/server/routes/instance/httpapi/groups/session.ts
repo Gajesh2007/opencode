@@ -2,6 +2,7 @@ import { Permission } from "@/permission"
 import { PermissionID } from "@/permission/schema"
 import { ModelID, ProviderID } from "@/provider/schema"
 import { Session } from "@/session/session"
+import { SessionSearch } from "@/session/search"
 import { MessageV2 } from "@/session/message-v2"
 import { SessionPrompt } from "@/session/prompt"
 import { SessionRevert } from "@/session/revert"
@@ -9,6 +10,7 @@ import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
 import { Goal } from "@/session/goal"
+import { SessionUsage } from "@/session/usage"
 import { MessageID, PartID, SessionID } from "@/session/schema"
 import { Snapshot } from "@/snapshot"
 import { Schema, Struct } from "effect"
@@ -33,6 +35,13 @@ export const ListQuery = Schema.Struct({
   start: Schema.optional(Schema.NumberFromString),
   search: Schema.optional(Schema.String),
   limit: Schema.optional(Schema.NumberFromString),
+})
+export const SearchQuery = Schema.Struct({
+  ...WorkspaceRoutingQueryFields,
+  query: SessionSearch.Input.fields.query,
+  mode: SessionSearch.Input.fields.mode,
+  limit: Schema.optional(Schema.NumberFromString.check(Schema.isInt(), Schema.isBetween({ minimum: 1, maximum: 100 }))),
+  cursor: SessionSearch.Input.fields.cursor,
 })
 export const DiffQuery = Schema.Struct({
   ...WorkspaceRoutingQueryFields,
@@ -59,6 +68,18 @@ export const InitPayload = Schema.Struct({
   providerID: ProviderID,
   messageID: MessageID,
 })
+export const WarmPayload = Schema.Struct({
+  providerID: ProviderID,
+  modelID: ModelID,
+  agent: Schema.optional(Schema.String),
+  variant: Schema.optional(Schema.String),
+  serviceTier: Schema.optional(Schema.String),
+  upstream: Schema.optional(Schema.String),
+})
+export const WarmResult = Schema.Struct({
+  connection: Schema.Literals(["warmed", "skipped", "failed"]),
+  context: Schema.Literals(["scheduled", "fresh", "skipped", "busy"]),
+})
 export const SummarizePayload = Schema.Struct({
   providerID: ProviderID,
   modelID: ModelID,
@@ -78,11 +99,13 @@ export const PermissionResponsePayload = Schema.Struct({
 
 export const SessionPaths = {
   list: root,
+  search: `${root}/search`,
   status: `${root}/status`,
   get: `${root}/:sessionID`,
   children: `${root}/:sessionID/children`,
   todo: `${root}/:sessionID/todo`,
   goal: `${root}/:sessionID/goal`,
+  usage: `${root}/:sessionID/usage`,
   diff: `${root}/:sessionID/diff`,
   messages: `${root}/:sessionID/message`,
   message: `${root}/:sessionID/message/:messageID`,
@@ -93,6 +116,7 @@ export const SessionPaths = {
   abort: `${root}/:sessionID/abort`,
   share: `${root}/:sessionID/share`,
   init: `${root}/:sessionID/init`,
+  warm: `${root}/:sessionID/warm`,
   summarize: `${root}/:sessionID/summarize`,
   prompt: `${root}/:sessionID/message`,
   promptAsync: `${root}/:sessionID/prompt_async`,
@@ -120,6 +144,17 @@ export const SessionApi = HttpApi.make("session")
             description: "Get a list of all OpenCode sessions, sorted by most recently updated.",
           }),
         ),
+        HttpApiEndpoint.get("search", SessionPaths.search, {
+          query: SearchQuery,
+          success: described(SessionSearch.Result, "A page of matching sessions and text snippets"),
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.search",
+            summary: "Search folder chats",
+            description:
+              "Search all persisted sessions in the exact current directory and workspace, including archived and child sessions. Searches titles, message summary titles, and user/assistant text; excludes tool bodies. Results use stable session ID order (newest generated IDs first), unaffected by chat updates. Follow next as cursor until absent.",
+          }),
+        ),
         HttpApiEndpoint.get("status", SessionPaths.status, {
           query: WorkspaceRoutingQuery,
           success: described(StatusMap, "Get session status"),
@@ -141,6 +176,20 @@ export const SessionApi = HttpApi.make("session")
             identifier: "session.get",
             summary: "Get session",
             description: "Retrieve detailed information about a specific OpenCode session.",
+          }),
+        ),
+        HttpApiEndpoint.post("warm", SessionPaths.warm, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          payload: WarmPayload,
+          success: described(WarmResult, "Best-effort warm status"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.warm",
+            summary: "Warm session model",
+            description:
+              "Best-effort preparation using selection IDs only, without sending a draft or creating a session.",
           }),
         ),
         HttpApiEndpoint.get("children", SessionPaths.children, {
@@ -165,6 +214,19 @@ export const SessionApi = HttpApi.make("session")
             identifier: "session.todo",
             summary: "Get session todos",
             description: "Retrieve the todo list associated with a specific session, showing tasks and action items.",
+          }),
+        ),
+        HttpApiEndpoint.get("usage", SessionPaths.usage, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          success: described(SessionUsage.Summary, "Recorded session and descendant usage"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.usage",
+            summary: "Get task usage",
+            description:
+              "Get recorded execution usage for this session and its descendants, without counting copied fork history. Includes unknown usage and pricing coverage; this is not an invoice or a complete external-tool spending total.",
           }),
         ),
         HttpApiEndpoint.get("goal", SessionPaths.goal, {
@@ -268,7 +330,7 @@ export const SessionApi = HttpApi.make("session")
           params: { sessionID: SessionID },
           query: WorkspaceRoutingQuery,
           success: described(Schema.Boolean, "Aborted session"),
-          error: HttpApiError.BadRequest,
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "session.abort",

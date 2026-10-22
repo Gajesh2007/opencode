@@ -178,6 +178,66 @@ describe("OpenAI Responses route", () => {
     }),
   )
 
+  for (const error of [
+    { code: "invalid_request_error", message: "Request rejected", param: undefined, partial: "Partial" },
+    { code: "previous_response_not_found", message: "Expired", param: null, partial: "" },
+  ])
+    it.effect(
+      `stops after WebSocket ${error.code} even when the socket stays open`,
+      () =>
+        Effect.gen(function* () {
+          let closed = false
+          const deps = Layer.mergeAll(
+            Layer.succeed(
+              RequestExecutor.Service,
+              RequestExecutor.Service.of({ execute: () => Effect.die("unexpected HTTP") }),
+            ),
+            Layer.succeed(
+              WebSocketExecutor.Service,
+              WebSocketExecutor.Service.of({
+                open: () =>
+                  Effect.succeed({
+                    sendText: () => Effect.void,
+                    messages: Stream.fromArray([
+                      ...(error.partial
+                        ? [
+                            ProviderShared.encodeJson({
+                              type: "response.output_text.delta",
+                              item_id: "msg_1",
+                              delta: error.partial,
+                            }),
+                          ]
+                        : []),
+                      ProviderShared.encodeJson({
+                        type: "error",
+                        code: error.code,
+                        message: error.message,
+                        param: error.param,
+                      }),
+                    ]).pipe(Stream.concat(Stream.never)),
+                    close: Effect.sync(() => {
+                      closed = true
+                    }),
+                  }),
+              }),
+            ),
+          )
+          const response = yield* LLMClient.generate(
+            LLM.request({
+              model: OpenAI.configure({ apiKey: "test" }).responsesWebSocket("gpt-6.1-sol"),
+              prompt: "Hello",
+            }),
+          ).pipe(Effect.provide(LLMClient.layer.pipe(Layer.provide(deps))))
+          expect(response.text).toBe(error.partial)
+          expect(response.events.filter((event) => event.type === "provider-error")).toEqual([
+            { type: "provider-error", message: `${error.code}: ${error.message}`, retryable: false },
+          ])
+          expect(response.events.filter((event) => event.type === "finish")).toHaveLength(0)
+          expect(closed).toBe(true)
+        }),
+      1000,
+    )
+
   it.effect("fails immediately when WebSocket is already closed", () =>
     Effect.gen(function* () {
       const error = yield* WebSocketExecutor.fromWebSocket(
@@ -1294,6 +1354,70 @@ describe("OpenAI Responses route", () => {
     }),
   )
 
+  for (const order of ["before start", "without start", "after done"] as const) {
+    it.effect(`recovers tool argument deltas arriving ${order}`, () =>
+      Effect.gen(function* () {
+        const added = {
+          type: "response.output_item.added",
+          item: { type: "function_call", id: "item_1", call_id: "call_1", name: "list_agents", arguments: "" },
+        }
+        const delta = (text: string) => ({
+          type: "response.function_call_arguments.delta",
+          item_id: "item_1",
+          delta: text,
+        })
+        const done = {
+          type: "response.output_item.done",
+          item: {
+            type: "function_call",
+            id: "item_1",
+            call_id: "call_1",
+            name: "list_agents",
+            ...(order === "after done" ? { arguments: "{}" } : {}),
+          },
+        }
+        const chunks =
+          order === "before start"
+            ? [delta("{"), added, delta("}"), done]
+            : order === "without start"
+              ? [delta("{"), delta("}"), done]
+              : [added, done, delta("{}")]
+        const response = yield* LLMClient.generate(request).pipe(
+          Effect.provide(
+            fixedResponse(
+              sseEvents(...chunks, {
+                type: "response.completed",
+                response: { usage: { input_tokens: 5, output_tokens: 1 } },
+              }),
+            ),
+          ),
+        )
+        expect(response.toolCalls).toMatchObject([
+          { id: "call_1", name: "list_agents", input: {}, providerMetadata: { openai: { itemId: "item_1" } } },
+        ])
+        expect(response.events.at(-1)).toMatchObject({ type: "finish", reason: "tool-calls" })
+        expect(response.usage).toMatchObject({ inputTokens: 5, outputTokens: 1 })
+      }),
+    )
+  }
+
+  it.effect("rejects argument deltas that never receive tool identity instead of claiming success", () =>
+    Effect.gen(function* () {
+      const error = yield* LLMClient.generate(request).pipe(
+        Effect.provide(
+          fixedResponse(
+            sseEvents(
+              { type: "response.function_call_arguments.delta", item_id: "missing", delta: "{}" },
+              { type: "response.completed", response: {} },
+            ),
+          ),
+        ),
+        Effect.flip,
+      )
+      expect(error.message).toContain("tool argument delta is missing its tool call")
+    }),
+  )
+
   it.effect("decodes web_search_call as provider-executed tool-call + tool-result", () =>
     Effect.gen(function* () {
       const item = {
@@ -1413,7 +1537,9 @@ describe("OpenAI Responses route", () => {
       // sometimes-generic provider message. The bare message alone meant
       // production errors like rate limits were indistinguishable from
       // unrelated stream failures.
-      expect(response.events).toEqual([{ type: "provider-error", message: "rate_limit_exceeded: Slow down" }])
+      expect(response.events).toEqual([
+        { type: "provider-error", message: "rate_limit_exceeded: Slow down", retryable: true },
+      ])
     }),
   )
 
@@ -1423,7 +1549,83 @@ describe("OpenAI Responses route", () => {
         Effect.provide(fixedResponse(sseEvents({ type: "error", code: "internal_error" }))),
       )
 
-      expect(response.events).toEqual([{ type: "provider-error", message: "internal_error" }])
+      expect(response.events).toEqual([{ type: "provider-error", message: "internal_error", retryable: true }])
+    }),
+  )
+
+  it.effect("defers quota_exceeded classification without losing input-TPM details", () =>
+    Effect.gen(function* () {
+      const error = {
+        code: "quota_exceeded",
+        message: "quota input-tpm:123456789012:openai.gpt-6.1-sol (InputTokens) exceeded by 72778.776483333",
+      }
+      for (const event of [
+        { type: "error", ...error },
+        { type: "error", error },
+        { type: "response.failed", response: { error } },
+      ]) {
+        const response = yield* LLMClient.generate(request).pipe(Effect.provide(fixedResponse(sseEvents(event))))
+        expect(response.events).toEqual([{ type: "provider-error", message: `${error.code}: ${error.message}` }])
+      }
+    }),
+  )
+
+  it.effect("also defers generic quota_exceeded instead of declaring it retryable", () =>
+    Effect.gen(function* () {
+      const response = yield* LLMClient.generate(request).pipe(
+        Effect.provide(fixedResponse(sseEvents({ type: "error", code: "quota_exceeded", message: "Quota exceeded" }))),
+      )
+      expect(response.events).toEqual([{ type: "provider-error", message: "quota_exceeded: Quota exceeded" }])
+    }),
+  )
+
+  for (const [code, retryable] of [
+    ["server_error", true],
+    ["internal_error", true],
+    ["network_error", true],
+    ["rate_limit_exceeded", true],
+    ["invalid_api_key", false],
+    ["invalid_prompt", false],
+    ["context_length_exceeded", false],
+    ["insufficient_quota", false],
+  ] as const) {
+    it.effect(`classifies nested WebSocket error ${code}`, () =>
+      Effect.gen(function* () {
+        const response = yield* LLMClient.generate(request).pipe(
+          Effect.provide(
+            fixedResponse(sseEvents({ type: "error", error: { code, message: "Please try again", param: null } })),
+          ),
+        )
+
+        expect(response.events).toEqual([{ type: "provider-error", message: `${code}: Please try again`, retryable }])
+      }),
+    )
+  }
+
+  it.effect("classifies nested WebSocket errors by type when code is null", () =>
+    Effect.gen(function* () {
+      const response = yield* LLMClient.generate(request).pipe(
+        Effect.provide(
+          fixedResponse(
+            sseEvents({ type: "error", error: { type: "server_error", code: null, message: "Try again later" } }),
+          ),
+        ),
+      )
+
+      expect(response.events).toEqual([
+        { type: "provider-error", message: "server_error: Try again later", retryable: true },
+      ])
+    }),
+  )
+
+  it.effect("accepts null error code and param without losing the provider message", () =>
+    Effect.gen(function* () {
+      const response = yield* LLMClient.generate(request).pipe(
+        Effect.provide(
+          fixedResponse(sseEvents({ type: "error", code: null, message: "Request rejected", param: null })),
+        ),
+      )
+      expect(response.events).toEqual([{ type: "provider-error", message: "Request rejected" }])
     }),
   )
 
@@ -1433,7 +1635,7 @@ describe("OpenAI Responses route", () => {
         Effect.provide(fixedResponse(sseEvents({ type: "error", code: "internal_error", message: "" }))),
       )
 
-      expect(response.events).toEqual([{ type: "provider-error", message: "internal_error" }])
+      expect(response.events).toEqual([{ type: "provider-error", message: "internal_error", retryable: true }])
     }),
   )
 
@@ -1457,7 +1659,9 @@ describe("OpenAI Responses route", () => {
         ),
       )
 
-      expect(response.events).toEqual([{ type: "provider-error", message: "server_error: Upstream model unavailable" }])
+      expect(response.events).toEqual([
+        { type: "provider-error", message: "server_error: Upstream model unavailable", retryable: true },
+      ])
     }),
   )
 
@@ -1474,7 +1678,7 @@ describe("OpenAI Responses route", () => {
         ),
       )
 
-      expect(response.events).toEqual([{ type: "provider-error", message: "invalid_prompt" }])
+      expect(response.events).toEqual([{ type: "provider-error", message: "invalid_prompt", retryable: false }])
     }),
   )
 
@@ -1496,7 +1700,9 @@ describe("OpenAI Responses route", () => {
         ),
       )
 
-      expect(response.events).toEqual([{ type: "provider-error", message: "context_length_exceeded: prompt too long" }])
+      expect(response.events).toEqual([
+        { type: "provider-error", message: "context_length_exceeded: prompt too long", retryable: false },
+      ])
     }),
   )
 
@@ -1506,7 +1712,9 @@ describe("OpenAI Responses route", () => {
         Effect.provide(fixedResponse(sseEvents({ type: "error" }))),
       )
 
-      expect(response.events).toEqual([{ type: "provider-error", message: "OpenAI Responses stream error" }])
+      expect(response.events).toEqual([
+        { type: "provider-error", message: "OpenAI Responses stream error", retryable: true },
+      ])
     }),
   )
 
@@ -1516,7 +1724,9 @@ describe("OpenAI Responses route", () => {
         Effect.provide(fixedResponse(sseEvents({ type: "response.failed", response: { id: "resp_failed_3" } }))),
       )
 
-      expect(response.events).toEqual([{ type: "provider-error", message: "OpenAI Responses response failed" }])
+      expect(response.events).toEqual([
+        { type: "provider-error", message: "OpenAI Responses response failed", retryable: true },
+      ])
     }),
   )
 

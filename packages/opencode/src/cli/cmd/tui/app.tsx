@@ -782,17 +782,10 @@ export function App(props: { onSnapshot?: () => Promise<string[]> }) {
         category: "Agent",
         slashName: "ultrafast",
         run: () => {
-          const current = local.model.current()
-          const model = current && sync.data.provider.find((x) => x.id === current.providerID)?.models[current.modelID]
           dialog.clear()
-          if (
-            current?.providerID !== "openai" ||
-            model?.api.npm !== "@ai-sdk/openai" ||
-            !local.model.serviceTier.list().includes("ultrafast")
-          ) {
+          if (!local.model.serviceTier.list().includes("ultrafast")) {
             toast.show({
-              message:
-                "Ultrafast requires a supported GPT-6 Astra or GPT-5.6 Sol model via the direct OpenAI API. Select one with /models.",
+              message: "Ultrafast is not supported by the current model/provider. Select a supported model with /models.",
               variant: "warning",
               duration: 7000,
             })
@@ -803,7 +796,7 @@ export function App(props: { onSnapshot?: () => Promise<string[]> }) {
           toast.show({
             title: enabled ? "Ultrafast enabled" : "Ultrafast disabled",
             message: enabled
-              ? "Higher pricing applies. GPT-5.6 Sol requires Ultrafast preview access."
+              ? "Higher pricing applies. Availability depends on provider and account access."
               : "Restored the default service tier.",
             variant: enabled ? "warning" : "info",
             duration: enabled ? 7000 : 3000,

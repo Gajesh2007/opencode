@@ -1,6 +1,15 @@
 import { describe, expect } from "bun:test"
 import { Deferred, Effect, Schema, Stream } from "effect"
-import { GenerationOptions, LLM, LLMEvent, LLMRequest, LLMResponse, ToolChoice } from "../src"
+import {
+  GenerationOptions,
+  InvalidProviderOutputReason,
+  LLM,
+  LLMError,
+  LLMEvent,
+  LLMRequest,
+  LLMResponse,
+  ToolChoice,
+} from "../src"
 import { Auth, LLMClient } from "../src/route"
 import * as AnthropicMessages from "../src/protocols/anthropic-messages"
 import * as OpenAIChat from "../src/protocols/openai-chat"
@@ -536,6 +545,182 @@ describe("LLMClient tools", () => {
       expect(toolError?.message).toContain("Invalid tool input")
     }),
   )
+
+  for (const execution of [undefined, "eager"] as const) {
+    it.effect(`returns malformed JSON to the model for correction with ${execution ?? "deferred"} tools`, () =>
+      Effect.gen(function* () {
+        const bodies: unknown[] = []
+        const calls: Array<{ id?: string; input: unknown }> = []
+        const responses = [
+          sseEvents(
+            {
+              type: "response.output_item.done",
+              item: { type: "function_call", id: "item_bad", call_id: "call_bad", name: "list_agents", arguments: "{" },
+            },
+            {
+              type: "response.output_item.done",
+              item: {
+                type: "function_call",
+                id: "item_good",
+                call_id: "call_good",
+                name: "list_agents",
+                arguments: "{}",
+              },
+            },
+            { type: "response.completed", response: {} },
+          ),
+          sseEvents(
+            {
+              type: "response.output_item.done",
+              item: {
+                type: "function_call",
+                id: "item_retry",
+                call_id: "call_retry",
+                name: "list_agents",
+                arguments: "{}",
+              },
+            },
+            { type: "response.completed", response: {} },
+          ),
+          sseEvents(
+            { type: "response.output_text.delta", item_id: "msg_1", delta: "Recovered." },
+            { type: "response.completed", response: {} },
+          ),
+        ]
+        const layer = dynamicResponse((input) =>
+          Effect.sync(() => {
+            bodies.push(decodeJson(input.text))
+            return input.respond(responses[bodies.length - 1], { headers: { "content-type": "text/event-stream" } })
+          }),
+        )
+        const events = yield* TestToolRuntime.runTools({
+          request: LLM.request({
+            model: OpenAIResponses.route
+              .with({ endpoint: { baseURL: "https://api.openai.test/v1/" }, auth: Auth.bearer("test") })
+              .model({ id: "gpt-5-mini" }),
+            prompt: "List agents.",
+          }),
+          tools: {
+            list_agents: tool({
+              description: "List agents.",
+              jsonSchema: { type: "object", properties: {} },
+              execution,
+              execute: (input, context) =>
+                Effect.sync(() => {
+                  calls.push({ id: context?.id, input })
+                  return "agent list"
+                }),
+            }),
+          },
+          maxSteps: 3,
+        }).pipe(Stream.runCollect, Effect.provide(layer))
+
+        expect(calls).toEqual([
+          { id: "call_good", input: {} },
+          { id: "call_retry", input: {} },
+        ])
+        expect(events.filter(LLMEvent.is.toolError)).toMatchObject([
+          { id: "call_bad", name: "list_agents", message: expect.stringContaining("Retry") },
+        ])
+        expect(bodies).toHaveLength(3)
+        expect(bodies[1]).toMatchObject({
+          input: expect.arrayContaining([
+            { type: "function_call", call_id: "call_bad", name: "list_agents", arguments: "{" },
+            {
+              type: "function_call_output",
+              call_id: "call_bad",
+              output: expect.stringContaining("Invalid JSON input"),
+            },
+          ]),
+        })
+        expect(LLMResponse.text({ events })).toBe("Recovered.")
+        expect(events.filter(LLMEvent.is.finish)).toMatchObject([{ reason: "stop" }])
+      }),
+    )
+  }
+
+  it.live("retries missing tool metadata before any output and then executes the corrected call once", () =>
+    Effect.gen(function* () {
+      const responses = [
+        sseEvents(
+          { type: "response.function_call_arguments.delta", item_id: "missing", delta: "{}" },
+          { type: "response.completed", response: {} },
+        ),
+        sseEvents(
+          {
+            type: "response.output_item.done",
+            item: { type: "function_call", id: "item_1", call_id: "call_1", name: "list_agents", arguments: "{}" },
+          },
+          { type: "response.completed", response: {} },
+        ),
+        sseEvents(
+          { type: "response.output_text.delta", item_id: "msg_1", delta: "Recovered." },
+          { type: "response.completed", response: {} },
+        ),
+      ]
+      let attempts = 0
+      let executions = 0
+      const events = yield* TestToolRuntime.runTools({
+        request: LLM.request({
+          model: OpenAIResponses.route
+            .with({ endpoint: { baseURL: "https://api.openai.test/v1/" } })
+            .model({ id: "test" }),
+          prompt: "List agents.",
+        }),
+        tools: {
+          list_agents: tool({
+            description: "List agents.",
+            jsonSchema: { type: "object" },
+            execute: () => Effect.sync(() => ++executions),
+          }),
+        },
+      }).pipe(
+        Stream.runCollect,
+        Effect.provide(
+          dynamicResponse((input) =>
+            Effect.sync(() =>
+              input.respond(responses[attempts++], { headers: { "content-type": "text/event-stream" } }),
+            ),
+          ),
+        ),
+      )
+      expect(attempts).toBe(3)
+      expect(executions).toBe(1)
+      expect(LLMResponse.text({ events })).toBe("Recovered.")
+    }),
+  )
+
+  for (const progress of ["none", "text", "tool"] as const) {
+    it.live(`bounds missing-metadata retries with ${progress} progress`, () =>
+      Effect.gen(function* () {
+        let attempts = 0
+        const failure = new LLMError({
+          module: "ProviderShared",
+          method: "stream",
+          reason: new InvalidProviderOutputReason({
+            route: "openai-responses",
+            message: "OpenAI Responses tool argument delta is missing its tool call",
+          }),
+        })
+        const error = yield* ToolRuntime.stream({
+          request: baseRequest,
+          tools: { get_weather },
+          stream: () => {
+            attempts++
+            return Stream.make(
+              progress === "text"
+                ? LLMEvent.textDelta({ id: "text", text: "Partial" })
+                : progress === "tool"
+                  ? LLMEvent.toolCall({ id: "call_1", name: "get_weather", input: { city: "Paris" } })
+                  : LLMEvent.stepStart({ index: 0 }),
+            ).pipe(Stream.concat(Stream.fail(failure)))
+          },
+        }).pipe(Stream.runCollect, Effect.flip)
+        expect(error).toBe(failure)
+        expect(attempts).toBe(progress === "none" ? 3 : 1)
+      }),
+    )
+  }
 
   it.effect("emits tool-error when the handler returns a ToolFailure", () =>
     Effect.gen(function* () {

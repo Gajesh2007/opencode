@@ -3,6 +3,8 @@
 - Supports full regex syntax (eg. "log.*Error", "function\s+\w+", etc.)
 - Filter files by pattern with the include parameter (eg. "*.js", "*.{ts,tsx}")
 - Returns file paths and line numbers with at least one match sorted by modification time
+- Optional context (integer 0-10, default 0) includes actual neighboring lines before and after matches; context lines are labeled and overlapping context is shown once
+- Positive context uses a bounded search: at most 100 displayed matches, 2000 output lines, 50 KiB of output, and 2000 characters per source line. Binary files are skipped. Search/line/output truncation is reported; truncated results do not cover all matches or context
 - Use this tool when you need to find files containing specific patterns
 - If you need to identify/count the number of matches within files, use the Bash tool with `rg` (ripgrep) directly. Do NOT use `grep`.
 - When you are doing an open-ended search that may require multiple rounds of globbing and grepping, use the Task tool instead

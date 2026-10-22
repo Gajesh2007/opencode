@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test"
 import path from "path"
 import { tool, type ModelMessage } from "ai"
+import { createOpenAI } from "@ai-sdk/openai"
 import { Cause, Effect, Exit, Fiber, Layer, Stream } from "effect"
 import { InstanceRef } from "../../src/effect/instance-ref"
 import { HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
@@ -1109,6 +1110,157 @@ describe("session.llm.stream", () => {
       }),
     { config: () => openAIConfig(loadFixture("openai", "gpt-5.2").model, `${state.server!.url.origin}/v1`) },
   )
+
+  for (const scenario of ["native", "http", "custom-fetch", "prewarm"] as const) {
+    it.instance(
+      `Ultrafast service policy with native flag off: ${scenario}`,
+      () =>
+        Effect.gen(function* () {
+          const resolved = yield* Provider.use.getModel(ProviderID.openai, ModelID.make("gpt-6.1-sol"))
+          const counts = { sdk: 0, socket: 0, customFetch: 0 }
+          const bodies: Record<string, unknown>[] = []
+          const chunks = [
+            { type: "response.created", response: { id: "resp_fast", created_at: 1, model: "gpt-6.1-sol" } },
+            {
+              type: "response.output_item.added",
+              output_index: 0,
+              item: { type: "message", id: "msg_fast", status: "in_progress", role: "assistant", content: [] },
+            },
+            {
+              type: "response.content_part.added",
+              item_id: "msg_fast",
+              output_index: 0,
+              content_index: 0,
+              part: { type: "output_text", text: "", annotations: [] },
+            },
+            { type: "response.output_text.delta", item_id: "msg_fast", delta: "fast" },
+            {
+              type: "response.completed",
+              response: {
+                id: "resp_fast",
+                incomplete_details: null,
+                usage: { input_tokens: 1, input_tokens_details: null, output_tokens: 1, output_tokens_details: null },
+              },
+            },
+          ]
+          const sdkRequest =
+            scenario === "http" || scenario === "custom-fetch"
+              ? waitRequest("/responses", createEventResponse(chunks, true))
+              : undefined
+          const customFetch = Object.assign(
+            async (input: RequestInfo | URL, init?: RequestInit) => {
+              counts.customFetch++
+              return globalThis.fetch(input, init)
+            },
+            { preconnect: () => undefined },
+          )
+          const provider = Layer.effect(
+            Provider.Service,
+            Effect.gen(function* () {
+              const original = yield* Provider.Service
+              return Provider.Service.of({
+                ...original,
+                getProvider: (id) =>
+                  original.getProvider(id).pipe(
+                    Effect.map((item) => ({
+                      ...item,
+                      options: {
+                        ...item.options,
+                        baseURL: "https://api.openai.com/v1",
+                        ...(scenario === "http" ? { transport: "http" } : {}),
+                        ...(scenario === "custom-fetch" ? { fetch: customFetch } : {}),
+                      },
+                    })),
+                  ),
+                getLanguage: (model) => {
+                  counts.sdk++
+                  if (scenario === "custom-fetch")
+                    return Effect.succeed(
+                      createOpenAI({
+                        apiKey: "test-openai-key",
+                        baseURL: `${state.server!.url.origin}/v1`,
+                        fetch: customFetch,
+                      }).responses(model.api.id),
+                    )
+                  return original.getLanguage(model)
+                },
+              })
+            }),
+          ).pipe(Layer.provide(Provider.defaultLayer))
+          const socket = Layer.succeed(WebSocketExecutor.Service, {
+            open: ({ url }) =>
+              Effect.sync(() => {
+                counts.socket++
+                expect(url).toBe("wss://api.openai.com/v1/responses")
+                return {
+                  sendText: (body: string) =>
+                    Effect.sync(() => {
+                      bodies.push(JSON.parse(body) as Record<string, unknown>)
+                    }),
+                  messages: Stream.fromIterable(chunks.map((chunk) => JSON.stringify(chunk))),
+                  close: Effect.void,
+                }
+              }),
+          })
+          const layer = LLM.layer.pipe(
+            Layer.provide(Auth.defaultLayer),
+            Layer.provide(Config.defaultLayer),
+            Layer.provide(provider),
+            Layer.provide(Plugin.defaultLayer),
+            Layer.provide(LLMClient.layer.pipe(Layer.provide(Layer.mergeAll(RequestExecutor.defaultLayer, socket)))),
+            Layer.provide(RuntimeFlags.layer({ experimentalNativeLlm: false })),
+          )
+          const sessionID = SessionID.make(`session-fast-policy-${scenario}`)
+          const result = yield* drainWith(layer, {
+            user: {
+              id: MessageID.make(`msg-fast-policy-${scenario}`),
+              sessionID,
+              role: "user",
+              time: { created: Date.now() },
+              agent: "test",
+              model: { providerID: ProviderID.openai, modelID: resolved.id, serviceTier: "ultrafast" },
+            },
+            sessionID,
+            model: resolved,
+            agent: {
+              name: "test",
+              mode: "primary",
+              permission: [],
+              options: scenario === "prewarm" ? { promptCacheOptions: { prewarm: true } } : {},
+            },
+            system: ["Be helpful"],
+            messages: [{ role: "user", content: "hello" }],
+            tools: {},
+          }).pipe(Effect.exit)
+          if (scenario === "prewarm") {
+            expect(Exit.isFailure(result)).toBe(true)
+            if (Exit.isFailure(result))
+              expect(Cause.pretty(result.cause)).toContain("Cache prewarming must use a separate API request")
+            expect(counts.sdk).toBe(0)
+            expect(counts.socket).toBe(0)
+            expect(counts.customFetch).toBe(0)
+            return
+          }
+          expect(Exit.isSuccess(result)).toBe(true)
+          expect(counts.socket).toBe(scenario === "native" ? 1 : 0)
+          expect(counts.sdk).toBe(scenario === "native" ? 0 : 1)
+          expect(counts.customFetch).toBe(scenario === "custom-fetch" ? 1 : 0)
+          if (sdkRequest) {
+            const capture = yield* Effect.promise(() => sdkRequest)
+            expect(capture.body.service_tier).toBe("ultrafast")
+          }
+          if (scenario === "native")
+            expect(bodies[0]).toMatchObject({ type: "response.create", service_tier: "ultrafast" })
+        }),
+      {
+        config: () =>
+          openAIConfig(
+            { ...loadFixture("openai", "gpt-5.2").model, id: "gpt-6.1-sol" },
+            `${state.server!.url.origin}/v1`,
+          ),
+      },
+    )
+  }
 
   for (const eligible of [true, false]) {
     it.instance(

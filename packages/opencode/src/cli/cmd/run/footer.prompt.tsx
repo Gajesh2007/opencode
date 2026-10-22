@@ -17,6 +17,7 @@ import {
   displayCharAt,
   displaySlice,
   isExitCommand,
+  isSessionMention,
   mentionTriggerIndex,
   isNewCommand,
   movePromptHistory,
@@ -668,7 +669,7 @@ export function createPromptState(input: PromptInput): PromptState {
 
     if (visible() && mode() === "mention") {
       const query = displaySlice(text, at(), cursor)
-      if (cursor <= at() || /\s/.test(query)) {
+      if (cursor <= at() || /\s/.test(query) || isSessionMention(query)) {
         hide()
         return
       }

@@ -1133,3 +1133,43 @@ it.instance(
   }),
   { git: true },
 )
+
+it.instance(
+  "patch against a freshly tracked tree matches the staged patch",
+  withTrackedSnapshot(({ tmp, snapshot, before }) =>
+    Effect.gen(function* () {
+      yield* write(`${tmp.path}/a.txt`, "changed")
+      yield* rm(`${tmp.path}/b.txt`)
+      yield* write(`${tmp.path}/nested/new.txt`, "new")
+      const after = yield* snapshot.track()
+      expect(after).toBeTruthy()
+      const trees = yield* snapshot.patch(before, after!)
+      const staged = yield* snapshot.patch(before)
+      expect(trees.hash).toBe(before)
+      expect(trees.files.toSorted()).toEqual(staged.files.toSorted())
+      expect(trees.files.toSorted()).toEqual(
+        [fwd(tmp.path, "a.txt"), fwd(tmp.path, "b.txt"), fwd(tmp.path, "nested", "new.txt")].toSorted(),
+      )
+      // The tree patch reverts exactly like the staged one.
+      yield* snapshot.revert([trees])
+      expect(yield* readText(`${tmp.path}/a.txt`)).toBe(tmp.extra.aContent)
+      expect(yield* readText(`${tmp.path}/b.txt`)).toBe(tmp.extra.bContent)
+      expect(yield* exists(`${tmp.path}/nested/new.txt`)).toBe(false)
+    }),
+  ),
+  { git: true },
+)
+
+it.instance(
+  "patch between identical trees compares trees, not the worktree",
+  withTrackedSnapshot(({ tmp, snapshot, before }) =>
+    Effect.gen(function* () {
+      expect(yield* snapshot.track()).toBe(before)
+      // Untracked edits after the tree was captured belong to the next step.
+      yield* write(`${tmp.path}/a.txt`, "later")
+      expect(yield* snapshot.patch(before, before)).toEqual({ hash: before, files: [] })
+      expect((yield* snapshot.patch(before)).files).toEqual([fwd(tmp.path, "a.txt")])
+    }),
+  ),
+  { git: true },
+)

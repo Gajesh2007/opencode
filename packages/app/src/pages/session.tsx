@@ -1569,7 +1569,12 @@ export default function Page() {
       })
 
       const task = !next
-        ? halt(sessionID).then(() => sdk.client.session.unrevert({ sessionID, restoreFiles: input.restoreFiles }))
+        ? halt(sessionID).then(() =>
+            sdk.client.session.unrevert({
+              sessionID,
+              restoreFiles: input.restoreFiles === undefined ? undefined : input.restoreFiles ? "true" : "false",
+            }),
+          )
         : halt(sessionID).then(() =>
             sdk.client.session.revert({
               sessionID,

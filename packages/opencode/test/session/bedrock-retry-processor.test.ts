@@ -422,50 +422,60 @@ it.instance("raw 429 Retry-After is honored within the same processor budget", (
   }),
 )
 
-it.instance("raw exhausted 429 budget cannot multiply through processor retry", () =>
+it.instance("raw exhausted 429 preserves the provider error without additional processor retries", () =>
   Effect.gen(function* () {
     let dispatches = 0
+    const failure = throttled()
     const test = yield* setup((input, call) => {
       if (call > 1) return text()
       return raw(input, async () => {
         dispatches++
-        throw throttled()
+        throw failure
       })
     })
     expect(yield* test.handle.process(test.input)).toBe("stop")
     expect(test.calls).toHaveLength(1)
     expect(dispatches).toBe(3)
     expect(test.calls[0].bedrockRetry).toMatchObject({ active: true, attempts: 3, committed: false })
-    expect(test.calls[0].bedrockRetry?.error).toBeInstanceOf(BedrockRetry.BedrockRetryError)
+    expect(test.calls[0].bedrockRetry?.error).toBe(failure)
+    expect(test.message.error).toMatchObject({
+      name: "APIError",
+      data: { message: "Too many requests", statusCode: 429 },
+    })
     expect(test.retries).toEqual([])
   }),
 )
 
-it.instance("raw Retry-After beyond the wall budget stops without a replacement dispatch", () =>
+it.instance("raw Retry-After beyond the wall budget preserves the provider error without redispatch", () =>
   Effect.gen(function* () {
     let dispatches = 0
+    const failure = new APICallError({
+      message: "Too many requests",
+      url: "https://unused.invalid",
+      requestBodyValues: {},
+      statusCode: 429,
+      isRetryable: true,
+      responseHeaders: { "retry-after": "80" },
+    })
     const test = yield* setup((input) =>
       raw(input, async () => {
         dispatches++
-        throw new APICallError({
-          message: "Too many requests",
-          url: "https://unused.invalid",
-          requestBodyValues: {},
-          statusCode: 429,
-          isRetryable: true,
-          responseHeaders: { "retry-after": "80" },
-        })
+        throw failure
       }),
     )
     expect(yield* test.handle.process(test.input)).toBe("stop")
     expect(test.calls).toHaveLength(1)
     expect(dispatches).toBe(1)
-    expect(test.calls[0].bedrockRetry?.error).toMatchObject({ reason: "budget" })
+    expect(test.calls[0].bedrockRetry?.error).toBe(failure)
+    expect(test.message.error).toMatchObject({
+      name: "APIError",
+      data: { message: "Too many requests", statusCode: 429 },
+    })
     expect(test.retries).toEqual([])
   }),
 )
 
-it.instance("raw hollow exhaustion does not gain two additional processor retries", () =>
+it.instance("raw hollow exhaustion finishes without an error or additional processor retries", () =>
   Effect.gen(function* () {
     let dispatches = 0
     const test = yield* setup((input) =>
@@ -474,10 +484,14 @@ it.instance("raw hollow exhaustion does not gain two additional processor retrie
         return { stream: new ReadableStream<LanguageModelV3StreamPart>({ start: (controller) => controller.close() }) }
       }),
     )
-    expect(yield* test.handle.process(test.input)).toBe("stop")
+    expect(yield* test.handle.process(test.input)).toBe("continue")
     expect(test.calls).toHaveLength(1)
     expect(dispatches).toBe(3)
-    expect(test.calls[0].bedrockRetry?.error).toMatchObject({ reason: "empty" })
+    expect(test.calls[0].bedrockRetry?.error).toBeUndefined()
+    expect(test.message.error).toBeUndefined()
+    expect(test.message.finish).toBe("unknown")
+    expect(test.message.time.completed).toBeDefined()
+    expect(test.errors).toEqual([])
     expect(test.retries).toEqual([])
   }),
 )

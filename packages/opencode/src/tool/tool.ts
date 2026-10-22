@@ -38,6 +38,11 @@ export type Context<M extends Metadata = Metadata> = {
   abort: AbortSignal
   callID?: string
   extra?: { [key: string]: unknown }
+  timing?: {
+    start(): void
+    firstOutput(): void
+    end(result: { exitCode?: number | null; status: "completed" | "error" | "interrupted" | "timeout" }): void
+  }
   messages: MessageV2.WithParts[]
   metadata(input: { title?: string; metadata?: M }): Effect.Effect<void>
   ask(input: Omit<Permission.Request, "id" | "sessionID" | "tool">): Effect.Effect<void>
@@ -56,6 +61,7 @@ export interface Def<
 > {
   id: string
   description: string
+  readOnly?: boolean
   parameters: Parameters
   jsonSchema?: JSONSchema7
   execute(args: Schema.Schema.Type<Parameters>, ctx: Context): Effect.Effect<ExecuteResult<M>>

@@ -185,7 +185,7 @@ const followUp = LLM.request({
 })
 ```
 
-Routes lower these into provider-native assistant tool-call messages and tool-result messages. Streaming providers should emit `tool-input-delta` events while arguments arrive, then a final `tool-call` event with parsed input.
+Routes lower these into provider-native assistant tool-call messages and tool-result messages. Streaming providers should emit `tool-input-delta` events while arguments arrive, then a final `tool-call` event with parsed input. Malformed argument JSON is preserved as raw `input` with an `inputError`; these calls must return tool-error feedback without invoking a handler.
 
 ### Tool runtime
 
@@ -225,7 +225,7 @@ Handler dependencies (services, permissions, plugin hooks, abort handling) are c
 Errors must be expressed as `ToolFailure`. The runtime catches it and emits a `tool-error` event, then a `tool-result` of `type: "error"`, so the model can self-correct on the next step. Anything that is not a `ToolFailure` is treated as a defect and fails the stream. Three recoverable error paths produce `tool-error` events:
 
 - The model called an unknown tool name.
-- Input failed the `parameters` Schema.
+- Argument JSON was malformed or input failed the `parameters` Schema.
 - The handler returned a `ToolFailure`.
 
 Provider-defined / hosted tools (Anthropic `web_search` / `code_execution` / `web_fetch`, OpenAI Responses `web_search_call` / `file_search_call` / `code_interpreter_call` / `mcp_call` / `local_shell_call` / `image_generation_call` / `computer_use_call`) pass through the runtime untouched:

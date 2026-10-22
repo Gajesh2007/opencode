@@ -729,6 +729,7 @@ OpenCode can be configured using environment variables.
 | `OPENCODE_FAKE_VCS`                   | string  | Fake VCS provider for testing purposes            |
 | `OPENCODE_CLIENT`                     | string  | Client identifier (defaults to `cli`)             |
 | `OPENCODE_ENABLE_EXA`                 | boolean | Enable Exa web search tools                       |
+| `OPENCODE_DISABLE_TIMING`             | boolean | Disable local execution timing storage            |
 | `OPENCODE_SERVER_PASSWORD`            | string  | Enable basic auth for `serve`/`web`               |
 | `OPENCODE_SERVER_USERNAME`            | string  | Override basic auth username (default `opencode`) |
 | `OPENCODE_MODELS_URL`                 | string  | Custom URL for fetching models configuration      |
@@ -759,3 +760,21 @@ These environment variables enable experimental features that may change or be r
 | `OPENCODE_EXPERIMENTAL_PARALLEL`                | boolean | Enable parallel web search execution    |
 | `OPENCODE_EXPERIMENTAL_SCOUT`                   | boolean | Enable Scout subagent                   |
 | `OPENCODE_EXPERIMENTAL_WORKSPACES`              | boolean | Enable workspace support                |
+| `OPENCODE_EXPERIMENTAL_WORKFLOW`                | boolean | Enable workflow orchestration           |
+| `OPENCODE_EXPERIMENTAL_METAAGENT`               | boolean | Enable the reasoning reviewer           |
+
+The workflow tool, its built-in `review` agent and `/review` command are disabled by default.
+Enable them explicitly with `OPENCODE_EXPERIMENTAL_WORKFLOW=true`; the general
+`OPENCODE_EXPERIMENTAL` flag does not enable them. Declarative agent `workflow`
+settings are inactive without this opt-in. Task, spawn and batch remain available.
+
+The meta-agent tool, `/metaagent` command, reviewer calls and lens prompt injection
+are also disabled by default. Enable them with `OPENCODE_EXPERIMENTAL_METAAGENT=true`;
+`OPENCODE_EXPERIMENTAL` alone does not enable them. Persisted enabled settings stay
+inactive while the dedicated flag is off. After opting in, configure a session
+with `/metaagent` or the `metaagent` tool.
+
+Auxiliary reviewer and goal-steering calls have a 30-second deadline and an
+8,192-character response limit. Provider failures, incomplete/empty output and
+timeouts are unavailable results, not approval or goal completion. Cancellation
+still interrupts the call; unavailable steering falls back to template continuation.

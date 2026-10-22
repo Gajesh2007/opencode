@@ -78,6 +78,37 @@ const languageBaseURL = (language: unknown) => (language as { config: { baseURL:
 const it = testEffect(Layer.mergeAll(Provider.defaultLayer, Env.defaultLayer, Plugin.defaultLayer))
 const experimentalModels = testEffect(providerLayer({ enableExperimentalModels: true }))
 
+it.instance(
+  "distinguishes missing prices from explicitly free model prices",
+  () =>
+    Effect.gen(function* () {
+      const provider = yield* Provider.Service
+      const missing = yield* provider.getModel(ProviderID.make("pricing-test"), ModelID.make("missing"))
+      const free = yield* provider.getModel(ProviderID.make("pricing-test"), ModelID.make("free"))
+      const paid = yield* provider.getModel(ProviderID.make("pricing-test"), ModelID.make("paid"))
+      expect(missing.cost.input).toBe(0)
+      expect(missing.costKnown).toBe(false)
+      expect(free.cost).toEqual({ input: 0, output: 0, cache: { read: 0, write: 0 } })
+      expect(free.costKnown).toBe(true)
+      expect(paid.costKnown).toBe(true)
+    }),
+  {
+    config: {
+      provider: {
+        "pricing-test": {
+          npm: "@ai-sdk/openai-compatible",
+          options: { apiKey: "test-key", baseURL: "http://localhost:1/v1" },
+          models: {
+            missing: { name: "Missing prices" },
+            free: { name: "Explicitly free", cost: { input: 0, output: 0 } },
+            paid: { name: "Known prices", cost: { input: 1, output: 2 } },
+          },
+        },
+      },
+    },
+  },
+)
+
 const alphaProviderConfig = {
   provider: {
     "custom-provider": {
@@ -1289,6 +1320,125 @@ it.instance(
             "prime-intellect/intellect-3": {},
             "deepseek/deepseek-r1-0528": { name: "DeepSeek R1" },
           },
+        },
+      },
+    },
+  },
+)
+
+test.each([
+  ["openai", "@ai-sdk/openai", "gpt-6.1-sol", true],
+  ["openai", "@ai-sdk/openai", "gpt-6.1-sol-2026-10-01", true],
+  ["amazon-bedrock", "@ai-sdk/openai", "us.openai.gpt-6.1-sol", true],
+  ["amazon-bedrock", "@ai-sdk/openai", "global.openai.gpt-6.1-sol", true],
+  ["amazon-bedrock", "@ai-sdk/amazon-bedrock", "us.openai.gpt-6.1-sol", true],
+  ["amazon-bedrock", "@ai-sdk/amazon-bedrock", "global.openai.gpt-6.1-sol", true],
+  ["amazon-bedrock", "@ai-sdk/amazon-bedrock/mantle", "openai.gpt-6.1-sol", true],
+  ["azure", "@ai-sdk/azure", "gpt-6.1-sol", true],
+  ["custom", "@ai-sdk/openai", "gpt-6.1-sol", true],
+  ["openai-codex", "@ai-sdk/openai", "gpt-6.1-sol", true],
+  ["openrouter", "@openrouter/ai-sdk-provider", "openai/gpt-6.1-sol", false],
+  ["vercel", "@ai-sdk/gateway", "openai/gpt-6.1-sol", false],
+  ["custom", "@ai-sdk/openai-compatible", "gpt-6.1-sol", false],
+  ["openai", "@ai-sdk/openai", "gpt-6.1-sol-mini", false],
+] as const)("Ultrafast mode fallback: %s %s %s", (providerID, npm, id, supported) => {
+  const provider: ModelsDev.Provider = {
+    id: providerID,
+    name: providerID,
+    env: [],
+    npm,
+    api: "https://provider.example/v1",
+    models: {
+      [id]: {
+        id,
+        name: "Sol 6.1",
+        release_date: "2026-10-01",
+        attachment: true,
+        reasoning: true,
+        temperature: false,
+        tool_call: true,
+        cost: { input: 2, output: 10, cache_read: 0.2 },
+        limit: { context: 1_000_000, output: 128_000 },
+      },
+    },
+  }
+  const original = structuredClone(provider)
+  const models = Provider.fromModelsDevProvider(provider).models
+  expect(provider).toEqual(original)
+  expect(models[id].api).toEqual({
+    id,
+    npm: npm === "@ai-sdk/amazon-bedrock" ? "@ai-sdk/amazon-bedrock/mantle" : npm,
+    url:
+      npm === "@ai-sdk/amazon-bedrock"
+        ? "https://bedrock-runtime.${AWS_REGION}.amazonaws.com/openai/v1"
+        : "https://provider.example/v1",
+  })
+  expect(models[id].options.serviceTier).toBeUndefined()
+  if (!supported) {
+    expect(models[id].serviceTiers?.ultrafast).toBeUndefined()
+    expect(models[`${id}-ultrafast`]).toBeUndefined()
+    return
+  }
+  expect(models[id].serviceTiers?.ultrafast).toEqual({ serviceTier: "ultrafast" })
+  expect(Provider.defaultModelIDs({ [providerID]: { models } })[providerID]).toBe(id)
+  expect(models[`${id}-ultrafast`]).toMatchObject({
+    id: `${id}-ultrafast`,
+    name: "Sol 6.1 Ultrafast",
+    api: models[id].api,
+    options: { serviceTier: "ultrafast" },
+    cost: models[id].cost,
+    limit: models[id].limit,
+    variants: models[id].variants,
+  })
+
+  const upstream = Provider.fromModelsDevProvider({
+    ...provider,
+    models: {
+      [id]: {
+        ...provider.models[id],
+        experimental: {
+          modes: {
+            ultrafast: {
+              cost: { input: 4, output: 20, cache_read: 0.4 },
+              provider: { body: { service_tier: "ultrafast", custom_option: true }, headers: { "X-Tier": "preview" } },
+            },
+            fast: { provider: { body: { service_tier: "priority" } } },
+          },
+        },
+      },
+    },
+  }).models
+  expect(upstream[`${id}-ultrafast`]).toMatchObject({
+    api: models[id].api,
+    cost: { input: 4, output: 20, cache: { read: 0.4 } },
+    options: { serviceTier: "ultrafast", customOption: true },
+    headers: { "X-Tier": "preview" },
+  })
+  expect(upstream[`${id}-fast`].options.serviceTier).toBe("priority")
+
+  if (providerID === "openai") {
+    const synthetic = Provider.withSyntheticProviders({ openai: provider })
+    expect(Provider.fromModelsDevProvider(synthetic[ProviderID.openaiCodex]).models[`${id}-ultrafast`]).toMatchObject({
+      api: { id },
+      options: { serviceTier: "ultrafast" },
+    })
+  }
+})
+
+it.instance(
+  "Sol 6.1 Ultrafast can be disabled through model configuration",
+  Effect.gen(function* () {
+    yield* set("OPENAI_API_KEY", "test-api-key")
+    const providers = yield* list
+    expect(providers[ProviderID.openai].models["gpt-6.1-sol"].serviceTiers).toEqual({
+      priority: { serviceTier: "priority" },
+    })
+  }),
+  {
+    config: {
+      provider: {
+        openai: {
+          models: { "gpt-6.1-sol": { serviceTiers: { ultrafast: { disabled: true } } } },
         },
       },
     },

@@ -3,7 +3,11 @@
 import { client } from "./client.gen.js"
 import { buildClientParams, type Client, type Options as Options2, type TDataShape } from "./client/index.js"
 import type {
+  AgentListSubagentModelsErrors,
+  AgentListSubagentModelsResponses,
   AgentPartInput,
+  AgentSetSubagentModelErrors,
+  AgentSetSubagentModelResponses,
   AppAgentsErrors,
   AppAgentsResponses,
   AppLogErrors,
@@ -79,6 +83,8 @@ import type {
   GlobalEventResponses,
   GlobalHealthErrors,
   GlobalHealthResponses,
+  GlobalInfoErrors,
+  GlobalInfoResponses,
   GlobalUpgradeErrors,
   GlobalUpgradeResponses,
   InstanceDisposeErrors,
@@ -158,6 +164,10 @@ import type {
   QuestionRejectResponses,
   QuestionReplyErrors,
   QuestionReplyResponses,
+  ServerConnectErrors,
+  ServerConnectResponses,
+  ServerPairErrors,
+  ServerPairResponses,
   SessionAbortErrors,
   SessionAbortResponses,
   SessionChildrenErrors,
@@ -177,6 +187,8 @@ import type {
   SessionForkResponses,
   SessionGetErrors,
   SessionGetResponses,
+  SessionGoalErrors,
+  SessionGoalResponses,
   SessionInitErrors,
   SessionInitResponses,
   SessionListErrors,
@@ -191,6 +203,8 @@ import type {
   SessionPromptResponses,
   SessionRevertErrors,
   SessionRevertResponses,
+  SessionSearchErrors,
+  SessionSearchResponses,
   SessionShareErrors,
   SessionShareResponses,
   SessionShellErrors,
@@ -207,6 +221,10 @@ import type {
   SessionUnshareResponses,
   SessionUpdateErrors,
   SessionUpdateResponses,
+  SessionUsageErrors,
+  SessionUsageResponses,
+  SessionWarmErrors,
+  SessionWarmResponses,
   SubtaskPartInput,
   SyncHistoryListErrors,
   SyncHistoryListResponses,
@@ -358,6 +376,7 @@ export class Auth extends HeyApiClient {
    */
   public set<ThrowOnError extends boolean = false>(
     parameters: {
+      "if-match"?: string
       providerID: string
       auth?: Auth3
     },
@@ -368,6 +387,7 @@ export class Auth extends HeyApiClient {
       [
         {
           args: [
+            { in: "headers", key: "if-match" },
             { in: "path", key: "providerID" },
             { key: "auth", map: "body" },
           ],
@@ -546,6 +566,18 @@ export class Global extends HeyApiClient {
   }
 
   /**
+   * Get server info
+   *
+   * Return the server version, process id, every reachable connection URL, and paths.
+   */
+  public info<ThrowOnError extends boolean = false>(options?: Options<never, ThrowOnError>) {
+    return (options?.client ?? this.client).get<GlobalInfoResponses, GlobalInfoErrors, ThrowOnError>({
+      url: "/global/info",
+      ...options,
+    })
+  }
+
+  /**
    * Get global events
    *
    * Subscribe to global events from the OpenCode system using server-sent events.
@@ -596,6 +628,39 @@ export class Global extends HeyApiClient {
   private _config?: Config
   get config(): Config {
     return (this._config ??= new Config({ client: this.client }))
+  }
+}
+
+export class Server extends HeyApiClient {
+  /**
+   * Create pairing code
+   *
+   * Create a short-lived, single-use code for a /auth/connect/:code pairing link.
+   */
+  public pair<ThrowOnError extends boolean = false>(options?: Options<never, ThrowOnError>) {
+    return (options?.client ?? this.client).post<ServerPairResponses, ServerPairErrors, ThrowOnError>({
+      url: "/api/pair",
+      ...options,
+    })
+  }
+
+  /**
+   * Redeem pairing code
+   *
+   * Redeem a pairing code. Browsers receive a session cookie and a redirect to the web UI; requests that accept JSON receive a session token to use as the password.
+   */
+  public connect<ThrowOnError extends boolean = false>(
+    parameters: {
+      code: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "path", key: "code" }] }])
+    return (options?.client ?? this.client).get<ServerConnectResponses, ServerConnectErrors, ThrowOnError>({
+      url: "/auth/connect/{code}",
+      ...options,
+      ...params,
+    })
   }
 }
 
@@ -1893,6 +1958,91 @@ export class Command extends HeyApiClient {
   }
 }
 
+export class Agent extends HeyApiClient {
+  /**
+   * Set subagent model
+   *
+   * Set or clear a runtime model override for a subagent. Omit providerID/modelID to clear.
+   */
+  public setSubagentModel<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+      agent?: string
+      providerID?: string
+      modelID?: string
+      variant?: string
+      serviceTier?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "body", key: "agent" },
+            { in: "body", key: "providerID" },
+            { in: "body", key: "modelID" },
+            { in: "body", key: "variant" },
+            { in: "body", key: "serviceTier" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<
+      AgentSetSubagentModelResponses,
+      AgentSetSubagentModelErrors,
+      ThrowOnError
+    >({
+      url: "/agent/subagent-model",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  /**
+   * List subagent model overrides
+   *
+   * Get all current runtime subagent model overrides.
+   */
+  public listSubagentModels<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<
+      AgentListSubagentModelsResponses,
+      AgentListSubagentModelsErrors,
+      ThrowOnError
+    >({
+      url: "/agent/subagent-models",
+      ...options,
+      ...params,
+    })
+  }
+}
+
 export class Lsp extends HeyApiClient {
   /**
    * Get LSP status
@@ -3132,6 +3282,44 @@ export class Session2 extends HeyApiClient {
   }
 
   /**
+   * Search folder chats
+   *
+   * Search all persisted sessions in the exact current directory and workspace, including archived and child sessions. Searches titles, message summary titles, and user/assistant text; excludes tool bodies. Results use stable session ID order (newest generated IDs first), unaffected by chat updates. Follow next as cursor until absent.
+   */
+  public search<ThrowOnError extends boolean = false>(
+    parameters: {
+      directory?: string
+      workspace?: string
+      query: string
+      mode?: "all" | "title"
+      limit?: string
+      cursor?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "query", key: "query" },
+            { in: "query", key: "mode" },
+            { in: "query", key: "limit" },
+            { in: "query", key: "cursor" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<SessionSearchResponses, SessionSearchErrors, ThrowOnError>({
+      url: "/session/search",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
    * Get session status
    *
    * Retrieve the current status of all sessions, including active, idle, and completed states.
@@ -3271,6 +3459,55 @@ export class Session2 extends HeyApiClient {
   }
 
   /**
+   * Warm session model
+   *
+   * Best-effort preparation using selection IDs only, without sending a draft or creating a session.
+   */
+  public warm<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+      providerID?: string
+      modelID?: string
+      agent?: string
+      variant?: string
+      serviceTier?: string
+      upstream?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "body", key: "providerID" },
+            { in: "body", key: "modelID" },
+            { in: "body", key: "agent" },
+            { in: "body", key: "variant" },
+            { in: "body", key: "serviceTier" },
+            { in: "body", key: "upstream" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<SessionWarmResponses, SessionWarmErrors, ThrowOnError>({
+      url: "/session/{sessionID}/warm",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  /**
    * Get session children
    *
    * Retrieve all child sessions that were forked from the specified parent session.
@@ -3329,6 +3566,70 @@ export class Session2 extends HeyApiClient {
     )
     return (options?.client ?? this.client).get<SessionTodoResponses, SessionTodoErrors, ThrowOnError>({
       url: "/session/{sessionID}/todo",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Get task usage
+   *
+   * Get recorded execution usage for this session and its descendants, without counting copied fork history. Includes unknown usage and pricing coverage; this is not an invoice or a complete external-tool spending total.
+   */
+  public usage<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<SessionUsageResponses, SessionUsageErrors, ThrowOnError>({
+      url: "/session/{sessionID}/usage",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Get session goal
+   *
+   * Retrieve the active goal for a session, including objective, status, and token usage.
+   */
+  public goal<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<SessionGoalResponses, SessionGoalErrors, ThrowOnError>({
+      url: "/session/{sessionID}/goal",
       ...options,
       ...params,
     })
@@ -3994,7 +4295,7 @@ export class Session2 extends HeyApiClient {
       sessionID: string
       directory?: string
       workspace?: string
-      restoreFiles?: boolean
+      restoreFiles?: "true" | "false"
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -5060,6 +5361,11 @@ export class OpencodeClient extends HeyApiClient {
     return (this._global ??= new Global({ client: this.client }))
   }
 
+  private _server?: Server
+  get server(): Server {
+    return (this._server ??= new Server({ client: this.client }))
+  }
+
   private _event?: Event
   get event(): Event {
     return (this._event ??= new Event({ client: this.client }))
@@ -5113,6 +5419,11 @@ export class OpencodeClient extends HeyApiClient {
   private _command?: Command
   get command(): Command {
     return (this._command ??= new Command({ client: this.client }))
+  }
+
+  private _agent?: Agent
+  get agent(): Agent {
+    return (this._agent ??= new Agent({ client: this.client }))
   }
 
   private _lsp?: Lsp

@@ -40,6 +40,7 @@ import { Global } from "@opencode-ai/core/global"
 import { Effect, Layer, Option, Context, Schema, Types } from "effect"
 import { NonNegativeInt, PositiveInt, optionalOmitUndefined } from "@opencode-ai/core/schema"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { SessionSearch } from "./search"
 
 const log = Log.create({ service: "session" })
 
@@ -435,23 +436,27 @@ export const getUsage = (input: { model: Provider.Model; usage: Usage; metadata?
   // and any gateway markup. The local model.cost-based calculation cannot
   // know any of those, so trust the gateway number whenever it shows up.
   // Falls back to the local computation for direct-provider calls.
-  const gatewayCostRaw = (input.metadata as Record<string, any> | undefined)?.gateway?.cost
-  const gatewayCost = gatewayCostRaw !== undefined ? Number(gatewayCostRaw) : NaN
+  const gatewayCostRaw = input.metadata?.gateway?.cost
+  const gatewayCost =
+    typeof gatewayCostRaw === "number" || (typeof gatewayCostRaw === "string" && gatewayCostRaw.trim() !== "")
+      ? Number(gatewayCostRaw)
+      : NaN
 
   return {
-    cost: Number.isFinite(gatewayCost)
-      ? safe(gatewayCost)
-      : safe(
-          new Decimal(0)
-            .add(new Decimal(tokens.input).mul(costInfo?.input ?? 0).div(1_000_000))
-            .add(new Decimal(tokens.output).mul(costInfo?.output ?? 0).div(1_000_000))
-            .add(new Decimal(tokens.cache.read).mul(costInfo?.cache?.read ?? 0).div(1_000_000))
-            .add(new Decimal(tokens.cache.write).mul(costInfo?.cache?.write ?? 0).div(1_000_000))
-            // TODO: update models.dev to have better pricing model, for now:
-            // charge reasoning tokens at the same rate as output tokens
-            .add(new Decimal(tokens.reasoning).mul(costInfo?.output ?? 0).div(1_000_000))
-            .toNumber(),
-        ),
+    cost:
+      Number.isFinite(gatewayCost) && gatewayCost >= 0
+        ? safe(gatewayCost)
+        : safe(
+            new Decimal(0)
+              .add(new Decimal(tokens.input).mul(costInfo?.input ?? 0).div(1_000_000))
+              .add(new Decimal(tokens.output).mul(costInfo?.output ?? 0).div(1_000_000))
+              .add(new Decimal(tokens.cache.read).mul(costInfo?.cache?.read ?? 0).div(1_000_000))
+              .add(new Decimal(tokens.cache.write).mul(costInfo?.cache?.write ?? 0).div(1_000_000))
+              // TODO: update models.dev to have better pricing model, for now:
+              // charge reasoning tokens at the same rate as output tokens
+              .add(new Decimal(tokens.reasoning).mul(costInfo?.output ?? 0).div(1_000_000))
+              .toNumber(),
+          ),
     tokens,
   }
 }
@@ -464,6 +469,7 @@ export type NotFound = NotFoundError
 
 export interface Interface {
   readonly list: (input?: ListInput) => Effect.Effect<Info[]>
+  readonly search: (input: SessionSearch.Input) => Effect.Effect<SessionSearch.Result>
   readonly create: (input?: {
     parentID?: SessionID
     title?: string
@@ -612,6 +618,12 @@ export const layer: Layer.Layer<
       return Array.from(
         listByProject({ projectID: ctx.project.id, experimentalWorkspaces: flags.experimentalWorkspaces, ...input }),
       )
+    })
+
+    const search = Effect.fn("Session.search")(function* (input: SessionSearch.Input) {
+      const ctx = yield* InstanceState.context
+      const workspaceID = yield* InstanceState.workspaceID
+      return SessionSearch.search({ ...input, projectID: ctx.project.id, directory: ctx.directory, workspaceID })
     })
 
     const children = Effect.fn("Session.children")(function* (parentID: SessionID) {
@@ -993,6 +1005,7 @@ export const layer: Layer.Layer<
 
     return Service.of({
       list,
+      search,
       create,
       fork,
       touch,

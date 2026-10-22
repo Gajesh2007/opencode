@@ -80,6 +80,7 @@ export const httpJson = <Body, Frame>(input: HttpJsonInput<Body, Frame>): HttpJs
         framing: input.framing,
       })),
     ),
+  preconnect: (prepared, _request, runtime) => runtime.http.preconnect?.(prepared.request) ?? Effect.void,
   frames: (prepared, request, runtime) =>
     Stream.unwrap(
       runtime.http

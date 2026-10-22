@@ -65,6 +65,8 @@ function assistantFingerprint(message: LLMRequest["messages"][number] | undefine
   const content: Content[] = []
   for (const part of message.content) {
     if (part.type === "text") {
+      // Do not trim invalid output metadata before the protocol can reject it.
+      if (part.providerMetadata?.openai?.promptCacheBreakpoint !== undefined) return undefined
       append(content, { type: part.type, text: part.text })
       continue
     }
@@ -148,7 +150,7 @@ export function stream(input: {
           if (event.type === "tool-input-start")
             content.set(`tool:${event.id}`, { type: "tool-call", id: event.id, name: event.name, input: undefined })
           if (event.type === "tool-call") {
-            if (event.providerExecuted) result.failed = true
+            if (event.providerExecuted || event.inputError !== undefined) result.failed = true
             content.set(`tool:${event.id}`, { type: "tool-call", id: event.id, name: event.name, input: event.input })
           }
           if (event.type === "finish") {

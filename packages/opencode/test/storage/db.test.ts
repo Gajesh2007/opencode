@@ -1,11 +1,14 @@
 import { describe, expect } from "bun:test"
+import { Database as SQLite } from "bun:sqlite"
 import path from "path"
 import { Effect } from "effect"
 import { Global } from "@opencode-ai/core/global"
+import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { InstallationChannel } from "@opencode-ai/core/installation/version"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Database, sql } from "@/storage/db"
 import { it } from "../lib/effect"
+import { tmpdirScoped } from "../fixture/fixture"
 
 describe("Database.getChannelPath", () => {
   it.effect("returns database path for the current channel", () =>
@@ -76,4 +79,41 @@ describe("Database.Client", () => {
       }),
     { timeout: 30_000 },
   )
+})
+
+describe("Database.transaction", () => {
+  for (const behavior of [undefined, "immediate"] as const) {
+    it.live(`acquires the write lock before reads with ${behavior ?? "default"} transactions`, () =>
+      Effect.gen(function* () {
+        const dir = yield* tmpdirScoped().pipe(Effect.provide(CrossSpawnSpawner.defaultLayer))
+        const file = path.join(dir, "contention.db")
+        const competitor = new SQLite(file, { create: true })
+        competitor.run("PRAGMA journal_mode = WAL")
+        competitor.run("CREATE TABLE counter (value INTEGER NOT NULL)")
+        competitor.run("INSERT INTO counter VALUES (0)")
+        const db = Database.Client()
+        db.run(sql`ATTACH DATABASE ${file} AS contention`)
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            db.run("DETACH DATABASE contention")
+            competitor.close()
+          }),
+        )
+
+        const value = Database.transaction(
+          (tx) => {
+            const row = tx.get<{ value: number }>(sql`SELECT value FROM contention.counter`)
+            expect(row).toBeDefined()
+            expect(() => competitor.run("UPDATE counter SET value = value + 1")).toThrow("database is locked")
+            tx.run("UPDATE contention.counter SET value = value + 1")
+            return row?.value
+          },
+          { behavior },
+        )
+
+        expect(value).toBe(0)
+        expect(competitor.query<{ value: number }, []>("SELECT value FROM counter").get()?.value).toBe(1)
+      }),
+    )
+  }
 })

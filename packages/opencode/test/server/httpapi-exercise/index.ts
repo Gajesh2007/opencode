@@ -728,6 +728,18 @@ const scenarios: Scenario[] = [
       )
     }),
   http.protected
+    .get("/session/search", "session.search")
+    .seeded((ctx) => ctx.session({ title: "Search me" }))
+    .at((ctx) => ({ path: "/session/search?query=Search", headers: ctx.headers() }))
+    .json(200, (body, ctx) => {
+      object(body)
+      array(body.items)
+      check(
+        body.items.some((item) => isRecord(item) && isRecord(item.session) && item.session.id === ctx.state.id),
+        "persisted folder session should match search",
+      )
+    }),
+  http.protected
     .get("/session/status", "session.status")
     .seeded((ctx) => ctx.session({ title: "Status session" }))
     .json(200, object),

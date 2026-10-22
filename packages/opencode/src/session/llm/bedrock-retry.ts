@@ -6,9 +6,12 @@ import {
   type LanguageModelV3StreamResult,
 } from "@ai-sdk/provider"
 import * as Log from "@opencode-ai/core/util/log"
+import { errorMessage } from "@/util/error"
+import { quota, RETRY_TOKEN_QUOTA_DELAY } from "../retry"
 
 const log = Log.create({ service: "bedrock-retry" })
-const windows = [10_000, 20_000, 40_000]
+// The final attempt waits normally instead of turning retry exhaustion into an error.
+const windows = [10_000, 20_000, undefined]
 const budget = 75_000
 
 export type State = {
@@ -44,7 +47,7 @@ export class BedrockRetryError extends Error {
   override readonly name = "BedrockRetryError"
 
   constructor(
-    readonly reason: "deadline" | "budget" | "teardown" | "empty" | "provider" | "prefix" | "incomplete",
+    readonly reason: "deadline" | "budget" | "teardown" | "empty" | "prefix" | "incomplete",
     options?: ErrorOptions,
   ) {
     super(`Bedrock no-output retry stopped: ${reason}`, options)
@@ -79,7 +82,7 @@ export async function stream(input: {
   state.active = true
 
   const fail = (error: unknown): never => {
-    state.error = error instanceof Error ? error : new BedrockRetryError("provider", { cause: error })
+    state.error = toError(error)
     throw state.error
   }
 
@@ -119,10 +122,13 @@ export async function stream(input: {
       ctrl.abort(error)
     }
     const onAbort = () => invalidate(parent?.reason)
-    const clear = clock.setTimeout(
-      () => invalidate(new BedrockRetryError("deadline")),
-      Math.min(window, budget - (clock.now() - started)),
-    )
+    const clear =
+      window === undefined
+        ? () => {}
+        : clock.setTimeout(
+            () => invalidate(new BedrockRetryError("deadline")),
+            Math.min(window, budget - (clock.now() - started)),
+          )
     parent?.addEventListener("abort", onAbort, { once: true })
     const stop = () => {
       clear()
@@ -156,7 +162,21 @@ export async function stream(input: {
         if (!valid) throw new BedrockRetryError("deadline")
         if (!part.done && part.value.type === "finish")
           finished = part.value.finishReason.unified !== "other" || part.value.finishReason.raw !== undefined
-        if (part.done || part.value.type === "finish") throw new BedrockRetryError("empty")
+        if ((part.done || part.value.type === "finish") && window !== undefined) throw new BedrockRetryError("empty")
+        if (part.done) {
+          abandon("eof")
+          stop()
+          reader.releaseLock()
+          return {
+            ...result,
+            stream: new ReadableStream<LanguageModelV3StreamPart>({
+              start(controller) {
+                for (const item of prefix) controller.enqueue(item)
+                controller.close()
+              },
+            }),
+          }
+        }
         if (part.value.type === "error") throw part.value.error
         prefix.push(part.value)
         if (part.value.type === "stream-start" || part.value.type === "response-metadata") {
@@ -167,10 +187,10 @@ export async function stream(input: {
 
         // Semantic starts and unknown parts fail closed, even before visible text.
         // The latch precedes enqueueing, so eager SDK tool execution cannot race it.
-        state.committed = true
+        if (part.value.type !== "finish") state.committed = true
         stop()
         observe(part.value)
-        log.info("progress", {
+        log.info(state.committed ? "progress" : "empty completion", {
           attempt: state.attempts,
           kind: part.value.type,
           elapsedMs: clock.now() - attemptStarted,
@@ -186,10 +206,7 @@ export async function stream(input: {
                 if (!valid) return
                 valid = false
                 abandon("abort")
-                state.error =
-                  parent?.reason instanceof Error
-                    ? parent.reason
-                    : new BedrockRetryError("provider", { cause: parent?.reason })
+                state.error = toError(parent?.reason)
                 ctrl.abort(parent?.reason)
                 void source.cancel(parent?.reason).catch(() => {})
                 controller.error(state.error)
@@ -206,7 +223,7 @@ export async function stream(input: {
                 if (!valid) return
                 if (next.done) {
                   abandon("eof")
-                  if (!finished) throw new BedrockRetryError("incomplete")
+                  if (!finished && state.committed) throw new BedrockRetryError("incomplete")
                   valid = false
                   detach()
                   source.releaseLock()
@@ -216,16 +233,17 @@ export async function stream(input: {
                 observe(next.value)
                 if (next.value.type === "finish") {
                   // Bedrock synthesizes this finish when AWS messageStop is missing.
-                  if (next.value.finishReason.unified === "other" && next.value.finishReason.raw === undefined)
+                  if (
+                    state.committed &&
+                    next.value.finishReason.unified === "other" &&
+                    next.value.finishReason.raw === undefined
+                  )
                     throw new BedrockRetryError("incomplete")
                   finished = true
                 }
                 if (next.value.type === "error") {
                   abandon("error")
-                  state.error =
-                    next.value.error instanceof Error
-                      ? next.value.error
-                      : new BedrockRetryError("provider", { cause: next.value.error })
+                  state.error = toError(next.value.error)
                 }
                 controller.enqueue(next.value)
               } catch (error) {
@@ -233,7 +251,7 @@ export async function stream(input: {
                 valid = false
                 abandon("error")
                 detach()
-                state.error = error instanceof Error ? error : new BedrockRetryError("provider", { cause: error })
+                state.error = toError(error)
                 ctrl.abort(error)
                 void source.cancel(error).catch(() => {})
                 controller.error(state.error)
@@ -279,32 +297,34 @@ export async function stream(input: {
         () => {},
       ),
     ]).then(() => reader?.releaseLock())
-    const closed = await within(teardown, Math.min(1000, Math.max(0, budget - (clock.now() - started))), clock)
+    const closed = await within(
+      teardown,
+      window === undefined ? 1000 : Math.min(1000, Math.max(0, budget - (clock.now() - started))),
+      clock,
+    )
     if (parent?.aborted) return fail(parent.reason)
     if (!closed) return fail(new BedrockRetryError("teardown", { cause: result.error }))
     if (state.committed) return fail(result.error)
+    const api = APICallError.isInstance(result.error) ? result.error : undefined
+    const limit = quota(errorMessage(result.error), api?.responseBody)
     const retry =
       (result.error instanceof BedrockRetryError &&
         (result.error.reason === "deadline" || result.error.reason === "empty")) ||
-      (APICallError.isInstance(result.error) &&
-        (result.error.isRetryable ||
-          (result.error.statusCode !== undefined &&
-            ([408, 409, 425, 429].includes(result.error.statusCode) || result.error.statusCode >= 500))))
-    if (!retry) return fail(result.error)
-    if (state.attempts >= windows.length)
-      return fail(
-        result.error instanceof BedrockRetryError
-          ? result.error
-          : new BedrockRetryError("provider", { cause: result.error }),
-      )
+      (limit !== "permanent" &&
+        (api
+          ? api.isRetryable ||
+            (api.statusCode !== undefined &&
+              ([408, 409, 425, 429].includes(api.statusCode) || api.statusCode >= 500)) ||
+            (api.statusCode === undefined && limit === "temporary")
+          : limit === "temporary"))
+    if (!retry || state.attempts >= windows.length) return fail(result.error)
 
     const delay =
-      (APICallError.isInstance(result.error)
-        ? (retryAfter(result.error.responseHeaders, clock.timestamp()) ?? 2000 * 2 ** (state.attempts - 1))
-        : 0) +
+      (retryAfter(api?.responseHeaders, clock.timestamp()) ??
+        (limit === "temporary" ? RETRY_TOKEN_QUOTA_DELAY : api ? 2000 * 2 ** (state.attempts - 1) : 0)) +
       100 +
       Math.floor(Math.max(0, Math.min(1, clock.random())) * 200)
-    if (delay >= budget - (clock.now() - started)) return fail(new BedrockRetryError("budget", { cause: result.error }))
+    if (delay >= budget - (clock.now() - started)) return fail(result.error)
     await new Promise<void>((resolve, reject) => {
       const onAbort = () => {
         cancel()
@@ -319,6 +339,10 @@ export async function stream(input: {
     }).catch(fail)
   }
   return fail(new BedrockRetryError("budget"))
+}
+
+function toError(error: unknown) {
+  return error instanceof Error ? error : new Error(errorMessage(error), { cause: error })
 }
 
 function retryAfter(headers: Record<string, string> | undefined, now: number) {

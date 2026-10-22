@@ -38,8 +38,9 @@ export const ControlApi = HttpApi.make("control").add(
       HttpApiEndpoint.put("authSet", ControlPaths.auth, {
         params: AuthParams,
         payload: Auth.Info,
+        headers: Schema.Struct({ "if-match": Schema.optional(Schema.String) }),
         success: described(Schema.Boolean, "Successfully set authentication credentials"),
-        error: HttpApiError.BadRequest,
+        error: [HttpApiError.BadRequest, HttpApiError.Conflict],
       }).annotateMerge(
         OpenApi.annotations({
           identifier: "auth.set",

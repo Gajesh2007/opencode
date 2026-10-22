@@ -1,6 +1,7 @@
 import { BusEvent } from "@/bus/bus-event"
 import { InstanceState } from "@/effect/instance-state"
 import { EffectBridge } from "@/effect/bridge"
+import { RuntimeFlags } from "@/effect/runtime-flags"
 import type { InstanceContext } from "@/project/instance-context"
 import { SessionID, MessageID } from "@/session/schema"
 import { Effect, Layer, Context, Schema } from "effect"
@@ -72,6 +73,7 @@ export const layer = Layer.effect(
     const config = yield* Config.Service
     const mcp = yield* MCP.Service
     const skill = yield* Skill.Service
+    const flags = yield* RuntimeFlags.Service
 
     const init = Effect.fn("Command.state")(function* (ctx: InstanceContext) {
       const cfg = yield* config.get()
@@ -87,16 +89,18 @@ export const layer = Layer.effect(
         },
         hints: hints(PROMPT_INITIALIZE),
       }
-      commands[Default.REVIEW] = {
-        name: Default.REVIEW,
-        description: "review changes [commit|branch|pr], defaults to uncommitted",
-        source: "command",
-        agent: Default.REVIEW,
-        get template() {
-          return PROMPT_REVIEW.replace("${path}", ctx.worktree)
-        },
-        subtask: true,
-        hints: hints(PROMPT_REVIEW),
+      if (flags.experimentalWorkflow) {
+        commands[Default.REVIEW] = {
+          name: Default.REVIEW,
+          description: "review changes [commit|branch|pr], defaults to uncommitted",
+          source: "command",
+          agent: Default.REVIEW,
+          get template() {
+            return PROMPT_REVIEW.replace("${path}", ctx.worktree)
+          },
+          subtask: true,
+          hints: hints(PROMPT_REVIEW),
+        }
       }
       commands[Default.BATCH] = {
         name: Default.BATCH,
@@ -109,15 +113,16 @@ export const layer = Layer.effect(
         subtask: true,
         hints: hints(PROMPT_BATCH),
       }
-      commands[Default.METAAGENT] = {
-        name: Default.METAAGENT,
-        description: "configure the reasoning reviewer (meta agent): lens, model, effort",
-        source: "command",
-        get template() {
-          return PROMPT_METAAGENT
-        },
-        hints: hints(PROMPT_METAAGENT),
-      }
+      if (flags.experimentalMetaAgent)
+        commands[Default.METAAGENT] = {
+          name: Default.METAAGENT,
+          description: "configure the reasoning reviewer (meta agent): lens, model, effort",
+          source: "command",
+          get template() {
+            return PROMPT_METAAGENT
+          },
+          hints: hints(PROMPT_METAAGENT),
+        }
 
       for (const [name, command] of Object.entries(cfg.command ?? {})) {
         commands[name] = {
@@ -201,6 +206,7 @@ export const defaultLayer = layer.pipe(
   Layer.provide(Config.defaultLayer),
   Layer.provide(MCP.defaultLayer),
   Layer.provide(Skill.defaultLayer),
+  Layer.provide(RuntimeFlags.defaultLayer),
 )
 
 export * as Command from "."

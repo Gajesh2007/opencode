@@ -402,7 +402,10 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
             return modelStore.serviceTier[key]
           },
           current() {
-            const v = this.selected()
+            const m = currentModel()
+            const preset =
+              m && sync.data.provider.find((x) => x.id === m.providerID)?.models[m.modelID]?.options.serviceTier
+            const v = this.selected() ?? (preset === "ultrafast" ? preset : undefined)
             if (!v) return undefined
             if (!this.list().includes(v)) return undefined
             return v

@@ -568,6 +568,15 @@ test("evaluate - merges multiple rulesets", () => {
 
 // disabled tests
 
+test("disabled - read_many shares read permissions", () => {
+  expect(Permission.disabled(["read", "read_many"], Permission.fromConfig({ "*": "allow", read: "deny" }))).toEqual(
+    new Set(["read", "read_many"]),
+  )
+  expect(Permission.disabled(["read", "read_many"], Permission.fromConfig({ "*": "deny", read: "allow" }))).toEqual(
+    new Set(),
+  )
+})
+
 test("disabled - returns empty set when all tools allowed", () => {
   const result = Permission.disabled(["bash", "edit", "read"], [{ permission: "*", pattern: "*", action: "allow" }])
   expect(result.size).toBe(0)

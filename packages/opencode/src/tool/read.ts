@@ -94,7 +94,9 @@ export const ReadTool = Tool.define(
       filepath: string,
       fileSize: number,
       sampleSize: number,
+      source?: string,
     ) {
+      if (source !== undefined) return Buffer.from(source.slice(0, sampleSize)).subarray(0, sampleSize)
       if (fileSize === 0) return new Uint8Array()
 
       return yield* Effect.scoped(
@@ -105,7 +107,11 @@ export const ReadTool = Tool.define(
       )
     })
 
-    const lines = Effect.fn("ReadTool.lines")(function* (filepath: string, opts: { limit: number; offset: number }) {
+    const lines = Effect.fn("ReadTool.lines")(function* (
+      filepath: string,
+      opts: { limit: number; offset: number },
+      source?: string,
+    ) {
       const start = opts.offset - 1
       const raw: string[] = []
       const flags = { bytes: 0, count: 0, cut: false, more: false, done: false }
@@ -116,8 +122,11 @@ export const ReadTool = Tool.define(
       // line of the upstream splitLines pipeline) and use a tagged error to stop the
       // upstream file stream as soon as the byte cap is reached.
       const decoder = new TextDecoder("utf-8")
-      yield* fs.stream(filepath).pipe(
-        Stream.map((bytes) => decoder.decode(bytes, { stream: true })),
+      yield* (
+        source === undefined
+          ? fs.stream(filepath).pipe(Stream.map((bytes) => decoder.decode(bytes, { stream: true })))
+          : Stream.succeed(source)
+      ).pipe(
         Stream.splitLines,
         Stream.runForEach((text) =>
           Effect.gen(function* () {
@@ -219,9 +228,10 @@ export const ReadTool = Tool.define(
         ),
       )
 
-      yield* assertExternalDirectoryEffect(ctx, filepath, {
+      const source = yield* assertExternalDirectoryEffect(ctx, filepath, {
         bypass: Boolean(ctx.extra?.["bypassCwdCheck"]) || (yield* reference.contains(filepath)),
         kind: stat?.type === "Directory" ? "directory" : "file",
+        readOnly: true,
       })
 
       yield* ctx.ask({
@@ -231,9 +241,9 @@ export const ReadTool = Tool.define(
         metadata: {},
       })
 
-      if (!stat) return yield* miss(filepath)
+      if (!stat && !source) return yield* miss(filepath)
 
-      if (stat.type === "Directory") {
+      if (stat?.type === "Directory") {
         const items = yield* list(filepath)
         const limit = params.limit ?? DEFAULT_READ_LIMIT
         const offset = params.offset || 1
@@ -261,14 +271,14 @@ export const ReadTool = Tool.define(
         }
       }
 
-      const loaded = yield* instruction.resolve(ctx.messages, filepath, ctx.messageID)
-      const sample = yield* readSample(filepath, Number(stat.size), SAMPLE_BYTES)
+      const loaded = source ? [] : yield* instruction.resolve(ctx.messages, filepath, ctx.messageID)
+      const sample = yield* readSample(filepath, Number(stat?.size ?? 0), SAMPLE_BYTES, source?.text)
 
       const mime = sniffAttachmentMime(sample, AppFileSystem.mimeType(filepath))
       const isImage = SUPPORTED_IMAGE_MIMES.has(mime)
 
       if (isImage || isPdfAttachment(mime)) {
-        const bytes = yield* fs.readFile(filepath)
+        const bytes = source ? Buffer.from(source.text) : yield* fs.readFile(filepath)
         const msg = isPdfAttachment(mime) ? "PDF read successfully" : "Image read successfully"
         return {
           title,
@@ -292,7 +302,11 @@ export const ReadTool = Tool.define(
         return yield* Effect.fail(new Error(`Cannot read binary file: ${filepath}`))
       }
 
-      const file = yield* lines(filepath, { limit: params.limit ?? DEFAULT_READ_LIMIT, offset: params.offset || 1 })
+      const file = yield* lines(
+        filepath,
+        { limit: params.limit ?? DEFAULT_READ_LIMIT, offset: params.offset || 1 },
+        source?.text,
+      )
       if (file.count < file.offset && !(file.count === 0 && file.offset === 1)) {
         return yield* Effect.fail(
           new Error(`Offset ${file.offset} is out of range for this file (${file.count} lines)`),
@@ -314,7 +328,7 @@ export const ReadTool = Tool.define(
       }
       output += "\n</content>"
 
-      yield* warm(filepath)
+      if (!source) yield* warm(filepath)
 
       if (loaded.length > 0) {
         output += `\n\n<system-reminder>\n${loaded.map((item) => item.content).join("\n\n")}\n</system-reminder>`
@@ -333,6 +347,7 @@ export const ReadTool = Tool.define(
 
     return {
       description: DESCRIPTION,
+      readOnly: true,
       parameters: Parameters,
       execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
         run(params, ctx).pipe(Effect.orDie),

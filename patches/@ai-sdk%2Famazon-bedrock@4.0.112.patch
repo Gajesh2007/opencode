@@ -1,0 +1,47 @@
+diff --git a/dist/mantle/index.js b/dist/mantle/index.js
+index 5384f93debd5e62c866c7a71f463aa3fb3562e64..e59909d7d6ff08340a40820b401809c1a068f4b4 100644
+--- a/dist/mantle/index.js
++++ b/dist/mantle/index.js
+@@ -190,7 +190,8 @@ Original error: ${errorMessage}`
+       }
+     },
+     options.fetch,
+-    "bedrock-mantle"
++    // Bedrock Runtime uses a different SigV4 service, including for Responses.
++    options.baseURL && /^bedrock-runtime\.[a-z0-9-]+\.amazonaws\.com(?:\.cn)?$/.test(new URL(options.baseURL).hostname) ? "bedrock" : "bedrock-mantle"
+   );
+   const getBaseURL = () => {
+     var _a, _b;
+diff --git a/dist/mantle/index.mjs b/dist/mantle/index.mjs
+index b9a6a908eaaf5b5f5d76b0b975a7a914ea05f6ef..c449dbfd500cc0d2b5bf47d320bc47488801f4fd 100644
+--- a/dist/mantle/index.mjs
++++ b/dist/mantle/index.mjs
+@@ -178,7 +178,8 @@ Original error: ${errorMessage}`
+       }
+     },
+     options.fetch,
+-    "bedrock-mantle"
++    // Bedrock Runtime uses a different SigV4 service, including for Responses.
++    options.baseURL && /^bedrock-runtime\.[a-z0-9-]+\.amazonaws\.com(?:\.cn)?$/.test(new URL(options.baseURL).hostname) ? "bedrock" : "bedrock-mantle"
+   );
+   const getBaseURL = () => {
+     var _a, _b;
+diff --git a/src/mantle/bedrock-mantle-provider.ts b/src/mantle/bedrock-mantle-provider.ts
+index a4674c47c4455f41ca06544be8e7fd33fb00634b..16ed668679c56a9b82645b2bec0a9a75c0bd99a2 100644
+--- a/src/mantle/bedrock-mantle-provider.ts
++++ b/src/mantle/bedrock-mantle-provider.ts
+@@ -210,7 +210,13 @@ export function createBedrockMantle(
+           }
+         },
+         options.fetch,
+-        'bedrock-mantle',
++        // Bedrock Runtime uses a different SigV4 service, including for Responses.
++        options.baseURL &&
++        /^bedrock-runtime\.[a-z0-9-]+\.amazonaws\.com(?:\.cn)?$/.test(
++          new URL(options.baseURL).hostname,
++        )
++          ? 'bedrock'
++          : 'bedrock-mantle',
+       );
+ 
+   const getBaseURL = (): string =>

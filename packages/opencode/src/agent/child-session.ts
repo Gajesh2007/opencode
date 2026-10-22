@@ -16,11 +16,33 @@ const CONTINUE_REPLY_ATTEMPTS = 2
 const CONTINUE_REPLY_PROMPT =
   "You ended your turn without writing a reply. Provide your final answer for the task above now, as a concise message for the agent that delegated it - summarize what you found or did. Do not start new work unless it is required to answer."
 
-export function childToolOverrides(input: {
-  agent: Agent.Info
-  primaryTools?: string[]
-  disableTaskTools?: boolean
-}) {
+export function childResult(message: MessageV2.WithParts) {
+  const text = message.parts
+    .filter((part) => part.type === "text")
+    .map((part) => part.text)
+    .join("\n")
+  const failure = message.info.role === "assistant" ? message.info.error : undefined
+  if (failure) {
+    return {
+      text,
+      status: failure.name === "MessageAbortedError" ? ("cancelled" as const) : ("error" as const),
+      error: "message" in failure.data ? String(failure.data.message) : failure.name,
+    }
+  }
+  if (message.info.role === "assistant" && message.info.finish !== undefined && message.info.finish !== "stop") {
+    return {
+      text,
+      status: text.trim() ? ("partial" as const) : ("error" as const),
+      error: `Subagent stopped with incomplete finish reason: ${message.info.finish}`,
+    }
+  }
+  if (message.info.role !== "assistant" || !text.trim()) {
+    return { text, status: "empty" as const, error: "Subagent produced no usable assistant reply" }
+  }
+  return { text, status: "completed" as const }
+}
+
+export function childToolOverrides(input: { agent: Agent.Info; primaryTools?: string[]; disableTaskTools?: boolean }) {
   return {
     ...(input.agent.permission.some((rule) => rule.permission === "todowrite") ? {} : { todowrite: false }),
     ...(input.disableTaskTools === false || input.agent.permission.some((rule) => rule.permission === "task")
@@ -72,14 +94,7 @@ export const runChildTurn = Effect.fn("ChildSession.runTurn")(function* (input: 
       parts,
     })
 
-    const text = (message: typeof result) => message.parts.findLast((item) => item.type === "text")?.text ?? ""
-    for (
-      let attempt = 0;
-      attempt < CONTINUE_REPLY_ATTEMPTS &&
-      (result.info.role !== "assistant" || result.info.error === undefined) &&
-      text(result).trim() === "";
-      attempt++
-    ) {
+    for (let attempt = 0; attempt < CONTINUE_REPLY_ATTEMPTS && childResult(result).status === "empty"; attempt++) {
       result = yield* input.ops.prompt({
         sessionID: input.childSessionID,
         model: input.model,
@@ -92,11 +107,10 @@ export const runChildTurn = Effect.fn("ChildSession.runTurn")(function* (input: 
       })
     }
 
-    const output = text(result)
-    const failure = result.info.role === "assistant" ? result.info.error : undefined
-    if (failure?.name === "MessageAbortedError") return yield* Effect.interrupt
-    if (failure) {
-      const reason = (failure.data as { message?: string } | undefined)?.message ?? failure.name
+    const outcome = childResult(result)
+    const output = outcome.text
+    if (outcome.status === "cancelled") return yield* Effect.interrupt
+    if (outcome.status !== "completed") {
       yield* input.plugin.trigger(
         "subagent.stop",
         {
@@ -107,7 +121,7 @@ export const runChildTurn = Effect.fn("ChildSession.runTurn")(function* (input: 
         },
         { output },
       )
-      return yield* Effect.fail(new Error(reason || "Subagent stopped due to an error"))
+      return yield* Effect.fail(new Error(outcome.error))
     }
     yield* input.plugin.trigger(
       "subagent.stop",

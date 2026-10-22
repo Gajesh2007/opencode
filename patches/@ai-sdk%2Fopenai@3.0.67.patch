@@ -1,0 +1,684 @@
+diff --git a/dist/index.d.mts b/dist/index.d.mts
+index a5939fee76bad97e00bd094226cb74b1b0d6a1e5..7cd72cfecc3a991932014345379a1f60489b6798 100644
+--- a/dist/index.d.mts
++++ b/dist/index.d.mts
+@@ -1054,11 +1054,12 @@ declare const openaiLanguageModelResponsesOptionsSchema: _ai_sdk_provider_utils.
+     parallelToolCalls?: boolean | null | undefined;
+     previousResponseId?: string | null | undefined;
+     promptCacheKey?: string | null | undefined;
++    promptCacheOptions?: { mode?: "implicit" | "explicit"; ttl?: "30m"; prewarm?: boolean } | null | undefined;
+     promptCacheRetention?: "in_memory" | "24h" | null | undefined;
+     reasoningEffort?: string | null | undefined;
+     reasoningSummary?: string | null | undefined;
+     safetyIdentifier?: string | null | undefined;
+-    serviceTier?: "default" | "auto" | "flex" | "priority" | null | undefined;
++    serviceTier?: "default" | "auto" | "flex" | "priority" | "ultrafast" | null | undefined;
+     store?: boolean | null | undefined;
+     passThroughUnsupportedFiles?: boolean | undefined;
+     strictJsonSchema?: boolean | null | undefined;
+@@ -1191,6 +1192,7 @@ type ResponsesOutputTextAnnotationProviderMetadata = Extract<OpenaiResponsesChun
+     type: 'response.output_text.annotation.added';
+ }>['annotation'];
+ type ResponsesProviderMetadata = {
++    modelId?: string;
+     responseId: string | null | undefined;
+     logprobs?: Array<OpenAIResponsesLogprobs>;
+     serviceTier?: string;
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+index a5939fee76bad97e00bd094226cb74b1b0d6a1e5..7cd72cfecc3a991932014345379a1f60489b6798 100644
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -1054,11 +1054,12 @@ declare const openaiLanguageModelResponsesOptionsSchema: _ai_sdk_provider_utils.
+     parallelToolCalls?: boolean | null | undefined;
+     previousResponseId?: string | null | undefined;
+     promptCacheKey?: string | null | undefined;
++    promptCacheOptions?: { mode?: "implicit" | "explicit"; ttl?: "30m"; prewarm?: boolean } | null | undefined;
+     promptCacheRetention?: "in_memory" | "24h" | null | undefined;
+     reasoningEffort?: string | null | undefined;
+     reasoningSummary?: string | null | undefined;
+     safetyIdentifier?: string | null | undefined;
+-    serviceTier?: "default" | "auto" | "flex" | "priority" | null | undefined;
++    serviceTier?: "default" | "auto" | "flex" | "priority" | "ultrafast" | null | undefined;
+     store?: boolean | null | undefined;
+     passThroughUnsupportedFiles?: boolean | undefined;
+     strictJsonSchema?: boolean | null | undefined;
+@@ -1191,6 +1192,7 @@ type ResponsesOutputTextAnnotationProviderMetadata = Extract<OpenaiResponsesChun
+     type: 'response.output_text.annotation.added';
+ }>['annotation'];
+ type ResponsesProviderMetadata = {
++    modelId?: string;
+     responseId: string | null | undefined;
+     logprobs?: Array<OpenAIResponsesLogprobs>;
+     serviceTier?: string;
+diff --git a/dist/index.js b/dist/index.js
+index 69816de3a148882890b8d290a297ac06613f5d80..04a38d99017429d77b53bccf06619d199ca82583 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -54,6 +54,9 @@ var openaiFailedResponseHandler = (0, import_provider_utils.createJsonErrorRespo
+ 
+ // src/openai-language-model-capabilities.ts
+ function getOpenAILanguageModelCapabilities(modelId) {
++  if (/^(?:(?:openai\/)?gpt-(?:6[.-]1-sol|6-astra)|(?:(?:us|global)\.)?openai\.gpt-(?:6\.1-sol|6-astra))(?:-\d{4}-\d{2}-\d{2})?$/.test(modelId)) {
++    return { isReasoningModel: true, systemMessageMode: "developer", supportsFlexProcessing: false, supportsPriorityProcessing: !modelId.includes("openai."), supportsNonReasoningParameters: false };
++  }
+   const supportsFlexProcessing = modelId.startsWith("o3") || modelId.startsWith("o4-mini") || modelId.startsWith("gpt-5") && !modelId.startsWith("gpt-5-chat");
+   const supportsPriorityProcessing = modelId.startsWith("gpt-4") || modelId.startsWith("gpt-5") && !modelId.startsWith("gpt-5-nano") && !modelId.startsWith("gpt-5-chat") && !modelId.startsWith("gpt-5.4-nano") || modelId.startsWith("o3") || modelId.startsWith("o4-mini");
+   const isReasoningModel = modelId.startsWith("o1") || modelId.startsWith("o3") || modelId.startsWith("o4-mini") || modelId.startsWith("gpt-5") && !modelId.startsWith("gpt-5-chat");
+@@ -2732,6 +2735,9 @@ var import_v421 = require("zod/v4");
+ function serializeToolCallArguments2(input) {
+   return JSON.stringify(input === void 0 ? {} : input);
+ }
++function getPromptCacheBreakpoint(options) {
++  return options?.promptCacheBreakpoint === undefined ? {} : { prompt_cache_breakpoint: import_v4.z.object({ mode: import_v4.z.literal("explicit") }).parse(options.promptCacheBreakpoint) };
++}
+ function isFileId(data, prefixes) {
+   if (!prefixes) return false;
+   return prefixes.some((prefix) => data.startsWith(prefix));
+@@ -2755,16 +2761,18 @@ async function convertToOpenAIResponsesInput({
+   let input = [];
+   const warnings = [];
+   const processedApprovalIds = /* @__PURE__ */ new Set();
+-  for (const { role, content } of prompt) {
++  for (const { role, content, providerOptions } of prompt) {
+     switch (role) {
+       case "system": {
++        const breakpoint = getPromptCacheBreakpoint(providerOptions?.[providerOptionsName]);
++        const systemContent = breakpoint.prompt_cache_breakpoint ? [{ type: "input_text", text: content, ...breakpoint }] : content;
+         switch (systemMessageMode) {
+           case "system": {
+-            input.push({ role: "system", content });
++            input.push({ role: "system", content: systemContent });
+             break;
+           }
+           case "developer": {
+-            input.push({ role: "developer", content });
++            input.push({ role: "developer", content: systemContent });
+             break;
+           }
+           case "remove": {
+@@ -2790,7 +2798,7 @@ async function convertToOpenAIResponsesInput({
+             var _a2, _b2, _c2;
+             switch (part.type) {
+               case "text": {
+-                return { type: "input_text", text: part.text };
++                return { type: "input_text", text: part.text, ...getPromptCacheBreakpoint(part.providerOptions?.[providerOptionsName]) };
+               }
+               case "file": {
+                 const mediaType = part.mediaType === "image/*" ? "image/jpeg" : part.mediaType;
+@@ -4350,6 +4358,7 @@ var openaiLanguageModelResponsesOptionsSchema = (0, import_provider_utils28.lazy
+        * Sets a cache key to tie this prompt to cached prefixes for better caching performance.
+        */
+       promptCacheKey: import_v423.z.string().nullish(),
++      promptCacheOptions: import_v4.z.object({ mode: import_v4.z.enum(["implicit", "explicit"]).optional(), ttl: import_v4.z.literal("30m").optional(), prewarm: import_v4.z.boolean().optional() }).nullish(),
+       /**
+        * The retention policy for the prompt cache.
+        * - 'in_memory': Default. Standard prompt caching behavior.
+@@ -4384,10 +4393,11 @@ var openaiLanguageModelResponsesOptionsSchema = (0, import_provider_utils28.lazy
+        * Service tier for the request.
+        * Set to 'flex' for 50% cheaper processing at the cost of increased latency (available for o3, o4-mini, and gpt-5 models).
+        * Set to 'priority' for faster processing with Enterprise access (available for gpt-4, gpt-5, gpt-5-mini, o3, o4-mini; gpt-5-nano is not supported).
++       * Set to 'ultrafast' for faster processing on supported Responses models with provider/account access.
+        *
+        * Defaults to 'auto'.
+        */
+-      serviceTier: import_v423.z.enum(["auto", "flex", "priority", "default"]).nullish(),
++      serviceTier: import_v423.z.enum(["auto", "flex", "priority", "default", "ultrafast"]).nullish(),
+       /**
+        * Whether to store the generation. Defaults to `true`.
+        */
+@@ -4940,6 +4950,7 @@ var OpenAIResponsesLanguageModel = class {
+       service_tier: openaiOptions == null ? void 0 : openaiOptions.serviceTier,
+       include,
+       prompt_cache_key: openaiOptions == null ? void 0 : openaiOptions.promptCacheKey,
++      prompt_cache_options: openaiOptions?.promptCacheOptions,
+       prompt_cache_retention: openaiOptions == null ? void 0 : openaiOptions.promptCacheRetention,
+       safety_identifier: openaiOptions == null ? void 0 : openaiOptions.safetyIdentifier,
+       top_logprobs: topLogprobs,
+@@ -5474,6 +5485,7 @@ var OpenAIResponsesLanguageModel = class {
+     const providerMetadata = {
+       [providerOptionsName]: {
+         responseId: response.id,
++        ...typeof response.model === "string" ? { modelId: response.model } : {},
+         ...logprobs.length > 0 ? { logprobs } : {},
+         ...typeof response.service_tier === "string" ? { serviceTier: response.service_tier } : {}
+       }
+@@ -5544,6 +5556,7 @@ var OpenAIResponsesLanguageModel = class {
+     let hasFunctionCall = false;
+     const activeReasoning = {};
+     let serviceTier;
++    let servedModel;
+     const hostedToolSearchCallIds = [];
+     return {
+       stream: response.pipeThrough(
+@@ -6203,6 +6216,7 @@ var OpenAIResponsesLanguageModel = class {
+               }
+             } else if (isResponseCreatedChunk(value)) {
+               responseId = value.response.id;
++              if (typeof value.response.model === "string") servedModel = value.response.model;
+               controller.enqueue({
+                 type: "response-metadata",
+                 id: value.response.id,
+@@ -6364,6 +6378,7 @@ var OpenAIResponsesLanguageModel = class {
+             const providerMetadata = {
+               [providerOptionsName]: {
+                 responseId,
++                ...servedModel !== undefined ? { modelId: servedModel } : {},
+                 ...logprobs.length > 0 ? { logprobs } : {},
+                 ...serviceTier !== void 0 ? { serviceTier } : {}
+               }
+diff --git a/dist/index.mjs b/dist/index.mjs
+index d729146dc214388d7e749a3debd485dfe00f58f5..e7e61b993704b1b1ea0c6e925396dc83c299f276 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -41,6 +41,9 @@ var openaiFailedResponseHandler = createJsonErrorResponseHandler({
+ 
+ // src/openai-language-model-capabilities.ts
+ function getOpenAILanguageModelCapabilities(modelId) {
++  if (/^(?:(?:openai\/)?gpt-(?:6[.-]1-sol|6-astra)|(?:(?:us|global)\.)?openai\.gpt-(?:6\.1-sol|6-astra))(?:-\d{4}-\d{2}-\d{2})?$/.test(modelId)) {
++    return { isReasoningModel: true, systemMessageMode: "developer", supportsFlexProcessing: false, supportsPriorityProcessing: !modelId.includes("openai."), supportsNonReasoningParameters: false };
++  }
+   const supportsFlexProcessing = modelId.startsWith("o3") || modelId.startsWith("o4-mini") || modelId.startsWith("gpt-5") && !modelId.startsWith("gpt-5-chat");
+   const supportsPriorityProcessing = modelId.startsWith("gpt-4") || modelId.startsWith("gpt-5") && !modelId.startsWith("gpt-5-nano") && !modelId.startsWith("gpt-5-chat") && !modelId.startsWith("gpt-5.4-nano") || modelId.startsWith("o3") || modelId.startsWith("o4-mini");
+   const isReasoningModel = modelId.startsWith("o1") || modelId.startsWith("o3") || modelId.startsWith("o4-mini") || modelId.startsWith("gpt-5") && !modelId.startsWith("gpt-5-chat");
+@@ -2828,6 +2831,9 @@ import { z as z21 } from "zod/v4";
+ function serializeToolCallArguments2(input) {
+   return JSON.stringify(input === void 0 ? {} : input);
+ }
++function getPromptCacheBreakpoint(options) {
++  return options?.promptCacheBreakpoint === undefined ? {} : { prompt_cache_breakpoint: z.object({ mode: z.literal("explicit") }).parse(options.promptCacheBreakpoint) };
++}
+ function isFileId(data, prefixes) {
+   if (!prefixes) return false;
+   return prefixes.some((prefix) => data.startsWith(prefix));
+@@ -2851,16 +2857,18 @@ async function convertToOpenAIResponsesInput({
+   let input = [];
+   const warnings = [];
+   const processedApprovalIds = /* @__PURE__ */ new Set();
+-  for (const { role, content } of prompt) {
++  for (const { role, content, providerOptions } of prompt) {
+     switch (role) {
+       case "system": {
++        const breakpoint = getPromptCacheBreakpoint(providerOptions?.[providerOptionsName]);
++        const systemContent = breakpoint.prompt_cache_breakpoint ? [{ type: "input_text", text: content, ...breakpoint }] : content;
+         switch (systemMessageMode) {
+           case "system": {
+-            input.push({ role: "system", content });
++            input.push({ role: "system", content: systemContent });
+             break;
+           }
+           case "developer": {
+-            input.push({ role: "developer", content });
++            input.push({ role: "developer", content: systemContent });
+             break;
+           }
+           case "remove": {
+@@ -2886,7 +2894,7 @@ async function convertToOpenAIResponsesInput({
+             var _a2, _b2, _c2;
+             switch (part.type) {
+               case "text": {
+-                return { type: "input_text", text: part.text };
++                return { type: "input_text", text: part.text, ...getPromptCacheBreakpoint(part.providerOptions?.[providerOptionsName]) };
+               }
+               case "file": {
+                 const mediaType = part.mediaType === "image/*" ? "image/jpeg" : part.mediaType;
+@@ -4452,6 +4460,7 @@ var openaiLanguageModelResponsesOptionsSchema = lazySchema21(
+        * Sets a cache key to tie this prompt to cached prefixes for better caching performance.
+        */
+       promptCacheKey: z23.string().nullish(),
++      promptCacheOptions: z.object({ mode: z.enum(["implicit", "explicit"]).optional(), ttl: z.literal("30m").optional(), prewarm: z.boolean().optional() }).nullish(),
+       /**
+        * The retention policy for the prompt cache.
+        * - 'in_memory': Default. Standard prompt caching behavior.
+@@ -4486,10 +4495,11 @@ var openaiLanguageModelResponsesOptionsSchema = lazySchema21(
+        * Service tier for the request.
+        * Set to 'flex' for 50% cheaper processing at the cost of increased latency (available for o3, o4-mini, and gpt-5 models).
+        * Set to 'priority' for faster processing with Enterprise access (available for gpt-4, gpt-5, gpt-5-mini, o3, o4-mini; gpt-5-nano is not supported).
++       * Set to 'ultrafast' for faster processing on supported Responses models with provider/account access.
+        *
+        * Defaults to 'auto'.
+        */
+-      serviceTier: z23.enum(["auto", "flex", "priority", "default"]).nullish(),
++      serviceTier: z23.enum(["auto", "flex", "priority", "default", "ultrafast"]).nullish(),
+       /**
+        * Whether to store the generation. Defaults to `true`.
+        */
+@@ -5044,6 +5054,7 @@ var OpenAIResponsesLanguageModel = class {
+       service_tier: openaiOptions == null ? void 0 : openaiOptions.serviceTier,
+       include,
+       prompt_cache_key: openaiOptions == null ? void 0 : openaiOptions.promptCacheKey,
++      prompt_cache_options: openaiOptions?.promptCacheOptions,
+       prompt_cache_retention: openaiOptions == null ? void 0 : openaiOptions.promptCacheRetention,
+       safety_identifier: openaiOptions == null ? void 0 : openaiOptions.safetyIdentifier,
+       top_logprobs: topLogprobs,
+@@ -5578,6 +5589,7 @@ var OpenAIResponsesLanguageModel = class {
+     const providerMetadata = {
+       [providerOptionsName]: {
+         responseId: response.id,
++        ...typeof response.model === "string" ? { modelId: response.model } : {},
+         ...logprobs.length > 0 ? { logprobs } : {},
+         ...typeof response.service_tier === "string" ? { serviceTier: response.service_tier } : {}
+       }
+@@ -5648,6 +5660,7 @@ var OpenAIResponsesLanguageModel = class {
+     let hasFunctionCall = false;
+     const activeReasoning = {};
+     let serviceTier;
++    let servedModel;
+     const hostedToolSearchCallIds = [];
+     return {
+       stream: response.pipeThrough(
+@@ -6307,6 +6320,7 @@ var OpenAIResponsesLanguageModel = class {
+               }
+             } else if (isResponseCreatedChunk(value)) {
+               responseId = value.response.id;
++              if (typeof value.response.model === "string") servedModel = value.response.model;
+               controller.enqueue({
+                 type: "response-metadata",
+                 id: value.response.id,
+@@ -6468,6 +6482,7 @@ var OpenAIResponsesLanguageModel = class {
+             const providerMetadata = {
+               [providerOptionsName]: {
+                 responseId,
++                ...servedModel !== undefined ? { modelId: servedModel } : {},
+                 ...logprobs.length > 0 ? { logprobs } : {},
+                 ...serviceTier !== void 0 ? { serviceTier } : {}
+               }
+diff --git a/dist/internal/index.js b/dist/internal/index.js
+index 79bd8869cea764074ed15f30f7f3ba9a0d6f040c..c0284754df2e50197f0e58f2c0358981c1c9029d 100644
+--- a/dist/internal/index.js
++++ b/dist/internal/index.js
+@@ -88,6 +88,9 @@ var openaiFailedResponseHandler = (0, import_provider_utils.createJsonErrorRespo
+ 
+ // src/openai-language-model-capabilities.ts
+ function getOpenAILanguageModelCapabilities(modelId) {
++  if (/^(?:(?:openai\/)?gpt-(?:6[.-]1-sol|6-astra)|(?:(?:us|global)\.)?openai\.gpt-(?:6\.1-sol|6-astra))(?:-\d{4}-\d{2}-\d{2})?$/.test(modelId)) {
++    return { isReasoningModel: true, systemMessageMode: "developer", supportsFlexProcessing: false, supportsPriorityProcessing: !modelId.includes("openai."), supportsNonReasoningParameters: false };
++  }
+   const supportsFlexProcessing = modelId.startsWith("o3") || modelId.startsWith("o4-mini") || modelId.startsWith("gpt-5") && !modelId.startsWith("gpt-5-chat");
+   const supportsPriorityProcessing = modelId.startsWith("gpt-4") || modelId.startsWith("gpt-5") && !modelId.startsWith("gpt-5-nano") && !modelId.startsWith("gpt-5-chat") && !modelId.startsWith("gpt-5.4-nano") || modelId.startsWith("o3") || modelId.startsWith("o4-mini");
+   const isReasoningModel = modelId.startsWith("o1") || modelId.startsWith("o3") || modelId.startsWith("o4-mini") || modelId.startsWith("gpt-5") && !modelId.startsWith("gpt-5-chat");
+@@ -2680,6 +2683,9 @@ var toolSearchToolFactory = (0, import_provider_utils23.createProviderToolFactor
+ function serializeToolCallArguments2(input) {
+   return JSON.stringify(input === void 0 ? {} : input);
+ }
++function getPromptCacheBreakpoint(options) {
++  return options?.promptCacheBreakpoint === undefined ? {} : { prompt_cache_breakpoint: import_v4.z.object({ mode: import_v4.z.literal("explicit") }).parse(options.promptCacheBreakpoint) };
++}
+ function isFileId(data, prefixes) {
+   if (!prefixes) return false;
+   return prefixes.some((prefix) => data.startsWith(prefix));
+@@ -2703,16 +2709,18 @@ async function convertToOpenAIResponsesInput({
+   let input = [];
+   const warnings = [];
+   const processedApprovalIds = /* @__PURE__ */ new Set();
+-  for (const { role, content } of prompt) {
++  for (const { role, content, providerOptions } of prompt) {
+     switch (role) {
+       case "system": {
++        const breakpoint = getPromptCacheBreakpoint(providerOptions?.[providerOptionsName]);
++        const systemContent = breakpoint.prompt_cache_breakpoint ? [{ type: "input_text", text: content, ...breakpoint }] : content;
+         switch (systemMessageMode) {
+           case "system": {
+-            input.push({ role: "system", content });
++            input.push({ role: "system", content: systemContent });
+             break;
+           }
+           case "developer": {
+-            input.push({ role: "developer", content });
++            input.push({ role: "developer", content: systemContent });
+             break;
+           }
+           case "remove": {
+@@ -2738,7 +2746,7 @@ async function convertToOpenAIResponsesInput({
+             var _a2, _b2, _c2;
+             switch (part.type) {
+               case "text": {
+-                return { type: "input_text", text: part.text };
++                return { type: "input_text", text: part.text, ...getPromptCacheBreakpoint(part.providerOptions?.[providerOptionsName]) };
+               }
+               case "file": {
+                 const mediaType = part.mediaType === "image/*" ? "image/jpeg" : part.mediaType;
+@@ -4298,6 +4306,7 @@ var openaiLanguageModelResponsesOptionsSchema = (0, import_provider_utils26.lazy
+        * Sets a cache key to tie this prompt to cached prefixes for better caching performance.
+        */
+       promptCacheKey: import_v419.z.string().nullish(),
++      promptCacheOptions: import_v4.z.object({ mode: import_v4.z.enum(["implicit", "explicit"]).optional(), ttl: import_v4.z.literal("30m").optional(), prewarm: import_v4.z.boolean().optional() }).nullish(),
+       /**
+        * The retention policy for the prompt cache.
+        * - 'in_memory': Default. Standard prompt caching behavior.
+@@ -4332,10 +4341,11 @@ var openaiLanguageModelResponsesOptionsSchema = (0, import_provider_utils26.lazy
+        * Service tier for the request.
+        * Set to 'flex' for 50% cheaper processing at the cost of increased latency (available for o3, o4-mini, and gpt-5 models).
+        * Set to 'priority' for faster processing with Enterprise access (available for gpt-4, gpt-5, gpt-5-mini, o3, o4-mini; gpt-5-nano is not supported).
++       * Set to 'ultrafast' for faster processing on supported Responses models with provider/account access.
+        *
+        * Defaults to 'auto'.
+        */
+-      serviceTier: import_v419.z.enum(["auto", "flex", "priority", "default"]).nullish(),
++      serviceTier: import_v419.z.enum(["auto", "flex", "priority", "default", "ultrafast"]).nullish(),
+       /**
+        * Whether to store the generation. Defaults to `true`.
+        */
+@@ -5209,6 +5219,7 @@ var OpenAIResponsesLanguageModel = class {
+       service_tier: openaiOptions == null ? void 0 : openaiOptions.serviceTier,
+       include,
+       prompt_cache_key: openaiOptions == null ? void 0 : openaiOptions.promptCacheKey,
++      prompt_cache_options: openaiOptions?.promptCacheOptions,
+       prompt_cache_retention: openaiOptions == null ? void 0 : openaiOptions.promptCacheRetention,
+       safety_identifier: openaiOptions == null ? void 0 : openaiOptions.safetyIdentifier,
+       top_logprobs: topLogprobs,
+@@ -5743,6 +5754,7 @@ var OpenAIResponsesLanguageModel = class {
+     const providerMetadata = {
+       [providerOptionsName]: {
+         responseId: response.id,
++        ...typeof response.model === "string" ? { modelId: response.model } : {},
+         ...logprobs.length > 0 ? { logprobs } : {},
+         ...typeof response.service_tier === "string" ? { serviceTier: response.service_tier } : {}
+       }
+@@ -5813,6 +5825,7 @@ var OpenAIResponsesLanguageModel = class {
+     let hasFunctionCall = false;
+     const activeReasoning = {};
+     let serviceTier;
++    let servedModel;
+     const hostedToolSearchCallIds = [];
+     return {
+       stream: response.pipeThrough(
+@@ -6472,6 +6485,7 @@ var OpenAIResponsesLanguageModel = class {
+               }
+             } else if (isResponseCreatedChunk(value)) {
+               responseId = value.response.id;
++              if (typeof value.response.model === "string") servedModel = value.response.model;
+               controller.enqueue({
+                 type: "response-metadata",
+                 id: value.response.id,
+@@ -6633,6 +6647,7 @@ var OpenAIResponsesLanguageModel = class {
+             const providerMetadata = {
+               [providerOptionsName]: {
+                 responseId,
++                ...servedModel !== undefined ? { modelId: servedModel } : {},
+                 ...logprobs.length > 0 ? { logprobs } : {},
+                 ...serviceTier !== void 0 ? { serviceTier } : {}
+               }
+diff --git a/dist/internal/index.mjs b/dist/internal/index.mjs
+index f8e9424f6ceeb12edeb4b1e6bccc2b7027c1dacd..d181b7cb8f35b7a03aafae781e09eb2c6004fdee 100644
+--- a/dist/internal/index.mjs
++++ b/dist/internal/index.mjs
+@@ -33,6 +33,9 @@ var openaiFailedResponseHandler = createJsonErrorResponseHandler({
+ 
+ // src/openai-language-model-capabilities.ts
+ function getOpenAILanguageModelCapabilities(modelId) {
++  if (/^(?:(?:openai\/)?gpt-(?:6[.-]1-sol|6-astra)|(?:(?:us|global)\.)?openai\.gpt-(?:6\.1-sol|6-astra))(?:-\d{4}-\d{2}-\d{2})?$/.test(modelId)) {
++    return { isReasoningModel: true, systemMessageMode: "developer", supportsFlexProcessing: false, supportsPriorityProcessing: !modelId.includes("openai."), supportsNonReasoningParameters: false };
++  }
+   const supportsFlexProcessing = modelId.startsWith("o3") || modelId.startsWith("o4-mini") || modelId.startsWith("gpt-5") && !modelId.startsWith("gpt-5-chat");
+   const supportsPriorityProcessing = modelId.startsWith("gpt-4") || modelId.startsWith("gpt-5") && !modelId.startsWith("gpt-5-nano") && !modelId.startsWith("gpt-5-chat") && !modelId.startsWith("gpt-5.4-nano") || modelId.startsWith("o3") || modelId.startsWith("o4-mini");
+   const isReasoningModel = modelId.startsWith("o1") || modelId.startsWith("o3") || modelId.startsWith("o4-mini") || modelId.startsWith("gpt-5") && !modelId.startsWith("gpt-5-chat");
+@@ -2724,6 +2727,9 @@ var toolSearchToolFactory = createProviderToolFactoryWithOutputSchema4({
+ function serializeToolCallArguments2(input) {
+   return JSON.stringify(input === void 0 ? {} : input);
+ }
++function getPromptCacheBreakpoint(options) {
++  return options?.promptCacheBreakpoint === undefined ? {} : { prompt_cache_breakpoint: z.object({ mode: z.literal("explicit") }).parse(options.promptCacheBreakpoint) };
++}
+ function isFileId(data, prefixes) {
+   if (!prefixes) return false;
+   return prefixes.some((prefix) => data.startsWith(prefix));
+@@ -2747,16 +2753,18 @@ async function convertToOpenAIResponsesInput({
+   let input = [];
+   const warnings = [];
+   const processedApprovalIds = /* @__PURE__ */ new Set();
+-  for (const { role, content } of prompt) {
++  for (const { role, content, providerOptions } of prompt) {
+     switch (role) {
+       case "system": {
++        const breakpoint = getPromptCacheBreakpoint(providerOptions?.[providerOptionsName]);
++        const systemContent = breakpoint.prompt_cache_breakpoint ? [{ type: "input_text", text: content, ...breakpoint }] : content;
+         switch (systemMessageMode) {
+           case "system": {
+-            input.push({ role: "system", content });
++            input.push({ role: "system", content: systemContent });
+             break;
+           }
+           case "developer": {
+-            input.push({ role: "developer", content });
++            input.push({ role: "developer", content: systemContent });
+             break;
+           }
+           case "remove": {
+@@ -2782,7 +2790,7 @@ async function convertToOpenAIResponsesInput({
+             var _a2, _b2, _c2;
+             switch (part.type) {
+               case "text": {
+-                return { type: "input_text", text: part.text };
++                return { type: "input_text", text: part.text, ...getPromptCacheBreakpoint(part.providerOptions?.[providerOptionsName]) };
+               }
+               case "file": {
+                 const mediaType = part.mediaType === "image/*" ? "image/jpeg" : part.mediaType;
+@@ -4348,6 +4356,7 @@ var openaiLanguageModelResponsesOptionsSchema = lazySchema17(
+        * Sets a cache key to tie this prompt to cached prefixes for better caching performance.
+        */
+       promptCacheKey: z19.string().nullish(),
++      promptCacheOptions: z.object({ mode: z.enum(["implicit", "explicit"]).optional(), ttl: z.literal("30m").optional(), prewarm: z.boolean().optional() }).nullish(),
+       /**
+        * The retention policy for the prompt cache.
+        * - 'in_memory': Default. Standard prompt caching behavior.
+@@ -4382,10 +4391,11 @@ var openaiLanguageModelResponsesOptionsSchema = lazySchema17(
+        * Service tier for the request.
+        * Set to 'flex' for 50% cheaper processing at the cost of increased latency (available for o3, o4-mini, and gpt-5 models).
+        * Set to 'priority' for faster processing with Enterprise access (available for gpt-4, gpt-5, gpt-5-mini, o3, o4-mini; gpt-5-nano is not supported).
++       * Set to 'ultrafast' for faster processing on supported Responses models with provider/account access.
+        *
+        * Defaults to 'auto'.
+        */
+-      serviceTier: z19.enum(["auto", "flex", "priority", "default"]).nullish(),
++      serviceTier: z19.enum(["auto", "flex", "priority", "default", "ultrafast"]).nullish(),
+       /**
+        * Whether to store the generation. Defaults to `true`.
+        */
+@@ -5289,6 +5299,7 @@ var OpenAIResponsesLanguageModel = class {
+       service_tier: openaiOptions == null ? void 0 : openaiOptions.serviceTier,
+       include,
+       prompt_cache_key: openaiOptions == null ? void 0 : openaiOptions.promptCacheKey,
++      prompt_cache_options: openaiOptions?.promptCacheOptions,
+       prompt_cache_retention: openaiOptions == null ? void 0 : openaiOptions.promptCacheRetention,
+       safety_identifier: openaiOptions == null ? void 0 : openaiOptions.safetyIdentifier,
+       top_logprobs: topLogprobs,
+@@ -5823,6 +5834,7 @@ var OpenAIResponsesLanguageModel = class {
+     const providerMetadata = {
+       [providerOptionsName]: {
+         responseId: response.id,
++        ...typeof response.model === "string" ? { modelId: response.model } : {},
+         ...logprobs.length > 0 ? { logprobs } : {},
+         ...typeof response.service_tier === "string" ? { serviceTier: response.service_tier } : {}
+       }
+@@ -5893,6 +5905,7 @@ var OpenAIResponsesLanguageModel = class {
+     let hasFunctionCall = false;
+     const activeReasoning = {};
+     let serviceTier;
++    let servedModel;
+     const hostedToolSearchCallIds = [];
+     return {
+       stream: response.pipeThrough(
+@@ -6552,6 +6565,7 @@ var OpenAIResponsesLanguageModel = class {
+               }
+             } else if (isResponseCreatedChunk(value)) {
+               responseId = value.response.id;
++              if (typeof value.response.model === "string") servedModel = value.response.model;
+               controller.enqueue({
+                 type: "response-metadata",
+                 id: value.response.id,
+@@ -6713,6 +6727,7 @@ var OpenAIResponsesLanguageModel = class {
+             const providerMetadata = {
+               [providerOptionsName]: {
+                 responseId,
++                ...servedModel !== undefined ? { modelId: servedModel } : {},
+                 ...logprobs.length > 0 ? { logprobs } : {},
+                 ...serviceTier !== void 0 ? { serviceTier } : {}
+               }
+diff --git a/src/openai-language-model-capabilities.ts b/src/openai-language-model-capabilities.ts
+index c784e940d10d0004e49420d08aebabc1d0d40e0f..de211e666b91007ddf4d7dffebab3f1c824f7796 100644
+--- a/src/openai-language-model-capabilities.ts
++++ b/src/openai-language-model-capabilities.ts
+@@ -13,6 +13,15 @@ export type OpenAILanguageModelCapabilities = {
+ export function getOpenAILanguageModelCapabilities(
+   modelId: string,
+ ): OpenAILanguageModelCapabilities {
++  if (/^(?:(?:openai\/)?gpt-(?:6[.-]1-sol|6-astra)|(?:(?:us|global)\.)?openai\.gpt-(?:6\.1-sol|6-astra))(?:-\d{4}-\d{2}-\d{2})?$/.test(modelId)) {
++    return {
++      isReasoningModel: true,
++      systemMessageMode: 'developer',
++      supportsFlexProcessing: false,
++      supportsPriorityProcessing: !modelId.includes('openai.'),
++      supportsNonReasoningParameters: false,
++    };
++  }
+   const supportsFlexProcessing =
+     modelId.startsWith('o3') ||
+     modelId.startsWith('o4-mini') ||
+diff --git a/src/responses/convert-to-openai-responses-input.ts b/src/responses/convert-to-openai-responses-input.ts
+index f0e02c1bde8783977bc7431ee5368e0d5b1c6026..a1a8ba17bec5fd58ccc845322ce0f7481cbfa1b1 100644
+--- a/src/responses/convert-to-openai-responses-input.ts
++++ b/src/responses/convert-to-openai-responses-input.ts
+@@ -38,9 +38,12 @@ function serializeToolCallArguments(input: unknown): string {
+ }
+ 
+ /**
+- * Check if a string is a file ID based on the given prefixes
+- * Returns false if prefixes is undefined (disables file ID detection)
++ * Validate explicitly opted-in prompt cache boundaries before serialization.
+  */
++function getPromptCacheBreakpoint(options: { promptCacheBreakpoint?: unknown } | undefined) {
++  return options?.promptCacheBreakpoint === undefined ? {} : { prompt_cache_breakpoint: z.object({ mode: z.literal('explicit') }).parse(options.promptCacheBreakpoint) };
++}
++
+ function isFileId(data: string, prefixes?: readonly string[]): boolean {
+   if (!prefixes) return false;
+   return prefixes.some(prefix => data.startsWith(prefix));
+@@ -82,16 +85,18 @@ export async function convertToOpenAIResponsesInput({
+   const warnings: Array<SharedV3Warning> = [];
+   const processedApprovalIds = new Set<string>();
+ 
+-  for (const { role, content } of prompt) {
++  for (const { role, content, providerOptions } of prompt) {
+     switch (role) {
+       case 'system': {
++        const breakpoint = getPromptCacheBreakpoint(providerOptions?.[providerOptionsName]);
++        const systemContent = breakpoint.prompt_cache_breakpoint ? [{ type: 'input_text' as const, text: content, ...breakpoint }] : content;
+         switch (systemMessageMode) {
+           case 'system': {
+-            input.push({ role: 'system', content });
++            input.push({ role: 'system', content: systemContent });
+             break;
+           }
+           case 'developer': {
+-            input.push({ role: 'developer', content });
++            input.push({ role: 'developer', content: systemContent });
+             break;
+           }
+           case 'remove': {
+@@ -117,7 +122,7 @@ export async function convertToOpenAIResponsesInput({
+           content: content.map((part, index) => {
+             switch (part.type) {
+               case 'text': {
+-                return { type: 'input_text', text: part.text };
++                return { type: 'input_text', text: part.text, ...getPromptCacheBreakpoint(part.providerOptions?.[providerOptionsName]) };
+               }
+               case 'file': {
+                 const mediaType =
+diff --git a/src/responses/openai-responses-api.ts b/src/responses/openai-responses-api.ts
+index 6c6d0b1ef98efd95efbced712740aeb1c8941ac0..4acca6070304c5b38a1587ed1e1d188373e3c9d9 100644
+--- a/src/responses/openai-responses-api.ts
++++ b/src/responses/openai-responses-api.ts
+@@ -71,7 +71,7 @@ export type OpenAIResponsesApplyPatchOperationDiffDoneChunk = {
+ 
+ export type OpenAIResponsesSystemMessage = {
+   role: 'system' | 'developer';
+-  content: string;
++  content: string | Array<{ type: 'input_text'; text: string; prompt_cache_breakpoint?: { mode: 'explicit' } }>;
+ };
+ 
+ export type OpenAIResponsesUserMessage = {
+diff --git a/src/responses/openai-responses-language-model.ts b/src/responses/openai-responses-language-model.ts
+index d9ad3bd18c7bb90ee83a60b1bfcfd0acc71fa5c5..b828eee4d5b7bad0f7c13f9e22192fe0d807a3fd 100644
+--- a/src/responses/openai-responses-language-model.ts
++++ b/src/responses/openai-responses-language-model.ts
+@@ -340,6 +340,7 @@ export class OpenAIResponsesLanguageModel implements LanguageModelV3 {
+       service_tier: openaiOptions?.serviceTier,
+       include,
+       prompt_cache_key: openaiOptions?.promptCacheKey,
++      prompt_cache_options: openaiOptions?.promptCacheOptions,
+       prompt_cache_retention: openaiOptions?.promptCacheRetention,
+       safety_identifier: openaiOptions?.safetyIdentifier,
+       top_logprobs: topLogprobs,
+@@ -992,6 +993,7 @@ export class OpenAIResponsesLanguageModel implements LanguageModelV3 {
+     const providerMetadata: SharedV3ProviderMetadata = {
+       [providerOptionsName]: {
+         responseId: response.id,
++        ...(typeof response.model === 'string' ? { modelId: response.model } : {}),
+         ...(logprobs.length > 0 ? { logprobs } : {}),
+         ...(typeof response.service_tier === 'string'
+           ? { serviceTier: response.service_tier }
+@@ -1114,6 +1116,7 @@ export class OpenAIResponsesLanguageModel implements LanguageModelV3 {
+     > = {};
+ 
+     let serviceTier: string | undefined;
++    let servedModel: string | undefined;
+     const hostedToolSearchCallIds: string[] = [];
+ 
+     return {
+@@ -1911,6 +1914,7 @@ export class OpenAIResponsesLanguageModel implements LanguageModelV3 {
+               }
+             } else if (isResponseCreatedChunk(value)) {
+               responseId = value.response.id;
++              if (typeof value.response.model === 'string') servedModel = value.response.model;
+               controller.enqueue({
+                 type: 'response-metadata',
+                 id: value.response.id,
+@@ -2111,6 +2115,7 @@ export class OpenAIResponsesLanguageModel implements LanguageModelV3 {
+             const providerMetadata: SharedV3ProviderMetadata = {
+               [providerOptionsName]: {
+                 responseId: responseId,
++                ...(servedModel !== undefined ? { modelId: servedModel } : {}),
+                 ...(logprobs.length > 0 ? { logprobs } : {}),
+                 ...(serviceTier !== undefined ? { serviceTier } : {}),
+               } satisfies ResponsesProviderMetadata,
+diff --git a/src/responses/openai-responses-options.ts b/src/responses/openai-responses-options.ts
+index 751d2b93c71b0164d43fad5e7946ec7333dcd53a..7c93c2c71acc57a3f09e82f3efeaa1864a9bfe67 100644
+--- a/src/responses/openai-responses-options.ts
++++ b/src/responses/openai-responses-options.ts
+@@ -220,6 +220,11 @@ export const openaiLanguageModelResponsesOptionsSchema = lazySchema(() =>
+        * Sets a cache key to tie this prompt to cached prefixes for better caching performance.
+        */
+       promptCacheKey: z.string().nullish(),
++      promptCacheOptions: z.object({
++        mode: z.enum(['implicit', 'explicit']).optional(),
++        ttl: z.literal('30m').optional(),
++        prewarm: z.boolean().optional(),
++      }).nullish(),
+ 
+       /**
+        * The retention policy for the prompt cache.
+@@ -259,10 +264,11 @@ export const openaiLanguageModelResponsesOptionsSchema = lazySchema(() =>
+        * Service tier for the request.
+        * Set to 'flex' for 50% cheaper processing at the cost of increased latency (available for o3, o4-mini, and gpt-5 models).
+        * Set to 'priority' for faster processing with Enterprise access (available for gpt-4, gpt-5, gpt-5-mini, o3, o4-mini; gpt-5-nano is not supported).
++       * Set to 'ultrafast' for faster processing on supported Responses models with provider/account access.
+        *
+        * Defaults to 'auto'.
+        */
+-      serviceTier: z.enum(['auto', 'flex', 'priority', 'default']).nullish(),
++      serviceTier: z.enum(['auto', 'flex', 'priority', 'default', 'ultrafast']).nullish(),
+ 
+       /**
+        * Whether to store the generation. Defaults to `true`.
+diff --git a/src/responses/openai-responses-provider-metadata.ts b/src/responses/openai-responses-provider-metadata.ts
+index 74f5c8474da8ba6d43fe8be48bed7853118a7c44..663878450e981b34e0793814ce21bf0c1c9563ac 100644
+--- a/src/responses/openai-responses-provider-metadata.ts
++++ b/src/responses/openai-responses-provider-metadata.ts
+@@ -12,6 +12,7 @@ type ResponsesOutputTextAnnotationProviderMetadata = Extract<
+ >['annotation'];
+ 
+ export type ResponsesProviderMetadata = {
++  modelId?: string;
+   responseId: string | null | undefined;
+   logprobs?: Array<OpenAIResponsesLogprobs>;
+   serviceTier?: string;

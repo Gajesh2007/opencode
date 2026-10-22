@@ -8,10 +8,12 @@ import { asSchema, type ModelMessage, type Tool } from "ai"
 import { Effect } from "effect"
 import * as Stream from "effect/Stream"
 import { FetchHttpClient } from "effect/unstable/http"
-import { tool as nativeTool, ToolFailure, type JsonSchema, type LLMEvent } from "@opencode-ai/llm"
+import { tool as nativeTool, ToolFailure, LLMError, type JsonSchema, type LLMEvent } from "@opencode-ai/llm"
 import type { LLMClientShape } from "@opencode-ai/llm/route"
 import { LLMNative } from "./native-request"
 import * as Continuation from "./continuation"
+import { codexNativeAuth } from "@/plugin/codex"
+import { readOnlyTools } from "./tool-execution"
 
 export const createContinuationState = Continuation.createContinuationState
 
@@ -22,7 +24,7 @@ export type StreamResult =
   | { readonly type: "supported"; readonly stream: Stream.Stream<LLMEvent, unknown> }
   | { readonly type: "unsupported"; readonly reason: string }
 
-type StreamInput = {
+export type StreamInput = {
   readonly continuation?: Continuation.ContinuationState
   readonly sessionID?: string
   readonly previousResponseId?: string
@@ -46,6 +48,28 @@ export function status(input: Pick<StreamInput, "model" | "provider" | "auth">):
   return statusWithFetch(input, providerFetch(input))
 }
 
+// Only the explicitly selected premium tier on the public API gets an
+// automatic native path. Read the flat pre-transform options used by the
+// request builder so eligibility agrees with the tier actually sent.
+export function autoNative(input: Pick<StreamInput, "model" | "provider" | "auth" | "providerOptions">): boolean {
+  if (input.model.providerID !== ProviderID.openai || input.provider.id !== ProviderID.openai) return false
+  if (input.model.api.npm !== "@ai-sdk/openai" || status(input).type !== "supported") return false
+  if (input.providerOptions?.serviceTier !== "ultrafast") return false
+  const transport = input.model.options.transport ?? input.provider.options.transport
+  if (transport !== undefined && transport !== "websocket") return false
+  const baseURL = input.provider.options.baseURL ?? (input.model.api.url || "https://api.openai.com/v1")
+  if (typeof baseURL !== "string" || !URL.canParse(baseURL)) return false
+  const url = new URL(baseURL)
+  return (
+    url.origin === "https://api.openai.com" &&
+    (url.pathname === "/v1" || url.pathname === "/v1/") &&
+    !url.username &&
+    !url.password &&
+    !url.search &&
+    !url.hash
+  )
+}
+
 function statusWithFetch(
   input: Pick<StreamInput, "model" | "provider" | "auth">,
   fetch: typeof globalThis.fetch | undefined,
@@ -64,6 +88,8 @@ function statusWithFetch(
   if (input.auth?.type === "oauth" && !(input.provider.id === ProviderID.openaiCodex && fetch)) {
     return { type: "unsupported", reason: "OAuth auth requires a provider fetch override" }
   }
+  if (typeof input.provider.options.fetch === "function" && !fetch)
+    return { type: "unsupported", reason: "custom provider fetch is not supported by the native runtime" }
 
   const apiKey = typeof input.provider.options.apiKey === "string" ? input.provider.options.apiKey : input.provider.key
   if (!apiKey) return { type: "unsupported", reason: "API key is not configured" }
@@ -76,10 +102,37 @@ function statusWithFetch(
 }
 
 export function stream(input: StreamInput): StreamResult {
+  if (
+    (input.model.api.npm === "@ai-sdk/openai" || input.model.api.npm === "@ai-sdk/azure") &&
+    LLMNative.unsupportedCacheOrdering(input.messages)
+  )
+    return {
+      type: "unsupported",
+      reason: "Native Responses cannot preserve explicit cache breakpoints with interleaved system messages",
+    }
   const fetch = providerFetch(input)
   const current = statusWithFetch(input, fetch)
   if (current.type === "unsupported") return current
 
+  const codex = fetch && codexNativeAuth(fetch, current.baseURL ?? (input.model.api.url || "https://api.openai.com/v1"))
+  if (codex) {
+    return {
+      ...current,
+      stream: Stream.unwrap(
+        Effect.tryPromise(codex).pipe(Effect.map((auth) => buildStream(input, { ...current, ...auth }, fetch, true))),
+      ),
+    }
+  }
+  return { ...current, stream: buildStream(input, current, fetch, false) }
+}
+
+function buildRequest(
+  input: StreamInput,
+  current: Extract<RuntimeStatus, { type: "supported" }> & { headers?: Record<string, string> },
+  codex: boolean,
+  http = false,
+  tools?: Parameters<typeof LLMNative.request>[0]["tools"],
+) {
   // Integration point with @opencode-ai/llm: native-request lowers session data
   // into an LLMRequest, then LLMClient handles route selection and transport.
   //
@@ -95,8 +148,16 @@ export function stream(input: StreamInput): StreamResult {
     providerOptions.openai = { ...providerOptions.openai }
     delete providerOptions.openai.previousResponseId
   }
-  const request = LLMNative.request({
-    model: input.model,
+  const headers = { ...input.model.headers, ...providerHeaders(input.provider.options.headers), ...input.headers }
+  const automatic = autoNative(input)
+  const transport = http ? undefined : resolveTransport(input, codex, automatic)
+  if (codex) {
+    for (const key of Object.keys(headers)) {
+      if (["authorization", "chatgpt-account-id", "openai-beta"].includes(key.toLowerCase())) delete headers[key]
+    }
+  }
+  return LLMNative.request({
+    model: codex ? { ...input.model, headers: {} } : input.model,
     apiKey: current.apiKey,
     baseURL: current.baseURL,
     messages: ProviderTransform.message(input.messages, input.model, input.providerOptions ?? {}),
@@ -106,17 +167,32 @@ export function stream(input: StreamInput): StreamResult {
     topK: input.topK,
     maxOutputTokens: input.maxOutputTokens,
     providerOptions,
-    headers: { ...providerHeaders(input.provider.options.headers), ...input.headers },
-    transport: resolveTransport(input),
+    headers: { ...headers, ...current.headers },
+    transport,
+    tools,
   })
+}
+
+function buildStream(
+  input: StreamInput,
+  current: Extract<RuntimeStatus, { type: "supported" }> & { headers?: Record<string, string> },
+  fetch: typeof globalThis.fetch | undefined,
+  codex: boolean,
+  http = false,
+): Stream.Stream<LLMEvent, unknown> {
+  const request = buildRequest(input, current, codex, http)
+  const automatic = autoNative(input)
+  const transport = http ? undefined : resolveTransport(input, codex, automatic)
   const tools = nativeTools(input.tools, input)
   const run = (request: ReturnType<typeof LLMNative.request>) => input.llmClient.stream({ request, tools })
-  const enabled = (input.model.options.responsesContinuation ?? input.provider.options.responsesContinuation) === true
+  const enabled =
+    !http &&
+    (input.model.options.responsesContinuation ?? input.provider.options.responsesContinuation ?? automatic) === true
   const stream =
     enabled &&
     input.continuation &&
     input.sessionID &&
-    input.model.providerID === ProviderID.openai &&
+    (input.model.providerID === ProviderID.openai || codex) &&
     input.model.api.npm === "@ai-sdk/openai"
       ? Continuation.stream({
           state: input.continuation,
@@ -126,10 +202,10 @@ export function stream(input: StreamInput): StreamResult {
             model: input.model.api,
             provider: input.model.providerID,
             apiKey: current.apiKey,
-            auth: input.auth,
+            auth: codex ? undefined : input.auth,
             baseURL: current.baseURL,
             headers: request.model.route.defaults.headers,
-            transport: resolveTransport(input),
+            transport,
             system: request.system,
             instructions: request.providerOptions?.openai?.instructions,
           }),
@@ -138,33 +214,82 @@ export function stream(input: StreamInput): StreamResult {
         })
       : run(request)
 
-  return {
-    ...current,
-    stream: fetch ? stream.pipe(Stream.provideService(FetchHttpClient.Fetch, fetch)) : stream,
-  }
+  if (fetch) return stream.pipe(Stream.provideService(FetchHttpClient.Fetch, fetch))
+  if (http || !automatic || (input.model.options.transport ?? input.provider.options.transport) !== undefined)
+    return stream
+  return Stream.suspend(() => {
+    const progress = { output: false }
+    return stream.pipe(
+      Stream.tap((event) =>
+        Effect.sync(() => {
+          if (event.type !== "step-start") progress.output = true
+        }),
+      ),
+      Stream.catchIf(
+        (error) =>
+          !progress.output &&
+          !input.abort.aborted &&
+          error instanceof LLMError &&
+          error.module === "WebSocketExecutor" &&
+          error.method === "open" &&
+          error.reason._tag === "Transport" &&
+          error.reason.kind === "open" &&
+          !/timeout|timed?\s*out/i.test(error.reason.message),
+        () => {
+          // The failed socket never sent this request. Its continuation receipt
+          // is consumed; retry the complete history once, without a WS pointer.
+          if (input.sessionID) input.continuation?.delete(input.sessionID)
+          return buildStream(input, current, undefined, false, true)
+        },
+      ),
+    )
+  })
 }
 
-// Transport opt-in. Reads `transport` from per-model config first (covers
-// `provider.openai.models["gpt-5.5"].options.transport` in opencode.json),
-// then falls back to per-provider config (`provider.openai.options.transport`).
-// We deliberately only honour `"websocket"` — any other value (including
-// `"http"`) leaves the route to its existing HTTP default so we never push a
-// non-OpenAI model into a WebSocket route by accident.
-//
-// To enable WebSocket for OpenAI you need BOTH:
-//   1. `OPENCODE_EXPERIMENTAL_NATIVE_LLM=true` (so this runtime is selected)
-//   2. `{ provider: { openai: { options: { transport: "websocket" } } } }`
-// Flipping (2) to a default for OpenAI broke six AI-SDK-path tests that
-// explicitly assert OpenAI stays on AI SDK / native-HTTP. Keep this opt-in
-// until those tests are updated to model the new default.
-function resolveTransport(input: Pick<StreamInput, "model" | "provider">): "websocket" | undefined {
-  // Codex authentication and endpoint rewriting live in the HTTP fetch override.
-  if (input.provider.id === ProviderID.openaiCodex) return undefined
-  const fromModel = input.model.options?.transport
-  if (fromModel === "websocket") return "websocket"
-  const fromProvider = input.provider.options?.transport
-  if (fromProvider === "websocket") return "websocket"
-  return undefined
+/** No plugin hooks, history or tool execution are involved in connection setup. */
+export const preconnect = Effect.fn("LLMNativeRuntime.preconnect")(function* (input: StreamInput) {
+  const current = status(input)
+  if (current.type === "unsupported" || !input.llmClient.preconnect) return false
+  if (input.model.api.npm !== "@ai-sdk/openai" || input.model.providerID !== input.provider.id) return false
+  if (input.model.options.fetch !== undefined) return false
+  const baseURL = current.baseURL ?? (input.model.api.url || "https://api.openai.com/v1")
+  if (!URL.canParse(baseURL)) return false
+  const url = new URL(baseURL)
+  if (url.username || url.password || url.search || url.hash) return false
+  const publicURL = url.origin === "https://api.openai.com" && ["/v1", "/v1/"].includes(url.pathname)
+  const codexURL =
+    url.origin === "https://chatgpt.com" && ["/backend-api/codex", "/backend-api/codex/"].includes(url.pathname)
+  if (input.provider.id === ProviderID.openai) {
+    if (!publicURL || input.provider.options.fetch !== undefined) return false
+  } else if (input.provider.id !== ProviderID.openaiCodex || (!publicURL && !codexURL)) return false
+  const fetch = providerFetch(input)
+  const refresh = fetch && codexNativeAuth(fetch, baseURL)
+  if (input.provider.id === ProviderID.openaiCodex && !refresh) return false
+  const auth = refresh ? yield* Effect.tryPromise(refresh) : undefined
+  yield* input.llmClient.preconnect(
+    buildRequest({ ...input, messages: [], tools: {} }, { ...current, ...auth }, !!auth),
+  )
+  return true
+})
+
+/** HTTP-only prefix request: no continuation, fallback, or executable tools. */
+export function warmRequest(input: StreamInput, tools: Parameters<typeof LLMNative.request>[0]["tools"]) {
+  const current = status(input)
+  if (current.type === "unsupported" || input.provider.id !== ProviderID.openai) return undefined
+  return buildRequest(input, current, false, true, tools)
+}
+
+// Model overrides provider; HTTP explicitly opts out of WebSocket, including
+// the public OpenAI Ultrafast policy. Codex still requires an explicit opt-in.
+function resolveTransport(
+  input: Pick<StreamInput, "model" | "provider">,
+  codex = false,
+  automatic = false,
+): "websocket" | undefined {
+  // An arbitrary fetch override cannot authenticate a WebSocket handshake.
+  if (input.provider.id === ProviderID.openaiCodex && !codex) return undefined
+  const transport = input.model.options.transport ?? input.provider.options.transport
+  return transport === "websocket" || (transport === undefined && automatic) ? "websocket" : undefined
 }
 
 function providerFetch(input: Pick<StreamInput, "provider" | "auth">): typeof globalThis.fetch | undefined {
@@ -197,17 +322,29 @@ export function nativeTools(tools: Record<string, Tool>, input: Pick<StreamInput
       nativeTool({
         description: item.description ?? "",
         jsonSchema: nativeSchema(item.inputSchema),
+        execution: readOnlyTools.has(item) ? "eager" : undefined,
         execute: (args: unknown, ctx) =>
-          Effect.tryPromise({
-            try: () => {
+          Effect.callback<unknown, ToolFailure>((resume, signal) => {
+            const result = Promise.resolve().then(() => {
               if (!item.execute) throw new Error(`Tool has no execute handler: ${name}`)
               return item.execute(args, {
                 toolCallId: ctx?.id ?? name,
                 messages: input.messages,
-                abortSignal: input.abort,
+                abortSignal: AbortSignal.any([input.abort, signal]),
               })
-            },
-            catch: (error) => new ToolFailure({ message: errorMessage(error), error }),
+            })
+            result.then(
+              (value) => resume(Effect.succeed(value)),
+              (error) => resume(Effect.fail(new ToolFailure({ message: errorMessage(error), error }))),
+            )
+            // Eager reads own cancellable bridge fibers; drain their cleanup before the stream ends.
+            if (readOnlyTools.has(item))
+              return Effect.promise(() =>
+                result.then(
+                  () => {},
+                  () => {},
+                ),
+              )
           }),
       }),
     ]),

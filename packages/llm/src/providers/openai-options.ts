@@ -4,11 +4,26 @@ import type { OpenAIResponseIncludable } from "../protocols/utils/openai-options
 
 export type { OpenAIResponseIncludable } from "../protocols/utils/openai-options"
 
+export interface OpenAIPromptCacheOptions {
+  readonly mode?: "implicit" | "explicit"
+  readonly ttl?: "30m"
+  // Opt-in only: prewarming incurs cache-write charges and generates no output.
+  readonly prewarm?: boolean
+}
+
+export interface OpenAITextMetadata {
+  readonly promptCacheBreakpoint?: { readonly mode: "explicit" }
+}
+
 export interface OpenAIOptionsInput {
   readonly [key: string]: unknown
   readonly store?: boolean
+  // Responses API; omitted leaves the provider default unchanged.
+  readonly parallelToolCalls?: boolean
   readonly promptCacheKey?: string
   readonly promptCacheRetention?: "in-memory" | "24h"
+  // Responses API, GPT-5.6 and later. Older models retain their existing defaults.
+  readonly promptCacheOptions?: OpenAIPromptCacheOptions
   readonly serviceTier?: "auto" | "default" | "flex" | "scale" | "priority" | "ultrafast"
   readonly reasoningEffort?: ReasoningEffort
   readonly reasoningSummary?: "auto"
@@ -39,8 +54,10 @@ const openAIProviderOptions = (options: OpenAIOptionsInput | undefined): Provide
   const openai = Object.fromEntries(
     definedEntries({
       store: options?.store,
+      parallelToolCalls: options?.parallelToolCalls,
       promptCacheKey: options?.promptCacheKey,
       promptCacheRetention: options?.promptCacheRetention,
+      promptCacheOptions: options?.promptCacheOptions,
       serviceTier: options?.serviceTier,
       reasoningEffort: options?.reasoningEffort,
       reasoningSummary: options?.reasoningSummary,

@@ -16,6 +16,8 @@ import { NonNegativeInt } from "@opencode-ai/core/schema"
 
 const log = Log.create({ service: "ripgrep" })
 const VERSION = "15.1.0"
+const CONTEXT_MATCH_LIMIT = 100
+const CONTEXT_BYTE_LIMIT = 1024 * 1024
 const PLATFORM = {
   "arm64-darwin": { platform: "aarch64-apple-darwin", extension: "tar.gz" },
   "arm64-linux": { platform: "aarch64-unknown-linux-gnu", extension: "tar.gz" },
@@ -76,6 +78,11 @@ export const Match = Schema.Struct({
   data: SearchMatch,
 })
 
+const ContextLine = Schema.Struct({
+  type: Schema.Literal("context"),
+  data: SearchMatch,
+})
+
 const End = Schema.Struct({
   type: Schema.Literal("end"),
   data: Schema.Struct({
@@ -95,6 +102,7 @@ const Summary = Schema.Struct({
 
 const Result = Schema.Union([Begin, Match, End, Summary])
 const decodeResult = Schema.decodeUnknownEffect(Schema.fromJsonString(Result))
+const decodeContext = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Union([Result, ContextLine])))
 
 export type Result = Schema.Schema.Type<typeof Result>
 export type Match = Schema.Schema.Type<typeof Match>
@@ -107,6 +115,10 @@ export type Row = Match["data"]
 export interface SearchResult {
   items: Item[]
   partial: boolean
+  /** Neighboring, non-match lines; only present for positive context. */
+  context?: Item[]
+  /** True when a contextual search stopped before completion. */
+  truncated?: boolean
 }
 
 export interface FilesInput {
@@ -125,7 +137,11 @@ export interface SearchInput {
   limit?: number
   follow?: boolean
   file?: string[]
+  /** Search captured text through stdin instead of reopening filesystem targets. */
+  stdin?: string
   signal?: AbortSignal
+  /** Neighboring lines, from 0 to 10. Positive values enable bounded search. */
+  context?: number
 }
 
 export interface TreeInput {
@@ -215,8 +231,10 @@ function searchArgs(input: SearchInput) {
   if (input.glob) {
     for (const glob of input.glob) args.push(`--glob=${glob}`)
   }
-  if (input.limit) args.push(`--max-count=${input.limit}`)
-  args.push("--", input.pattern, ...(input.file ?? ["."]))
+  const limit = input.context ? Math.min(input.limit || CONTEXT_MATCH_LIMIT + 1, CONTEXT_MATCH_LIMIT + 1) : input.limit
+  if (limit) args.push(`--max-count=${limit}`)
+  if (input.context) args.push(`--context=${input.context}`, "--threads=1", "--no-mmap")
+  args.push("--", input.pattern, ...(input.stdin === undefined ? (input.file ?? ["."]) : ["-"]))
   return args
 }
 
@@ -336,13 +354,13 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | ChildPro
         )
       })
 
-      const command = Effect.fnUntraced(function* (cwd: string, args: string[]) {
+      const command = Effect.fnUntraced(function* (cwd: string, args: string[], stdin?: string) {
         const binary = yield* filepath
         return ChildProcess.make(binary, args, {
           cwd,
           env: env(),
           extendEnv: true,
-          stdin: "ignore",
+          stdin: stdin === undefined ? "ignore" : Stream.succeed(Buffer.from(stdin)),
         })
       })
 
@@ -393,11 +411,84 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | ChildPro
       }
 
       const search: Interface["search"] = Effect.fn("Ripgrep.search")(function* (input: SearchInput) {
+        if (
+          input.context !== undefined &&
+          (!Number.isInteger(input.context) || input.context < 0 || input.context > 10)
+        ) {
+          return yield* Effect.fail(new Error("context must be an integer between 0 and 10"))
+        }
         yield* check(input.cwd)
 
         const program = Effect.scoped(
           Effect.gen(function* () {
-            const handle = yield* spawner.spawn(yield* command(input.cwd, searchArgs(input)))
+            const handle = yield* spawner.spawn(yield* command(input.cwd, searchArgs(input), input.stdin))
+
+            if (input.context) {
+              const items: Item[] = []
+              const context: Item[] = []
+              const pending: Array<typeof Match.Type | typeof ContextLine.Type> = []
+              const stderr = yield* Stream.mkString(Stream.decodeText(handle.stderr)).pipe(Effect.forkScoped)
+              let bytes = 0
+              let truncated = false
+              let partial = false
+              let skipped = false
+
+              yield* handle.stdout.pipe(
+                // Cap raw JSON before buffering a potentially enormous line or submatch array.
+                Stream.takeWhile((chunk) => {
+                  bytes += chunk.byteLength
+                  if (bytes <= CONTEXT_BYTE_LIMIT) return true
+                  truncated = true
+                  return false
+                }),
+                Stream.decodeText,
+                Stream.splitLines,
+                Stream.filter((line) => line.length > 0),
+                Stream.takeWhile((line) => {
+                  const decoded = decodeContext(line)
+                  if (decoded._tag === "None") {
+                    // Non-UTF-8 paths/lines use base64 in rg JSON. Skip the file, not just its context.
+                    pending.length = 0
+                    skipped = true
+                    if (!truncated) partial = true
+                    return true
+                  }
+                  const item = decoded.value
+                  if (item.type === "begin") {
+                    pending.length = 0
+                    skipped = false
+                  }
+                  if (!skipped && (item.type === "match" || item.type === "context")) pending.push(item)
+                  if (item.type !== "end") return true
+
+                  // rg can emit matches before discovering a NUL byte. Commit only text files.
+                  if (!skipped && item.data.binary_offset === null) {
+                    for (const line of pending) {
+                      if (line.type === "match") items.push(row(line.data))
+                      if (line.type === "context") context.push(row(line.data))
+                    }
+                  }
+                  pending.length = 0
+                  if (
+                    items.length <= CONTEXT_MATCH_LIMIT &&
+                    !(input.limit && item.data.stats.matched_lines >= input.limit)
+                  ) {
+                    return true
+                  }
+                  truncated = true
+                  return false
+                }),
+                Stream.runDrain,
+              )
+
+              // Closing the scope stops rg without waiting for the rest of a bounded search.
+              if (truncated) return { items, context, partial, truncated }
+              const code = yield* handle.exitCode
+              if (code !== 0 && code !== 1 && code !== 2) {
+                return yield* Effect.fail(error(yield* Fiber.join(stderr), code))
+              }
+              return { items, context, partial: partial || code === 2, truncated: false }
+            }
 
             const [items, stderr, code] = yield* Effect.all(
               [

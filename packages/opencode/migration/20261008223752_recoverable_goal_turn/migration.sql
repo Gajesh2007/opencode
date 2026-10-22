@@ -1,0 +1,1 @@
+ALTER TABLE `goal` ADD `pending_turn` text;

@@ -1,4 +1,4 @@
-import { Effect, Layer, Context, Stream } from "effect"
+import { Cause, Effect, Layer, Context, Stream } from "effect"
 import { Bus } from "@/bus"
 import { InstanceState } from "@/effect/instance-state"
 import { Goal } from "./goal"
@@ -49,7 +49,6 @@ export const layer = Layer.effect(
     const sessions = yield* Session.Service
     const prompt = yield* SessionPrompt.Service
     const runs = yield* SessionRunState.Service
-    const turns = yield* InstanceState.make(() => Effect.succeed(new Map<SessionID, MessageID>()))
 
     // Append a synthetic user message carrying the continuation/budget prompt,
     // reusing the session's last-user agent/model so the next turn runs identically.
@@ -58,29 +57,36 @@ export const layer = Layer.effect(
       lastUser: MessageV2.User,
       text: string,
       signal: AbortSignal,
+      createdAt: number | undefined,
+      turn?: Goal.Turn,
     ) {
-      if (signal.aborted) return
+      if (signal.aborted || (yield* goals.get(sessionID))?.createdAt !== createdAt) return
+      if (turn && (yield* goals.getTurn(sessionID))?.token !== turn.token) return
       const msg = yield* sessions.updateMessage({
-        id: MessageID.ascending(),
+        id: turn?.continuation?.messageID ?? MessageID.ascending(),
         role: "user",
         sessionID,
         agent: lastUser.agent,
         model: lastUser.model,
         time: { created: Date.now() },
       })
-      if (signal.aborted) {
+      if (signal.aborted || (yield* goals.get(sessionID))?.createdAt !== createdAt) {
         yield* sessions.removeMessage({ sessionID, messageID: msg.id })
         return
       }
       yield* sessions.updatePart({
-        id: PartID.ascending(),
+        id: turn?.continuation?.partID ?? PartID.ascending(),
         messageID: msg.id,
         sessionID,
         type: "text",
         text,
         synthetic: true,
       })
-      if (signal.aborted) yield* sessions.removeMessage({ sessionID, messageID: msg.id })
+      if (signal.aborted || (yield* goals.get(sessionID))?.createdAt !== createdAt) {
+        yield* sessions.removeMessage({ sessionID, messageID: msg.id })
+        return
+      }
+      return msg
     })
 
     const onIdle = Effect.fn("GoalDriver.onIdle")(function* (sessionID: SessionID) {
@@ -96,78 +102,124 @@ export const layer = Layer.effect(
       const msgs = yield* MessageV2.filterCompactedEffect(sessionID)
       const { user: lastUser, assistant: lastAssistant } = MessageV2.latest(msgs)
       if (!lastUser) return
+      const pending = yield* goals.getTurn(sessionID)
+      const recovering =
+        pending?.continuation?.messageID === lastUser.id && (!lastAssistant || lastAssistant.id < lastUser.id)
       // Only continue after a clean assistant turn responded to the latest user
       // message. Skips aborts/errors and idle transitions with no fresh turn
       // (e.g. a manual cancel), mirroring the old inline `!error` guard.
-      if (!lastAssistant || lastAssistant.error || lastAssistant.id < lastUser.id) return
-      const seen = yield* InstanceState.get(turns)
-      if (signal.aborted || seen.get(sessionID) === lastAssistant.id) return
-      seen.set(sessionID, lastAssistant.id)
-
-      // Account the finished turn's tokens and cost.
-      yield* goals.addUsage({
-        sessionID,
-        tokens: lastAssistant.tokens.input + lastAssistant.tokens.output,
-        cost: lastAssistant.cost,
-      })
-      const updated = yield* goals.get(sessionID)
-      if (signal.aborted || !updated || updated.status !== "active") return
-
-      // Budget gate: inject the budget-limit prompt and stop (no resume).
-      const overTokenBudget = updated.tokenBudget !== undefined && updated.tokensUsed >= updated.tokenBudget
-      const overCostBudget = updated.costBudget !== undefined && updated.costUsed >= updated.costBudget
-      if (overTokenBudget || overCostBudget) {
-        yield* goals.setBudgetLimited(sessionID)
-        yield* inject(sessionID, lastUser, renderGoalPrompt(GOAL_BUDGET_LIMIT, updated), signal)
-        return
-      }
-
-      // Ask the steering agent whether the objective is met, blocked, or should
-      // continue. Falls back to a template continuation if steering errors.
-      const steer = yield* steering
-        .steer({
-          sessionID,
-          goal: updated,
-          providerID: lastUser.model.providerID,
-          modelID: lastUser.model.modelID,
-        })
-        .pipe(Effect.catch(() => Effect.succeed(undefined)))
-
-      // A stop or new user turn invalidates the verdict even if steering finished late.
-      if (signal.aborted) return
-      if (steer?.type === "complete") {
-        yield* goals.update({ sessionID, status: "completed" })
-        return
-      }
-      if (steer?.type === "blocked") {
-        // Give up after MAX_BLOCKED_TURNS consecutive blocked verdicts. The counter
-        // is only reset on a non-blocked turn (below), so it accumulates correctly.
-        const turns = yield* goals.incrementBlockedTurns(sessionID)
-        if (signal.aborted) return
-        if (turns >= MAX_BLOCKED_TURNS) {
-          yield* goals.update({ sessionID, status: "blocked" })
+      if (!recovering && (!lastAssistant || lastAssistant.error || lastAssistant.id < lastUser.id)) return
+      const messageID = recovering ? pending?.messageID : lastAssistant?.id
+      if (signal.aborted || !messageID) return
+      const turn = yield* goals.claimTurn(sessionID, messageID, goal.createdAt)
+      if (!turn) return
+      let completed = false
+      return yield* Effect.gen(function* () {
+        // Renew only while this driver is alive. A dead process leaves an expiring
+        // pending claim, not a permanent completed watermark.
+        yield* Stream.tick("10 seconds").pipe(
+          Stream.runForEach(() => goals.renewTurn(sessionID, turn.token)),
+          Effect.forkScoped,
+        )
+        const updated = yield* goals.get(sessionID)
+        if (signal.aborted || !updated || updated.status !== "active" || updated.createdAt !== goal.createdAt) return
+        if (turn.continuation) {
+          const injected = yield* inject(sessionID, lastUser, turn.continuation.text, signal, updated.createdAt, turn)
+          if (!injected || signal.aborted || (yield* goals.getTurn(sessionID))?.token !== turn.token) return
+          yield* prompt.loop(new SessionPrompt.LoopInput({ sessionID }), signal)
+          completed = true
           return
         }
-      } else {
-        yield* goals.resetBlockedTurns(sessionID)
-      }
 
-      const continuationText =
-        steer?.message && steer.message.length > 0
-          ? [
-              "<goal_context>",
-              `<steering_direction>${steer.message}</steering_direction>`,
-              "",
-              renderGoalPrompt(GOAL_CONTINUATION, updated),
-              "</goal_context>",
-            ].join("\n")
-          : renderGoalPrompt(GOAL_CONTINUATION, updated)
-      yield* inject(sessionID, lastUser, continuationText, signal)
-      if (signal.aborted) return
+        // Budget gate: inject the budget-limit prompt and stop (no resume).
+        const overTokenBudget = updated.tokenBudget !== undefined && updated.tokensUsed >= updated.tokenBudget
+        const overCostBudget = updated.costBudget !== undefined && updated.costUsed >= updated.costBudget
+        if (overTokenBudget || overCostBudget) {
+          if (!(yield* goals.setBudgetLimited(sessionID, updated.createdAt))) return
+          yield* inject(sessionID, lastUser, renderGoalPrompt(GOAL_BUDGET_LIMIT, updated), signal, updated.createdAt)
+          completed = true
+          return
+        }
 
-      // Resume the session. The turn ends in another idle, re-entering this
-      // driver. SessionRunState dedupes if a run is already in progress.
-      yield* prompt.loop(new SessionPrompt.LoopInput({ sessionID }), signal)
+        // Ask the steering agent whether the objective is met, blocked, or should
+        // continue. Falls back to a template continuation if steering errors.
+        const steer = yield* steering
+          .steer({
+            sessionID,
+            goal: updated,
+            providerID: lastUser.model.providerID,
+            modelID: lastUser.model.modelID,
+          })
+          .pipe(
+            Effect.catchCauseIf(
+              (cause) => !Cause.hasInterrupts(cause),
+              () => Effect.succeed(undefined),
+            ),
+          )
+
+        // A stop or new user turn invalidates the verdict even if steering finished late.
+        const current = yield* goals.get(sessionID)
+        if (signal.aborted || !current || current.createdAt !== updated.createdAt || current.status !== "active") return
+        if ((yield* goals.getTurn(sessionID))?.token !== turn.token) return
+        if (steer?.type === "complete") {
+          yield* goals.update({ sessionID, status: "completed", createdAt: updated.createdAt })
+          completed = true
+          return
+        }
+        // Steering is also a paid attempt; recheck its freshly recorded usage
+        // before issuing another continuation.
+        if (
+          (current.tokenBudget !== undefined && current.tokensUsed >= current.tokenBudget) ||
+          (current.costBudget !== undefined && current.costUsed >= current.costBudget)
+        ) {
+          if (!(yield* goals.setBudgetLimited(sessionID, current.createdAt))) return
+          yield* inject(sessionID, lastUser, renderGoalPrompt(GOAL_BUDGET_LIMIT, current), signal, current.createdAt)
+          completed = true
+          return
+        }
+        if (steer?.type === "blocked") {
+          // Give up after MAX_BLOCKED_TURNS consecutive blocked verdicts. The counter
+          // is only reset on a non-blocked turn (below), so it accumulates correctly.
+          const turns = yield* goals.incrementBlockedTurns(sessionID, updated.createdAt)
+          if (signal.aborted) return
+          if (turns >= MAX_BLOCKED_TURNS) {
+            yield* goals.update({ sessionID, status: "blocked", createdAt: updated.createdAt })
+            completed = true
+            return
+          }
+        } else {
+          yield* goals.resetBlockedTurns(sessionID, updated.createdAt)
+        }
+
+        const continuationText =
+          steer?.message && steer.message.length > 0
+            ? [
+                "<goal_context>",
+                `<steering_direction>${steer.message}</steering_direction>`,
+                "",
+                renderGoalPrompt(GOAL_CONTINUATION, current),
+                "</goal_context>",
+              ].join("\n")
+            : renderGoalPrompt(GOAL_CONTINUATION, current)
+        const prepared = yield* goals.prepareContinuation(sessionID, turn.token, continuationText)
+        if (!prepared) return
+        const injected = yield* inject(sessionID, lastUser, continuationText, signal, updated.createdAt, prepared)
+        if (!injected) return
+        const next = yield* goals.get(sessionID)
+        if (signal.aborted || !next || next.createdAt !== updated.createdAt || next.status !== "active") {
+          yield* sessions.removeMessage({ sessionID, messageID: injected.id })
+          return
+        }
+        if ((yield* goals.getTurn(sessionID))?.token !== turn.token) return
+
+        // Resume the session. The turn ends in another idle, re-entering this
+        // driver. SessionRunState dedupes if a run is already in progress.
+        yield* prompt.loop(new SessionPrompt.LoopInput({ sessionID }), signal)
+        completed = true
+      }).pipe(
+        Effect.scoped,
+        Effect.ensuring(Effect.suspend(() => goals.releaseTurn(sessionID, turn.token, completed || signal.aborted))),
+      )
     })
 
     // The bus is per-instance, so the subscription must be created inside an
@@ -177,6 +229,18 @@ export const layer = Layer.effect(
     // swallowed so a single bad turn can't tear down the subscription.
     const initState = yield* InstanceState.make(
       Effect.fn("GoalDriver.initState")(function* () {
+        const context = yield* InstanceState.context
+        // Restart recovery must not depend on another idle event arriving.
+        const recover = goals
+          .recoverable(context.directory)
+          .pipe(
+            Effect.flatMap((ids) => Effect.forEach(ids, (id) => onIdle(id).pipe(Effect.forkScoped), { discard: true })),
+          )
+        yield* recover
+        yield* Stream.tick("10 seconds").pipe(
+          Stream.runForEach(() => recover),
+          Effect.forkScoped,
+        )
         yield* (yield* bus.subscribe(SessionStatus.Event.Idle)).pipe(
           Stream.runForEach((evt) =>
             onIdle(evt.properties.sessionID).pipe(

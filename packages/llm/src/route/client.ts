@@ -152,6 +152,8 @@ export interface Interface {
    * route the request will resolve to.
    */
   readonly prepare: <Body = unknown>(request: LLMRequest) => Effect.Effect<PreparedRequestOf<Body>, LLMError>
+  /** Compile the request and warm its transport without sending a model request. */
+  readonly preconnect?: (request: LLMRequest) => Effect.Effect<void, LLMError>
   readonly stream: StreamMethod
   readonly generate: GenerateMethod
 }
@@ -404,6 +406,11 @@ const generateWith = (stream: Interface["stream"]) =>
 export const prepare = <Body = unknown>(request: LLMRequest) =>
   prepareWith(request) as Effect.Effect<PreparedRequestOf<Body>, LLMError>
 
+export const preconnect = Effect.fn("LLMClient.preconnect")(function* (request: LLMRequest) {
+  const client = yield* Service
+  yield* client.preconnect?.(request) ?? Effect.void
+})
+
 export function stream(request: LLMRequest): Stream.Stream<LLMEvent, LLMError>
 export function stream<T extends Tools>(options: ToolRuntime.RunOptions<T>): Stream.Stream<LLMEvent, LLMError>
 export function stream(input: LLMRequest | ToolRuntime.RunOptions<Tools>) {
@@ -432,13 +439,20 @@ export const streamRequest = (request: LLMRequest) =>
 export const layer: Layer.Layer<Service, never, RequestExecutor.Service> = Layer.effect(
   Service,
   Effect.gen(function* () {
-    const stream = streamWith(
-      streamRequestWith({
-        http: yield* RequestExecutor.Service,
-        webSocket: Option.getOrUndefined(yield* Effect.serviceOption(WebSocketExecutor.Service)),
+    const runtime = {
+      http: yield* RequestExecutor.Service,
+      webSocket: Option.getOrUndefined(yield* Effect.serviceOption(WebSocketExecutor.Service)),
+    }
+    const stream = streamWith(streamRequestWith(runtime))
+    return Service.of({
+      prepare: prepareWith as Interface["prepare"],
+      preconnect: Effect.fn("LLMClient.preconnectWith")(function* (request: LLMRequest) {
+        const compiled = yield* compile(request)
+        yield* compiled.route.transport.preconnect?.(compiled.prepared, compiled.request, runtime) ?? Effect.void
       }),
-    )
-    return Service.of({ prepare: prepareWith as Interface["prepare"], stream, generate: generateWith(stream) })
+      stream,
+      generate: generateWith(stream),
+    })
   }),
 )
 
@@ -448,6 +462,7 @@ export const LLMClient = {
   Service,
   layer,
   prepare,
+  preconnect,
   stream,
   generate,
   stepCountIs: ToolRuntime.stepCountIs,

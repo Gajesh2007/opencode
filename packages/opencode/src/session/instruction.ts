@@ -21,7 +21,11 @@ function extract(messages: MessageV2.WithParts[]) {
   const paths = new Set<string>()
   for (const msg of messages) {
     for (const part of msg.parts) {
-      if (part.type === "tool" && part.tool === "read" && part.state.status === "completed") {
+      if (
+        part.type === "tool" &&
+        (part.tool === "read" || part.tool === "read_many") &&
+        part.state.status === "completed"
+      ) {
         if (part.state.time.compacted) continue
         const loaded = part.state.metadata?.loaded
         if (!loaded || !Array.isArray(loaded)) continue
@@ -36,6 +40,7 @@ function extract(messages: MessageV2.WithParts[]) {
 
 export interface Interface {
   readonly clear: (messageID: MessageID) => Effect.Effect<void>
+  readonly release: (messageID: MessageID, owner: symbol, retained?: readonly string[]) => Effect.Effect<void>
   readonly systemPaths: () => Effect.Effect<Set<string>, AppFileSystem.Error>
   readonly system: () => Effect.Effect<string[], AppFileSystem.Error>
   readonly find: (dir: string) => Effect.Effect<string | undefined, AppFileSystem.Error>
@@ -43,6 +48,7 @@ export interface Interface {
     messages: MessageV2.WithParts[],
     filepath: string,
     messageID: MessageID,
+    owner?: symbol,
   ) => Effect.Effect<{ filepath: string; content: string }[], AppFileSystem.Error>
 }
 
@@ -70,7 +76,7 @@ export const layer: Layer.Layer<
       Effect.fn("Instruction.state")(() =>
         Effect.succeed({
           // Track which instruction files have already been attached for a given assistant message.
-          claims: new Map<MessageID, Set<string>>(),
+          claims: new Map<MessageID, Map<string, symbol | undefined>>(),
         }),
       ),
     )
@@ -104,6 +110,22 @@ export const layer: Layer.Layer<
     const clear = Effect.fn("Instruction.clear")(function* (messageID: MessageID) {
       const s = yield* InstanceState.get(state)
       s.claims.delete(messageID)
+    })
+
+    const release = Effect.fn("Instruction.release")(function* (
+      messageID: MessageID,
+      owner: symbol,
+      retained: readonly string[] = [],
+    ) {
+      const s = yield* InstanceState.get(state)
+      const claims = s.claims.get(messageID)
+      if (!claims) return
+      const keep = new Set(retained)
+      // A failed read may release only its own claims, never another in-flight read's instructions.
+      claims.forEach((claimed, filepath) => {
+        if (claimed === owner && !keep.has(filepath)) claims.delete(filepath)
+      })
+      if (claims.size === 0) s.claims.delete(messageID)
     })
 
     const systemPaths = Effect.fn("Instruction.systemPaths")(function* () {
@@ -179,6 +201,7 @@ export const layer: Layer.Layer<
       messages: MessageV2.WithParts[],
       filepath: string,
       messageID: MessageID,
+      owner?: symbol,
     ) {
       const sys = yield* systemPaths()
       const already = extract(messages)
@@ -199,15 +222,16 @@ export const layer: Layer.Layer<
 
         let set = s.claims.get(messageID)
         if (!set) {
-          set = new Set()
+          set = new Map()
           s.claims.set(messageID, set)
         }
-        if (set.has(found)) {
+        // Siblings in one batch share an owner, but each still needs its relevant instructions.
+        if (set.has(found) && (owner === undefined || set.get(found) !== owner)) {
           current = path.dirname(current)
           continue
         }
 
-        set.add(found)
+        set.set(found, owner)
         const content = yield* read(found)
         if (content) {
           results.push({ filepath: found, content: `Instructions from: ${found}\n${content}` })
@@ -219,7 +243,7 @@ export const layer: Layer.Layer<
       return results
     })
 
-    return Service.of({ clear, systemPaths, system, find, resolve })
+    return Service.of({ clear, release, systemPaths, system, find, resolve })
   }),
 )
 

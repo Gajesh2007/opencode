@@ -2938,12 +2938,52 @@ describe("ProviderTransform.variants", () => {
       }
     })
 
+    for (const id of ["anthropic/claude-opus-5.5", "anthropic/claude-opus-4.7", "anthropic/claude-sonnet-4.6"]) {
+      test(`${id} exposes max reasoning`, () => {
+        const result = ProviderTransform.variants(
+          createMockModel({
+            id,
+            providerID: "openrouter",
+            api: { id, url: "https://openrouter.ai", npm: "@openrouter/ai-sdk-provider" },
+          }),
+        )
+        expect(Object.keys(result)).toEqual(["none", "minimal", "low", "medium", "high", "xhigh", "max"])
+        expect(result.max).toEqual({ reasoning: { effort: "max" } })
+      })
+    }
+
+    test("does not advertise max for older claude models", () => {
+      const id = "anthropic/claude-sonnet-4.5"
+      const result = ProviderTransform.variants(
+        createMockModel({
+          id,
+          providerID: "openrouter",
+          api: { id, url: "https://openrouter.ai", npm: "@openrouter/ai-sdk-provider" },
+        }),
+      )
+      expect(Object.keys(result)).toEqual(["none", "minimal", "low", "medium", "high", "xhigh"])
+    })
+
     test("gemini-3 returns OPENAI_EFFORTS with reasoning", () => {
       const model = createMockModel({
         id: "openrouter/gemini-3-5-pro",
         providerID: "openrouter",
         api: {
           id: "gemini-3-5-pro",
+          url: "https://openrouter.ai",
+          npm: "@openrouter/ai-sdk-provider",
+        },
+      })
+      const result = ProviderTransform.variants(model)
+      expect(Object.keys(result)).toEqual(["none", "minimal", "low", "medium", "high", "xhigh"])
+    })
+
+    test("gemini-4-argon returns OPENAI_EFFORTS with reasoning", () => {
+      const model = createMockModel({
+        id: "google/gemini-4-argon",
+        providerID: "openrouter",
+        api: {
+          id: "google/gemini-4-argon",
           url: "https://openrouter.ai",
           npm: "@openrouter/ai-sdk-provider",
         },

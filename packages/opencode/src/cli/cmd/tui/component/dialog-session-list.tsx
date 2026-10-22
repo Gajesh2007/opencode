@@ -2,7 +2,7 @@ import { useDialog } from "@tui/ui/dialog"
 import { DialogSelect } from "@tui/ui/dialog-select"
 import { useRoute } from "@tui/context/route"
 import { useSync } from "@tui/context/sync"
-import { createMemo, createResource, createSignal, onMount, type JSX } from "solid-js"
+import { createMemo, createSignal, onMount, type JSX } from "solid-js"
 import { Locale } from "@/util/locale"
 import { useProject } from "@tui/context/project"
 import { useTheme } from "../context/theme"
@@ -10,7 +10,7 @@ import { useSDK } from "../context/sdk"
 import { useLocal } from "../context/local"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { DialogSessionRename } from "./dialog-session-rename"
-import { createDebouncedSignal } from "../util/signal"
+import { createSessionSearch } from "../util/session-search"
 import { useToast } from "../ui/toast"
 import { openWorkspaceSelect, type WorkspaceSelection, warpWorkspaceSession } from "./dialog-workspace-create"
 import { Spinner } from "./spinner"
@@ -29,22 +29,27 @@ export function DialogSessionList() {
   const local = useLocal()
   const toast = useToast()
   const [toDelete, setToDelete] = createSignal<string>()
-  const [search, setSearch] = createDebouncedSignal("", 150)
+  const [search, setSearch] = createSignal("")
+  const [mode, setMode] = createSignal<"all" | "title">("all")
   const deleteHint = useCommandShortcut("session.delete")
   const quickSwitch1 = useCommandShortcut("session.quick_switch.1")
   const quickSwitch9 = useCommandShortcut("session.quick_switch.9")
 
-  const [searchResults, { refetch }] = createResource(
-    () => ({ query: search(), filter: sync.session.query() }),
+  const found = createSessionSearch(
+    () => ({ query: search(), mode: mode() }),
     async (input) => {
-      if (!input.query) return undefined
-      const result = await sdk.client.session.list({ search: input.query, limit: 30, ...input.filter })
-      return result.data ?? []
+      const result = await sdk.client.session.search(
+        { query: input.query, mode: input.mode, cursor: input.cursor, limit: "30" },
+        { signal: input.signal, throwOnError: true },
+      )
+      return result.data
     },
   )
+  const refetch = found.refresh
+  const searchResults = createMemo(() => found.result()?.items.map((x) => x.session))
 
   const currentSessionID = createMemo(() => (route.data.type === "session" ? route.data.sessionID : undefined))
-  const sessions = createMemo(() => searchResults() ?? sync.data.session)
+  const sessions = createMemo(() => (search().trim() ? (searchResults() ?? []) : sync.data.session))
 
   function recover(session: NonNullable<ReturnType<typeof sessions>[number]>) {
     const workspace = project.workspace.get(session.workspaceID!)
@@ -125,7 +130,7 @@ export function DialogSessionList() {
 
   function orderByRecency(sessionsList: NonNullable<ReturnType<typeof sessions>>) {
     return sessionsList
-      .filter((x) => x.parentID === undefined)
+      .filter((x) => search().trim() || x.parentID === undefined)
       .toSorted((a, b) => b.time.updated - a.time.updated)
       .map((x) => x.id)
   }
@@ -147,12 +152,13 @@ export function DialogSessionList() {
     const today = new Date().toDateString()
     const sessionMap = new Map(
       sessions()
-        .filter((x) => x.parentID === undefined)
+        .filter((x) => search().trim() || x.parentID === undefined)
         .map((x) => [x.id, x]),
     )
 
     const searchResult = searchResults()
-    const displayOrder = searchResult ? orderByRecency(searchResult) : browseOrder()
+    const displayOrder = search().trim() ? (searchResult ?? []).map((x) => x.id) : browseOrder()
+    const matches = new Map(found.result()?.items.map((x) => [x.session.id, x.match]))
 
     const pinned = local.session.pinned().filter((id) => sessionMap.has(id))
     const pinnedSet = new Set(pinned)
@@ -190,7 +196,20 @@ export function DialogSessionList() {
           ? () => <text fg={theme.accent}>{slot}</text>
           : undefined
       return {
-        title: isDeleting ? `Press ${deleteHint()} again to confirm` : x.title,
+        title: isDeleting
+          ? `Press ${deleteHint()} again to confirm`
+          : search().trim()
+            ? Locale.truncate(x.title, 40)
+            : x.title,
+        description: search().trim()
+          ? [
+              x.parentID ? "Child" : undefined,
+              x.time.archived !== undefined ? "Archived" : undefined,
+              matches.get(x.id)?.text.replace(/[\x00-\x1f\x7f-\x9f]/g, " "),
+            ]
+              .filter(Boolean)
+              .join(" | ")
+          : undefined,
         bg: isDeleting ? theme.error : undefined,
         value: x.id,
         category,
@@ -219,6 +238,26 @@ export function DialogSessionList() {
   return (
     <DialogSelect
       title="Sessions"
+      placeholder={mode() === "all" ? "Search all chats in this folder..." : "Search titles in this folder..."}
+      header={
+        <text fg={found.error() ? theme.error : theme.textMuted}>
+          {found.error()
+            ? `Search failed: ${found.error()} (Ctrl+L to retry)`
+            : found.loading()
+              ? "Searching all saved chats..."
+              : `${mode() === "all" ? "Titles + messages" : "Titles only"} | Search scope: exact folder, archived + children${search().trim() ? ` | ${sessions().length}${found.result()?.next !== undefined ? "+" : ""} results` : ""}`}
+        </text>
+      }
+      bindings={[
+        {
+          key: "tab",
+          desc: "Toggle title/content search",
+          group: "Dialog",
+          cmd: () => setMode((x) => (x === "all" ? "title" : "all")),
+        },
+        { key: "ctrl+o", desc: "Load more matches", group: "Dialog", cmd: found.more },
+        { key: "ctrl+l", desc: "Retry search", group: "Dialog", cmd: found.refresh },
+      ]}
       options={options()}
       skipFilter={true}
       current={currentSessionID()}
@@ -297,7 +336,11 @@ export function DialogSessionList() {
           },
         },
       ]}
-      footerHints={quickSwitchFooterHints()}
+      footerHints={[
+        { title: "titles/content", label: "Tab" },
+        ...(found.result()?.next !== undefined ? [{ title: "more", label: "Ctrl+O" }] : []),
+        ...quickSwitchFooterHints(),
+      ]}
     />
   )
 }

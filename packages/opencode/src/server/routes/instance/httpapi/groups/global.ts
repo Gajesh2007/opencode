@@ -33,8 +33,19 @@ const GlobalUpgradeResult = Schema.Union([
   }),
 ])
 
+const GlobalInfo = Schema.Struct({
+  version: Schema.String,
+  // 0 means the runtime has no OS process identity.
+  pid: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  urls: Schema.Array(Schema.String),
+  paths: Schema.Struct({
+    tmp: Schema.String,
+  }),
+}).annotate({ identifier: "GlobalInfo" })
+
 export const GlobalPaths = {
   health: "/global/health",
+  info: "/global/info",
   event: "/global/event",
   config: "/global/config",
   dispose: "/global/dispose",
@@ -51,6 +62,15 @@ export const GlobalApi = HttpApi.make("global").add(
           identifier: "global.health",
           summary: "Get health",
           description: "Get health information about the OpenCode server.",
+        }),
+      ),
+      HttpApiEndpoint.get("info", GlobalPaths.info, {
+        success: described(GlobalInfo, "Server identity, connection URLs, and paths"),
+      }).annotateMerge(
+        OpenApi.annotations({
+          identifier: "global.info",
+          summary: "Get server info",
+          description: "Return the server version, process id, every reachable connection URL, and paths.",
         }),
       ),
       HttpApiEndpoint.get("event", GlobalPaths.event, {

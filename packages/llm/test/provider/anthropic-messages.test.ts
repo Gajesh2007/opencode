@@ -84,6 +84,26 @@ describe("Anthropic Messages route", () => {
     }),
   )
 
+  it.effect("keeps malformed tool arguments in object-shaped recovery history", () =>
+    Effect.gen(function* () {
+      const prepared = yield* LLMClient.prepare<AnthropicMessages.AnthropicMessagesBody>(
+        LLM.request({
+          model,
+          messages: [
+            Message.assistant([
+              ToolCallPart.make({ id: "call_bad", name: "lookup", input: "{", inputError: "Invalid JSON input" }),
+            ]),
+            Message.tool({ id: "call_bad", name: "lookup", result: { type: "error", value: "Retry with valid JSON" } }),
+          ],
+        }),
+      )
+      expect(prepared.body.messages).toMatchObject([
+        { role: "assistant", content: [{ type: "tool_use", id: "call_bad", input: { value: "{" } }] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "call_bad", is_error: true }] },
+      ])
+    }),
+  )
+
   // Regression: screenshot/read tool results must stay structured so base64
   // image data is not JSON-stringified into `tool_result.content`.
   it.effect("lowers image tool-result content as structured image blocks", () =>

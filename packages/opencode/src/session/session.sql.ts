@@ -7,6 +7,7 @@ import type { Permission } from "../permission"
 import type { ProjectID } from "../project/schema"
 import type { SessionID, MessageID, PartID } from "./schema"
 import type { WorkspaceID } from "../control-plane/schema"
+import type { Goal } from "./goal"
 import { Timestamps } from "../storage/schema.sql"
 
 type PartData = Omit<MessageV2.Part, "id" | "sessionID" | "messageID">
@@ -145,6 +146,10 @@ export const GoalTable = sqliteTable(
     cost_budget: real(),
     cost_used: real().notNull().default(0),
     blocked_turns: integer().notNull().default(0),
+    usage_baseline: text({ mode: "json" }).$type<string[]>().notNull().default([]),
+    usage_end: text({ mode: "json" }).$type<string[]>(),
+    last_assistant_id: text(),
+    pending_turn: text({ mode: "json" }).$type<Goal.Turn>(),
     ...Timestamps,
   },
   (table) => [index("goal_session_idx").on(table.session_id)],

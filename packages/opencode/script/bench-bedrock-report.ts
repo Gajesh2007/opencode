@@ -53,6 +53,9 @@ type RequestSample = {
 }
 
 async function main() {
+  const provider = process.env.BENCH_PROVIDER ?? "amazon-bedrock"
+  if (provider !== "amazon-bedrock" && provider !== "openai") throw new Error("Unsupported BENCH_PROVIDER")
+  const source = process.env.BENCH_SOURCE === "1"
   const model = process.env.BENCH_MODEL ?? "gpt-6-astra"
   if (model !== "gpt-6-astra" && model !== "gpt-6.1-sol")
     throw new Error("BENCH_MODEL must be gpt-6-astra or gpt-6.1-sol")
@@ -62,6 +65,10 @@ async function main() {
   if (!Number.isInteger(runs) || runs < 1 || runs > 10) throw new Error("BENCH_RUNS must be between 1 and 10")
   if (!Number.isInteger(tokens) || tokens < 256 || tokens > 8192)
     throw new Error("BENCH_OUTPUT_TOKENS must be between 256 and 8192")
+  const tiers =
+    process.env.BENCH_TIERS?.split(",") ?? (model === "gpt-6.1-sol" ? ["default"] : ["default", "ultrafast"])
+  if (!tiers.length || tiers.some((tier) => tier !== "default" && tier !== "ultrafast"))
+    throw new Error("BENCH_TIERS must contain default and/or ultrafast")
   if (!process.env.BENCH_DIR || !process.env.BENCH_CONTEXT)
     throw new Error(
       "BENCH_DIR and BENCH_CONTEXT must name an existing temporary output directory and sanitized Markdown brief",
@@ -72,30 +79,39 @@ async function main() {
     throw new Error("Invalid benchmark directory or brief")
   const brief = await Bun.file(context).text()
   if (!brief.trim()) throw new Error("BENCH_CONTEXT is empty")
-  const executable = Bun.which("opencode") ?? ""
+  const executable = source ? process.execPath : (Bun.which("opencode") ?? "")
   if (!executable) throw new Error("Installed opencode executable not found on PATH")
   if (!Bun.which("rg")) throw new Error("Install rg on PATH before benchmarking to avoid a runtime download")
-  const matrix = ["us-east-1", "us-west-2"]
-    .flatMap((region) =>
-      ["us", "global"].flatMap((prefix) =>
-        (model === "gpt-6.1-sol" ? ["default"] : ["default", "ultrafast"]).map((tier) => ({
-          name: `runtime-${region}-${prefix}-${tier}`,
-          region,
-          model: `${prefix}.openai.${model}`,
+  const matrix =
+    provider === "openai"
+      ? tiers.map((tier) => ({
+          name: `openai-${tier}`,
+          region: "global",
+          model,
           tier,
-          baseURL: `https://bedrock-runtime.${region}.amazonaws.com/openai/v1`,
-        })),
-      ),
-    )
-    .concat([
-      {
-        name: `mantle-${mantleRegion}-default`,
-        region: mantleRegion,
-        model: `openai.${model}`,
-        tier: "default",
-        baseURL: `https://bedrock-mantle.${mantleRegion}.api.aws/openai/v1`,
-      },
-    ])
+          baseURL: "https://api.openai.com/v1",
+        }))
+      : ["us-east-1", "us-west-2"]
+          .flatMap((region) =>
+            ["us", "global"].flatMap((prefix) =>
+              tiers.map((tier) => ({
+                name: `runtime-${region}-${prefix}-${tier}`,
+                region,
+                model: `${prefix}.openai.${model}`,
+                tier,
+                baseURL: `https://bedrock-runtime.${region}.amazonaws.com/openai/v1`,
+              })),
+            ),
+          )
+          .concat([
+            {
+              name: `mantle-${mantleRegion}-default`,
+              region: mantleRegion,
+              model: `openai.${model}`,
+              tier: "default",
+              baseURL: `https://bedrock-mantle.${mantleRegion}.api.aws/openai/v1`,
+            },
+          ])
   const filter = process.env.BENCH_PATHS?.split(",").map((name) => name.trim())
   if (filter?.some((name) => !matrix.some((entry) => entry.name === name)))
     throw new Error(`BENCH_PATHS must select from: ${matrix.map((entry) => entry.name).join(",")}`)
@@ -118,12 +134,16 @@ async function main() {
       throw new Error("Benchmark output already exists; use a fresh BENCH_DIR")
   }
   const { Auth } = await import("../src/auth")
+  const saved = await Effect.runPromise(
+    Effect.flatMap(Auth.Service, (service) => service.get(provider)).pipe(Effect.provide(Auth.defaultLayer)),
+  )
   const apiKey =
-    process.env.AWS_BEARER_TOKEN_BEDROCK ??
-    (await Effect.runPromise(
-      Effect.flatMap(Auth.Service, (service) => service.get("amazon-bedrock")).pipe(Effect.provide(Auth.defaultLayer)),
-    ).then((auth) => (auth?.type === "api" ? auth.key : undefined)))
-  if (!apiKey) throw new Error("Configure a Bedrock API key before running this billable benchmark")
+    provider === "openai"
+      ? saved?.type === "api"
+        ? saved.key
+        : process.env.OPENAI_API_KEY
+      : (process.env.AWS_BEARER_TOKEN_BEDROCK ?? (saved?.type === "api" ? saved.key : undefined))
+  if (!apiKey) throw new Error("Configure the provider API key before running this billable benchmark")
   const sections = [
     "Executive Summary",
     "Repository Structure",
@@ -340,9 +360,9 @@ async function main() {
       parallelToolCalls: false,
     }
     const config = {
-      model: `amazon-bedrock/${entry.model}`,
+      model: `${provider}/${entry.model}`,
       default_agent: "report-bench",
-      enabled_providers: ["amazon-bedrock"],
+      enabled_providers: [provider],
       snapshot: false,
       share: "disabled",
       autoupdate: false,
@@ -363,7 +383,7 @@ async function main() {
         "report-bench": { mode: "primary", prompt, options, mcpServers: [], skills: [] },
       },
       provider: {
-        "amazon-bedrock": {
+        [provider]: {
           npm: "@ai-sdk/openai",
           env: [],
           whitelist: [entry.model],
@@ -428,6 +448,7 @@ async function main() {
       const child = Bun.spawn(
         [
           executable,
+          ...(source ? ["run", "--conditions=browser", path.resolve(import.meta.dir, "../src/index.ts")] : []),
           "run",
           "--pure",
           "--format",
@@ -435,7 +456,7 @@ async function main() {
           "--agent",
           "report-bench",
           "--model",
-          `amazon-bedrock/${entry.model}`,
+          `${provider}/${entry.model}`,
           "--variant",
           "low",
           "--title",
@@ -534,7 +555,7 @@ async function main() {
         request.httpStatus !== 200 ||
         request.finishStatus !== "completed" ||
         request.returnedTier !== entry.tier ||
-        request.returnedModel?.replace(/^(us|global)\./, "") !== `openai.${model}` ||
+        request.returnedModel?.replace(/^(us|global)\./, "") !== (provider === "openai" ? model : `openai.${model}`) ||
         !request.outputTokens ||
         request.reasoningTokens === undefined ||
         request.cachedInputTokens === undefined ||
@@ -591,6 +612,8 @@ async function main() {
   const metadata = {
     startedAt,
     model,
+    provider,
+    source,
     executable,
     context,
     contextSHA256: new Bun.CryptoHasher("sha256").update(brief).digest("hex"),

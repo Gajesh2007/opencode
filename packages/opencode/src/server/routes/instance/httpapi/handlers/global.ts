@@ -4,9 +4,11 @@ import { disconnectOnOverflow, SSE_QUEUE_CAPACITY } from "@/server/event"
 import { EffectBridge } from "@/effect/bridge"
 import { Bus } from "@/bus"
 import { Installation } from "@/installation"
+import { ServerInfo as ServerInfoRegistry } from "@/server/server-info"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import * as Log from "@opencode-ai/core/util/log"
+import { tmpdir } from "node:os"
 import { Deferred, Effect, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
@@ -83,6 +85,15 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
       return { healthy: true as const, version: InstallationVersion }
     })
 
+    const info = Effect.fn("GlobalHttpApi.info")(function* () {
+      return {
+        version: InstallationVersion,
+        pid: process.pid ?? 0,
+        urls: ServerInfoRegistry.urls(),
+        paths: { tmp: tmpdir() },
+      }
+    })
+
     const event = Effect.fn("GlobalHttpApi.event")(function* () {
       return yield* eventResponse()
     })
@@ -155,6 +166,7 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
 
     return handlers
       .handle("health", health)
+      .handle("info", info)
       .handleRaw("event", event)
       .handle("configGet", configGet)
       .handle("configUpdate", configUpdate)

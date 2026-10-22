@@ -129,6 +129,14 @@ export const Info = Schema.Struct({
           description:
             "Timeout in milliseconds between streamed SSE chunks for this provider. If no chunk arrives within this window, the request is aborted.",
         }),
+        thinkingDisplay: Schema.optional(Schema.Literals(["summarized", "omitted"])).annotate({
+          description:
+            "Adaptive-thinking display for Anthropic models. 'omitted' hides thinking summaries but streams the final answer and tool calls sooner; defaults to the model's built-in choice ('summarized' for Claude Opus 4.7 and newer).",
+        }),
+        promptCacheTtl: Schema.optional(Schema.Literals(["5m", "1h"])).annotate({
+          description:
+            "Anthropic prompt-cache lifetime for the main conversation (default 1h). Keeps long tool runs and short pauses from rewriting the full context; 5m lowers cache-write cost. Subagents always use 5m.",
+        }),
       }),
       [Schema.Record(Schema.String, Schema.Any)],
     ),

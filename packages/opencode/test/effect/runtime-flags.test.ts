@@ -54,6 +54,15 @@ describe("RuntimeFlags", () => {
     }),
   )
 
+  it.effect("local timing storage is enabled unless explicitly disabled", () =>
+    Effect.gen(function* () {
+      const defaults = yield* readFlags.pipe(Effect.provide(fromConfig({})))
+      const disabled = yield* readFlags.pipe(Effect.provide(fromConfig({ OPENCODE_DISABLE_TIMING: "true" })))
+      expect(defaults.disableTiming).toBe(false)
+      expect(disabled.disableTiming).toBe(true)
+    }),
+  )
+
   it.effect("defaultLayer parses plugin flags from the active ConfigProvider", () =>
     Effect.gen(function* () {
       const flags = yield* readFlags.pipe(
@@ -124,6 +133,37 @@ describe("RuntimeFlags", () => {
 
       expect(explicit.experimentalNativeLlm).toBe(true)
       expect(umbrella.experimentalNativeLlm).toBe(false)
+    }),
+  )
+
+  it.effect("enables meta-agent via dedicated flag only", () =>
+    Effect.gen(function* () {
+      const defaults = yield* readFlags.pipe(Effect.provide(fromConfig({})))
+      const explicit = yield* readFlags.pipe(Effect.provide(fromConfig({ OPENCODE_EXPERIMENTAL_METAAGENT: "true" })))
+      const disabled = yield* readFlags.pipe(
+        Effect.provide(fromConfig({ OPENCODE_EXPERIMENTAL: "true", OPENCODE_EXPERIMENTAL_METAAGENT: "false" })),
+      )
+      const umbrella = yield* readFlags.pipe(Effect.provide(fromConfig({ OPENCODE_EXPERIMENTAL: "true" })))
+      expect(defaults.experimentalMetaAgent).toBe(false)
+      expect(explicit.experimentalMetaAgent).toBe(true)
+      expect(disabled.experimentalMetaAgent).toBe(false)
+      expect(umbrella.experimentalMetaAgent).toBe(false)
+    }),
+  )
+
+  it.effect("enables workflow via dedicated flag only", () =>
+    Effect.gen(function* () {
+      const defaults = yield* readFlags.pipe(Effect.provide(fromConfig({})))
+      const explicit = yield* readFlags.pipe(Effect.provide(fromConfig({ OPENCODE_EXPERIMENTAL_WORKFLOW: "true" })))
+      const disabled = yield* readFlags.pipe(
+        Effect.provide(fromConfig({ OPENCODE_EXPERIMENTAL: "true", OPENCODE_EXPERIMENTAL_WORKFLOW: "false" })),
+      )
+      const umbrella = yield* readFlags.pipe(Effect.provide(fromConfig({ OPENCODE_EXPERIMENTAL: "true" })))
+
+      expect(defaults.experimentalWorkflow).toBe(false)
+      expect(explicit.experimentalWorkflow).toBe(true)
+      expect(disabled.experimentalWorkflow).toBe(false)
+      expect(umbrella.experimentalWorkflow).toBe(false)
     }),
   )
 

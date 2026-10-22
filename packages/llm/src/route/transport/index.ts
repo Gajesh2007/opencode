@@ -13,6 +13,11 @@ export interface TransportRuntime {
 export interface Transport<Body, Prepared, Frame> {
   readonly id: string
   readonly prepare: (input: TransportPrepareInput<Body>) => Effect.Effect<Prepared, LLMError>
+  readonly preconnect?: (
+    prepared: Prepared,
+    request: LLMRequest,
+    runtime: TransportRuntime,
+  ) => Effect.Effect<void, LLMError>
   readonly frames: (
     prepared: Prepared,
     request: LLMRequest,

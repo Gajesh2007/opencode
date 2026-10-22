@@ -46,7 +46,7 @@ const AgentSchema = Schema.StructWithRest(
     model: Schema.optional(ConfigModelID),
     workflow: Schema.optional(WorkflowDef).annotate({
       description:
-        "Declares a fan-out workflow this agent runs: it calls the `workflow` tool once with these passes/synthesis. The `workflow` permission is granted automatically.",
+        "Declares a fan-out workflow this agent runs when OPENCODE_EXPERIMENTAL_WORKFLOW=true: it calls the `workflow` tool once with these passes/synthesis. The `workflow` permission is granted automatically only when enabled.",
     }),
     variant: Schema.optional(Schema.String).annotate({
       description: "Default model variant for this agent (applies only when using the agent's configured model).",

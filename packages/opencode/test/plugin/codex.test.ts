@@ -7,6 +7,11 @@ import {
   type IdTokenClaims,
 } from "../../src/plugin/codex"
 import type { Provider } from "../../src/provider/provider"
+import { Effect } from "effect"
+import { Auth } from "../../src/auth"
+import { testEffect } from "../lib/effect"
+
+const it = testEffect(Auth.defaultLayer)
 
 function createTestJwt(payload: object): string {
   const header = Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url")
@@ -15,6 +20,188 @@ function createTestJwt(payload: object): string {
 }
 
 describe("plugin.codex", () => {
+  for (const switchAccount of [false, true]) {
+    it.live(
+      switchAccount
+        ? "rejects an account switch while refresh persistence is paused"
+        : "refreshes an immutable environment credential snapshot",
+      () =>
+        Effect.gen(function* () {
+          const store = yield* Auth.Service
+          const previous = process.env.OPENCODE_AUTH_CONTENT
+          const initial = {
+            type: "oauth" as const,
+            access: "",
+            refresh: "env-refresh",
+            expires: 0,
+            accountId: "original-account",
+          }
+          const snapshot = JSON.stringify({ "openai-codex": initial })
+          process.env.OPENCODE_AUTH_CONTENT = snapshot
+          yield* store.set("openai-codex", initial)
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              if (previous === undefined) delete process.env.OPENCODE_AUTH_CONTENT
+              else process.env.OPENCODE_AUTH_CONTENT = previous
+            }),
+          )
+          yield* Effect.tryPromise(async () => {
+            const ready = Promise.withResolvers<void>()
+            const release = Promise.withResolvers<void>()
+            const received: string[] = []
+            using server = Bun.serve({
+              port: 0,
+              async fetch(request) {
+                if (new URL(request.url).pathname === "/oauth/token") {
+                  return Response.json({
+                    access_token: "refreshed-access",
+                    refresh_token: "refreshed-refresh",
+                    expires_in: 3600,
+                  })
+                }
+                received.push(request.headers.get("authorization") ?? "")
+                return new Response("{}")
+              },
+            })
+            const hooks = await CodexAuthPlugin(
+              {
+                client: {
+                  auth: {
+                    async set(input: { body: Auth.Info; headers: Record<string, string>; throwOnError?: boolean }) {
+                      expect(input.throwOnError).toBe(true)
+                      expect(input.headers["If-Match"]).toBe(
+                        Auth.fingerprint(await Effect.runPromise(store.get("openai-codex"))),
+                      )
+                      ready.resolve()
+                      if (switchAccount) await release.promise
+                      await Effect.runPromise(store.set("openai-codex", input.body, input.headers["If-Match"]))
+                    },
+                  },
+                },
+              } as never,
+              {
+                issuer: server.url.origin,
+                codexApiEndpoint: `${server.url.origin}/backend-api/codex/responses`,
+              },
+            )
+            const loaded = await hooks.auth!.loader!(async () => {
+              const current = await Effect.runPromise(store.get("openai-codex"))
+              if (!current) throw new Error("missing credentials")
+              return current
+            }, {} as never)
+            const pending = loaded.fetch!("https://api.openai.com/v1/responses")
+            await ready.promise
+            if (switchAccount) {
+              await Effect.runPromise(
+                store.set("openai-codex", {
+                  ...initial,
+                  access: "account-b",
+                  refresh: "refresh-b",
+                  expires: Date.now() + 60_000,
+                }),
+              )
+              release.resolve()
+              await expect(pending).rejects.toThrow("Authentication credentials changed")
+              expect(await Effect.runPromise(store.get("openai-codex"))).toMatchObject({
+                access: "account-b",
+                refresh: "refresh-b",
+              })
+              expect(received).toEqual([])
+              return
+            }
+            await pending
+            expect(process.env.OPENCODE_AUTH_CONTENT).toBe(snapshot)
+            expect(await Effect.runPromise(store.get("openai-codex"))).toMatchObject({
+              access: "refreshed-access",
+              refresh: "refreshed-refresh",
+            })
+            expect(received).toEqual(["Bearer refreshed-access"])
+          })
+        }),
+    )
+  }
+
+  test("does not follow authenticated redirects or send credentials to custom endpoints", async () => {
+    const seen: string[] = []
+    using destination = Bun.serve({
+      port: 0,
+      fetch(request) {
+        seen.push(request.headers.get("authorization") ?? "")
+        return new Response("unexpected")
+      },
+    })
+    using server = Bun.serve({
+      port: 0,
+      fetch() {
+        return Response.redirect(destination.url)
+      },
+    })
+    const hooks = await CodexAuthPlugin({} as never, {
+      codexApiEndpoint: `${server.url.origin}/backend-api/codex/responses`,
+    })
+    const options = await hooks.auth!.loader!(
+      async () => ({
+        type: "oauth",
+        access: "private-access",
+        refresh: "private-refresh",
+        expires: Date.now() + 60000,
+      }),
+      {} as never,
+    )
+    const fetch = options.fetch as typeof globalThis.fetch
+    await expect(fetch("https://api.openai.com/v1/responses")).rejects.toThrow()
+    await expect(fetch(`${destination.url.origin}/v1/responses`)).rejects.toThrow("untrusted endpoint")
+    expect(seen).toEqual([])
+  })
+
+  test("does not overwrite an account switch while refreshing OAuth", async () => {
+    let auth = { type: "oauth" as const, access: "", refresh: "old-refresh", expires: 0, accountId: "old-account" }
+    let started: (() => void) | undefined
+    let finish: (() => void) | undefined
+    const refreshing = new Promise<void>((resolve) => {
+      started = resolve
+    })
+    const release = new Promise<void>((resolve) => {
+      finish = resolve
+    })
+    const updates: unknown[] = []
+    using server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        await request.text()
+        started?.()
+        await release
+        return Response.json({ access_token: "old-refreshed", refresh_token: "old-refresh-2", expires_in: 3600 })
+      },
+    })
+    const hooks = await CodexAuthPlugin(
+      {
+        client: {
+          auth: {
+            set: async (input: unknown) => {
+              updates.push(input)
+            },
+          },
+        },
+      } as never,
+      { issuer: server.url.origin },
+    )
+    const options = await hooks.auth!.loader!(async () => auth, {} as never)
+    const fetch = options.fetch as typeof globalThis.fetch
+    const pending = fetch("https://api.openai.com/v1/responses")
+    await refreshing
+    auth = {
+      ...auth,
+      access: "new-access",
+      refresh: "new-refresh",
+      accountId: "new-account",
+      expires: Date.now() + 60000,
+    }
+    finish?.()
+    await expect(pending).rejects.toThrow("credentials changed during token refresh")
+    expect(updates).toEqual([])
+  })
+
   test("registers OAuth only for the Codex subscription provider", async () => {
     const hooks = await CodexAuthPlugin({} as never)
     expect(hooks.provider?.id).toBe("openai-codex")

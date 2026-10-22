@@ -25,6 +25,7 @@ export const GlobTool = Tool.define(
 
     return {
       description: DESCRIPTION,
+      readOnly: true,
       parameters: Parameters,
       execute: (params: { pattern: string; path?: string }, ctx: Tool.Context) =>
         Effect.gen(function* () {

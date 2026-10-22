@@ -13,6 +13,7 @@ import { Session } from "@/session/session"
 import { LLM } from "../../src/session/llm"
 import { MessageV2 } from "../../src/session/message-v2"
 import { Goal } from "../../src/session/goal"
+import { SessionUsage } from "../../src/session/usage"
 import { Steering } from "../../src/session/steering"
 import { SessionPrompt } from "../../src/session/prompt"
 import { SessionRunState } from "../../src/session/run-state"
@@ -159,6 +160,17 @@ const assistant = Effect.fn("test.assistant")(function* (
     finish: "end_turn",
   }
   yield* session.updateMessage(msg)
+  yield* SessionUsage.record({
+    id: msg.id,
+    sessionID,
+    startedAt: msg.time.created,
+    data: {
+      kind: "assistant",
+      tokens: msg.tokens,
+      cost: msg.cost,
+      pricing: "catalog_estimate",
+    },
+  })
   return msg
 })
 
@@ -171,8 +183,8 @@ const setup = Effect.fn("test.setup")(function* (
   const { driver, goals, sessions } = yield* boot()
   const chat = yield* sessions.create({})
   const u = yield* user(chat.id, "do the thing")
-  yield* assistant(chat.id, u.id, path.resolve(dir), turn)
   yield* goals.create({ sessionID: chat.id, objective: "finish the thing", ...goalInput })
+  yield* assistant(chat.id, u.id, path.resolve(dir), turn)
   return { driver, goals, sessions, chat }
 })
 

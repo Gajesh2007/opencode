@@ -3,6 +3,7 @@ import { Context, Deferred, Effect, Fiber, Latch, Layer } from "effect"
 import { BackgroundJob } from "@/background/job"
 import { Bus } from "@/bus"
 import { Goal } from "@/session/goal"
+import { SessionUsage } from "@/session/usage"
 import { GoalDriver } from "@/session/goal-driver"
 import { MessageV2 } from "@/session/message-v2"
 import { SessionPrompt } from "@/session/prompt"
@@ -13,7 +14,9 @@ import { Steering } from "@/session/steering"
 import { SessionStatus } from "@/session/status"
 import { ModelID, ProviderID } from "@/provider/schema"
 import { TestInstance } from "../fixture/fixture"
-import { awaitWithTimeout, testEffect } from "../lib/effect"
+import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
+import { Database } from "@/storage/db"
+import { GoalTable } from "@/session/session.sql"
 
 class Harness extends Context.Service<
   Harness,
@@ -113,6 +116,7 @@ const setup = Effect.fn("test.goalInterruption.setup")(function* (tokenBudget?: 
     type: "text",
     text: "Finish the objective",
   })
+  yield* goals.create({ sessionID: chat.id, objective: "Finish the objective", tokenBudget })
   yield* sessions.updateMessage({
     id: MessageID.ascending(),
     sessionID: chat.id,
@@ -128,11 +132,121 @@ const setup = Effect.fn("test.goalInterruption.setup")(function* (tokenBudget?: 
     cost: 0,
     tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 } },
   })
-  yield* goals.create({ sessionID: chat.id, objective: "Finish the objective", tokenBudget })
+  yield* SessionUsage.record({
+    id: crypto.randomUUID(),
+    sessionID: chat.id,
+    startedAt: Date.now(),
+    data: {
+      kind: "assistant",
+      tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 } },
+      cost: 0,
+      pricing: "catalog_estimate",
+    },
+  })
   return chat.id
 })
 
+for (const gap of ["claim", "prepared", "message", "part"] as const) {
+  it.instance(`fresh driver recovers expired durable ${gap} gap exactly once`, () =>
+    Effect.gen(function* () {
+      const goals = yield* Goal.Service
+      const sessions = yield* Session.Service
+      const driver = yield* GoalDriver.Service
+      const test = yield* Harness
+      const id = yield* setup()
+      const latest = MessageV2.latest(yield* MessageV2.filterCompactedEffect(id))
+      if (!latest.assistant || !latest.user) throw new Error("missing fixture messages")
+      const claim = yield* goals.claimTurn(id, latest.assistant.id)
+      if (!claim) throw new Error("claim not acquired")
+      const prepared =
+        gap === "claim" ? claim : yield* goals.prepareContinuation(id, claim.token, "persisted direction")
+      if (!prepared) throw new Error("outbox not prepared")
+      if (gap === "message" || gap === "part") {
+        if (!prepared.continuation) throw new Error("missing outbox")
+        yield* sessions.updateMessage({
+          ...latest.user,
+          id: prepared.continuation.messageID,
+          time: { created: Date.now() },
+        })
+        if (gap === "part")
+          yield* sessions.updatePart({
+            id: prepared.continuation.partID,
+            messageID: prepared.continuation.messageID,
+            sessionID: id,
+            type: "text",
+            text: prepared.continuation.text,
+            synthetic: true,
+          })
+      }
+      yield* Deferred.succeed(test.release, { type: "continue" as const, message: "new direction" })
+      // A second live service must not steal a live claim.
+      yield* Effect.gen(function* () {
+        yield* (yield* GoalDriver.Service).onIdle(id)
+      }).pipe(Effect.provide(GoalDriver.layer))
+      expect(test.loops).toEqual([])
+      expect((yield* goals.getTurn(id))?.token).toBe(claim.token)
+      // Persist the exact state left by a killed process, with its lease elapsed.
+      yield* Effect.sync(() =>
+        Database.use((db) =>
+          db
+            .update(GoalTable)
+            .set({ pending_turn: { ...prepared, expires: 0 } })
+            .where(Database.eq(GoalTable.session_id, id))
+            .run(),
+        ),
+      )
+      expect(yield* goals.recoverable((yield* TestInstance).directory)).toContain(id)
+      yield* Effect.gen(function* () {
+        const fresh = yield* GoalDriver.Service
+        if (gap === "claim") {
+          yield* fresh.init()
+          yield* pollWithTimeout(
+            Effect.gen(function* () {
+              return test.loops.length && !(yield* goals.getTurn(id)) ? true : undefined
+            }),
+            "startup did not recover pending turn",
+          )
+          return
+        }
+        yield* fresh.onIdle(id)
+      }).pipe(Effect.provide(GoalDriver.layer))
+      expect(test.loops).toEqual([id])
+      expect(yield* goals.getTurn(id)).toBeUndefined()
+      expect((yield* goals.get(id))?.tokensUsed).toBe(15)
+      const messages = yield* MessageV2.filterCompactedEffect(id)
+      expect(messages.filter((message) => message.info.role === "user")).toHaveLength(2)
+      const continuation = messages.find((message) => message.info.id === prepared.continuation?.messageID)
+      if (gap !== "claim") expect(continuation?.parts.filter((part) => part.type === "text")).toHaveLength(1)
+      yield* driver.onIdle(id)
+      expect(test.loops).toEqual([id])
+    }),
+  )
+}
+
 for (const type of ["continue", "complete", "blocked"] as const) {
+  it.instance(`goal replacement invalidates pending ${type} steering even without a new user turn`, () =>
+    Effect.gen(function* () {
+      const driver = yield* GoalDriver.Service
+      const goals = yield* Goal.Service
+      const test = yield* Harness
+      const id = yield* setup()
+      const original = yield* goals.get(id)
+      const pending = yield* driver.onIdle(id).pipe(Effect.forkChild)
+      yield* awaitWithTimeout(Deferred.await(test.entered), "steering did not start")
+      const replacement = yield* goals.create({ sessionID: id, objective: "replacement" })
+      yield* Deferred.succeed(test.release, { type, message: "stale verdict" })
+      yield* Fiber.join(pending)
+      expect(replacement.createdAt).not.toBe(original?.createdAt)
+      expect((yield* goals.get(id))?.status).toBe("active")
+      expect((yield* goals.get(id))?.blockedTurns).toBe(0)
+      expect((yield* goals.get(id))?.tokensUsed).toBe(0)
+      expect(test.loops).toEqual([])
+      expect(
+        (yield* MessageV2.filterCompactedEffect(id)).filter((message) => message.info.role === "user"),
+      ).toHaveLength(1)
+    }),
+  )
+
   it.instance(`explicit stop invalidates pending ${type} steering`, () =>
     Effect.gen(function* () {
       const driver = yield* GoalDriver.Service
@@ -152,6 +266,7 @@ for (const type of ["continue", "complete", "blocked"] as const) {
       const goal = yield* (yield* Goal.Service).get(id)
       expect(goal?.status).toBe("active")
       expect(goal?.blockedTurns).toBe(0)
+      expect(yield* (yield* Goal.Service).getTurn(id)).toBeUndefined()
     }),
   )
 }

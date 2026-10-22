@@ -405,6 +405,79 @@ export function Prompt(props: PromptProps) {
     }
   })
 
+  let submitting = false
+  let warmTimer: ReturnType<typeof setTimeout> | undefined
+  let warmRequest: AbortController | undefined
+  const warmed = new Map<string, number>()
+  function cancelWarm() {
+    clearTimeout(warmTimer)
+    warmTimer = undefined
+    warmRequest?.abort()
+    warmRequest = undefined
+  }
+  onCleanup(cancelWarm)
+  createEffect(() => {
+    cancelWarm()
+    const draft = store.prompt.input.trim()
+    const sessionID = props.sessionID
+    const session = sessionID ? sync.session.get(sessionID) : undefined
+    const workspace = session?.workspaceID ?? project.workspace.current()
+    const model = local.model.current()
+    const agent = local.agent.current()?.name
+    const variant = local.model.variant.current()
+    const serviceTier = local.model.serviceTier.selected() === "default" ? "default" : local.model.serviceTier.current()
+    const upstream = local.model.upstream.current()
+    const reasoningMode = local.session.reasoningMode(sessionID)
+    if (
+      !sessionID ||
+      !session ||
+      sync.data.message[sessionID] === undefined ||
+      !local.model.ready ||
+      !local.session.ready ||
+      sync.status !== "complete" ||
+      submitting ||
+      props.disabled ||
+      props.visible === false ||
+      workspaceCreating() ||
+      store.mode !== "normal" ||
+      status().type !== "idle" ||
+      !draft ||
+      draft.startsWith("/") ||
+      !model ||
+      !agent ||
+      reasoningMode === "pro" ||
+      (workspace && project.workspace.status(workspace) !== "connected")
+    )
+      return
+    const selection = {
+      sessionID,
+      workspace,
+      providerID: model.providerID,
+      modelID: model.modelID,
+      agent,
+      variant,
+      serviceTier,
+      upstream,
+    }
+    const key = JSON.stringify([sdk.directory, project.instance.directory(), selection])
+    if (Date.now() - (warmed.get(key) ?? -Infinity) < 60_000) return
+    warmTimer = setTimeout(() => {
+      warmTimer = undefined
+      warmed.delete(key)
+      warmed.set(key, Date.now())
+      const oldest = warmed.keys().next().value
+      if (warmed.size > 32 && oldest) warmed.delete(oldest)
+      const controller = new AbortController()
+      warmRequest = controller
+      void sdk.client.session
+        .warm(selection, { signal: controller.signal })
+        .catch(() => {})
+        .finally(() => {
+          if (warmRequest === controller) warmRequest = undefined
+        })
+    }, 400)
+  })
+
   const promptCommands = createMemo(() =>
     [
       {
@@ -989,8 +1062,8 @@ export function Prompt(props: PromptProps) {
     }
   })
 
-  let submitting = false
   async function submit() {
+    cancelWarm()
     // Prevent overlapping invocations (e.g. a double-pressed Enter, or the
     // input's native onSubmit racing another dispatch). Without this guard,
     // a second call slips past the empty-input check before the first call
@@ -1058,7 +1131,7 @@ export function Prompt(props: PromptProps) {
     }
 
     const variant = local.model.variant.current()
-    const serviceTier = local.model.serviceTier.current()
+    const serviceTier = local.model.serviceTier.selected() === "default" ? "default" : local.model.serviceTier.current()
     const upstream = local.model.upstream.current()
     let sessionID = props.sessionID
     if (sessionID == null) {

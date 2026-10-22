@@ -2,7 +2,7 @@ import { Auth } from "@/auth"
 import { ProviderID } from "@/provider/schema"
 import * as Log from "@opencode-ai/core/util/log"
 import { Effect } from "effect"
-import { HttpApiBuilder } from "effect/unstable/httpapi"
+import { HttpApiBuilder, HttpApiError } from "effect/unstable/httpapi"
 import { RootHttpApi } from "../api"
 import { LogInput } from "../groups/control"
 
@@ -13,8 +13,13 @@ export const controlHandlers = HttpApiBuilder.group(RootHttpApi, "control", (han
     const authSet = Effect.fn("ControlHttpApi.authSet")(function* (ctx: {
       params: { providerID: ProviderID }
       payload: Auth.Info
+      headers: { "if-match"?: string }
     }) {
-      yield* auth.set(ctx.params.providerID, ctx.payload).pipe(Effect.orDie)
+      yield* auth
+        .set(ctx.params.providerID, ctx.payload, ctx.headers["if-match"])
+        .pipe(
+          Effect.catchTag("AuthError", (error) => (error.conflict ? new HttpApiError.Conflict() : Effect.die(error))),
+        )
       return true
     })
 

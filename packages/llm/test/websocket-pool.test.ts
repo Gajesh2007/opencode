@@ -1,17 +1,22 @@
-import { describe, expect } from "bun:test"
-import { Effect, Stream } from "effect"
+import { describe, expect, spyOn } from "bun:test"
+import { Effect, Fiber, Stream } from "effect"
 import { Headers } from "effect/unstable/http"
-import { pool, type WebSocketConnection } from "../src/route/transport/websocket"
+import { pool, poolLayer, Service, type WebSocketConnection } from "../src/route/transport/websocket"
 import { it } from "./lib/effect"
 
 const server = Effect.acquireRelease(
   Effect.sync(() => {
     const opened: Array<{ id: number; headers: globalThis.Headers }> = []
     const closed: number[] = []
+    const messages: string[] = []
+    const handshake = { count: 0, delay: 0, reject: false }
     const listener = Bun.serve<{ id: number; cache: Set<string> }>({
       hostname: "127.0.0.1",
       port: 0,
-      fetch(request, server) {
+      async fetch(request, server) {
+        handshake.count++
+        if (handshake.delay) await Bun.sleep(handshake.delay)
+        if (handshake.reject) return new Response("Unauthorized", { status: 401 })
         const id = opened.length + 1
         const headers = new globalThis.Headers(request.headers)
         if (server.upgrade(request, { data: { id, cache: new Set() } })) {
@@ -23,6 +28,7 @@ const server = Effect.acquireRelease(
       websocket: {
         message(socket, message) {
           const text = String(message)
+          messages.push(text)
           if (text === "disconnect") {
             socket.close(1011)
             return
@@ -39,7 +45,7 @@ const server = Effect.acquireRelease(
         },
       },
     })
-    return { url: `ws://127.0.0.1:${listener.port}/responses`, opened, closed, listener }
+    return { url: `ws://127.0.0.1:${listener.port}/responses`, opened, closed, messages, handshake, listener }
   }),
   ({ listener }) =>
     Effect.sync(() => {
@@ -59,6 +65,281 @@ const waitFor = (predicate: () => boolean) =>
   }).pipe(Effect.timeout("2 seconds"))
 
 describe("WebSocket pool (local server)", () => {
+  it.live("retains idle sockets for five minutes and reuses them after thirty seconds", () =>
+    Effect.gen(function* () {
+      const local = yield* server
+      const executor = pool()
+      yield* Effect.addFinalizer(() => executor.closeAll)
+      const input = { url: local.url, headers: Headers.empty }
+      const now = Date.now()
+      const clock = spyOn(Date, "now").mockReturnValue(now)
+      const timer = spyOn(globalThis, "setTimeout")
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          clock.mockRestore()
+          timer.mockRestore()
+        }),
+      )
+      const first = yield* executor.open(input)
+      yield* first.close
+      expect(timer.mock.calls.filter((call) => call[1] === 300_000)).toHaveLength(1)
+      const scheduled = timer.mock.results.find((result) => result.type === "return")?.value
+      expect(scheduled?.hasRef()).toBe(false)
+      clock.mockReturnValue(now + 31_000)
+      const second = yield* executor.open(input)
+      expect(yield* exchange(second, "after thirty seconds")).toEqual(["1:after thirty seconds"])
+      yield* second.close
+      expect(local.opened).toHaveLength(1)
+      clock.mockReturnValue(now + 331_000)
+      const expire = timer.mock.calls.filter((call) => call[1] === 300_000).at(-1)?.[0]
+      expect(expire).toBeDefined()
+      expire?.(undefined)
+      yield* waitFor(() => local.closed.length === 1)
+    }),
+  )
+
+  it.live("deduplicates authenticated preconnections without sending model payloads", () =>
+    Effect.gen(function* () {
+      const local = yield* server
+      const executor = pool()
+      yield* Effect.addFinalizer(() => executor.closeAll)
+      local.handshake.delay = 30
+      const input = {
+        url: local.url,
+        headers: Headers.fromInput({ authorization: "Bearer test", "x-session-affinity": "one" }),
+      }
+      yield* Effect.forEach([0, 1, 2], () => executor.preconnect(input), { concurrency: "unbounded" })
+      expect(local.opened).toHaveLength(1)
+      expect(local.opened[0].headers.get("authorization")).toBe("Bearer test")
+      expect(local.messages).toEqual([])
+      yield* executor.preconnect(input)
+      const connection = yield* executor.open(input)
+      expect(yield* exchange(connection, "warm")).toEqual(["1:warm"])
+      yield* executor.preconnect(input)
+      expect(yield* exchange(connection, "still active")).toEqual(["1:still active"])
+      expect(local.handshake.count).toBe(1)
+      yield* connection.close
+    }),
+  )
+
+  it.live("joins an opening preconnection when a real lease arrives", () =>
+    Effect.gen(function* () {
+      const local = yield* server
+      const executor = pool()
+      yield* Effect.addFinalizer(() => executor.closeAll)
+      local.handshake.delay = 50
+      const input = { url: local.url, headers: Headers.empty }
+      const warm = yield* executor.preconnect(input).pipe(Effect.forkChild)
+      yield* waitFor(() => local.handshake.count === 1)
+      const connection = yield* executor.open(input)
+      yield* Fiber.join(warm)
+      expect(yield* exchange(connection, "joined")).toEqual(["1:joined"])
+      expect(local.opened).toHaveLength(1)
+      yield* connection.close
+    }),
+  )
+
+  for (const scenario of [
+    { name: "idle retention is disabled", options: { maxIdleConnections: 0 } },
+    { name: "the handshake exceeds maximum age", options: { maxAgeMillis: 1 } },
+  ]) {
+    it.live(`hands an opening preconnection to a waiting lease when ${scenario.name}`, () =>
+      Effect.gen(function* () {
+        const local = yield* server
+        const executor = pool(scenario.options)
+        yield* Effect.addFinalizer(() => executor.closeAll)
+        local.handshake.delay = 50
+        const input = { url: local.url, headers: Headers.empty }
+        const warm = yield* executor.preconnect(input).pipe(Effect.forkChild)
+        yield* waitFor(() => local.handshake.count === 1)
+        const connection = yield* executor.open(input)
+        yield* Fiber.join(warm)
+        expect(local.handshake.count).toBe(1)
+        expect(local.closed).toEqual([])
+        expect(yield* exchange(connection, "claimed before retirement")).toEqual(["1:claimed before retirement"])
+        yield* connection.close
+        yield* waitFor(() => local.closed.includes(1))
+      }),
+    )
+  }
+
+  it.live("cleans failed preconnections so an identical handshake can retry", () =>
+    Effect.gen(function* () {
+      const local = yield* server
+      const executor = pool()
+      yield* Effect.addFinalizer(() => executor.closeAll)
+      const input = { url: local.url, headers: Headers.empty }
+      local.handshake.reject = true
+      const error = yield* executor.preconnect(input).pipe(Effect.flip, Effect.timeout("2 seconds"))
+      expect(error.message).toContain("Failed to open WebSocket")
+      local.handshake.reject = false
+      yield* executor.preconnect(input)
+      expect(local.handshake.count).toBe(2)
+      const connection = yield* executor.open(input)
+      expect(yield* exchange(connection, "retried")).toEqual(["1:retried"])
+      yield* connection.close
+    }),
+  )
+
+  it.live("releases a cancelled real reservation without cancelling another warm waiter", () =>
+    Effect.gen(function* () {
+      const local = yield* server
+      const executor = pool()
+      yield* Effect.addFinalizer(() => executor.closeAll)
+      local.handshake.delay = 50
+      const input = { url: local.url, headers: Headers.empty }
+      const warm = yield* executor.preconnect(input).pipe(Effect.forkChild)
+      yield* waitFor(() => local.handshake.count === 1)
+      yield* executor.open(input).pipe(Effect.timeout("10 millis"), Effect.flip)
+      yield* Fiber.join(warm)
+      const connection = yield* executor.open(input)
+      expect(local.handshake.count).toBe(1)
+      expect(yield* exchange(connection, "reservation released")).toEqual(["1:reservation released"])
+      yield* connection.close
+    }),
+  )
+
+  it.live("one interrupted warm does not cancel another waiter", () =>
+    Effect.gen(function* () {
+      const local = yield* server
+      const executor = pool()
+      yield* Effect.addFinalizer(() => executor.closeAll)
+      local.handshake.delay = 100
+      const input = { url: local.url, headers: Headers.empty }
+      const first = yield* executor.preconnect(input).pipe(Effect.forkChild)
+      yield* waitFor(() => local.handshake.count === 1)
+      const second = yield* executor.preconnect(input).pipe(Effect.forkChild)
+      yield* Effect.yieldNow
+      yield* Fiber.interrupt(first)
+      yield* Fiber.join(second)
+      expect(local.handshake.count).toBe(1)
+      const connection = yield* executor.open(input)
+      expect(yield* exchange(connection, "survived")).toEqual(["1:survived"])
+      yield* connection.close
+    }),
+  )
+
+  it.live("bounded warm cancellation removes its unfinished socket", () =>
+    Effect.gen(function* () {
+      const local = yield* server
+      const executor = pool()
+      yield* Effect.addFinalizer(() => executor.closeAll)
+      local.handshake.delay = 100
+      const input = { url: local.url, headers: Headers.empty }
+      yield* executor.preconnect(input).pipe(Effect.timeout("20 millis"), Effect.flip)
+      local.handshake.delay = 0
+      yield* executor.preconnect(input)
+      expect(local.handshake.count).toBe(2)
+      const connection = yield* executor.open(input)
+      expect(yield* exchange(connection, "retry")).toEqual(["1:retry"])
+      yield* connection.close
+    }),
+  )
+
+  it.live("finalizes preconnected sockets with the pool layer", () =>
+    Effect.gen(function* () {
+      const local = yield* server
+      yield* Effect.gen(function* () {
+        const executor = yield* Service
+        yield* executor.preconnect?.({ url: local.url, headers: Headers.empty }) ?? Effect.void
+        expect(local.opened).toHaveLength(1)
+      }).pipe(Effect.provide(poolLayer()))
+      yield* waitFor(() => local.closed.length === 1)
+    }),
+  )
+
+  it.live("preconnections retain handshake boundaries and obey idle capacity", () =>
+    Effect.gen(function* () {
+      const local = yield* server
+      const executor = pool({ maxIdleConnections: 2 })
+      yield* Effect.addFinalizer(() => executor.closeAll)
+      const input = {
+        url: local.url,
+        headers: Headers.fromInput({ authorization: "Bearer one", "x-session-affinity": "one" }),
+      }
+      yield* executor.preconnect(input)
+      yield* executor.preconnect({
+        ...input,
+        headers: Headers.fromInput({ "X-Session-Affinity": "one", Authorization: "Bearer one" }),
+      })
+      expect(local.opened).toHaveLength(1)
+      yield* executor.preconnect({
+        ...input,
+        headers: Headers.fromInput({ authorization: "Bearer two", "x-session-affinity": "one" }),
+      })
+      yield* executor.preconnect({
+        ...input,
+        headers: Headers.fromInput({ authorization: "Bearer one", "x-session-affinity": "two" }),
+      })
+      yield* waitFor(() => local.closed.includes(1))
+      yield* executor.preconnect({ ...input, url: `${local.url}?other=true` })
+      yield* waitFor(() => local.closed.includes(2))
+      expect(local.opened).toHaveLength(4)
+      expect(local.messages).toEqual([])
+    }),
+  )
+
+  it.live("warming never replaces an aged active lease or duplicates its opening handshake", () =>
+    Effect.gen(function* () {
+      const local = yield* server
+      const executor = pool({ maxAgeMillis: 20 })
+      yield* Effect.addFinalizer(() => executor.closeAll)
+      local.handshake.delay = 50
+      const input = { url: local.url, headers: Headers.empty }
+      const opening = yield* executor.open(input).pipe(Effect.forkChild)
+      yield* waitFor(() => local.handshake.count === 1)
+      yield* executor.preconnect(input)
+      const active = yield* Fiber.join(opening)
+      yield* executor.preconnect(input)
+      expect(local.handshake.count).toBe(1)
+      expect(yield* exchange(active, "aged but active")).toEqual(["1:aged but active"])
+      yield* active.close
+      yield* waitFor(() => local.closed.includes(1))
+      local.handshake.delay = 0
+      yield* executor.preconnect(input)
+      expect(local.handshake.count).toBe(2)
+    }),
+  )
+
+  it.live("expires preconnected idle sockets at maximum age", () =>
+    Effect.gen(function* () {
+      const local = yield* server
+      const executor = pool({ maxAgeMillis: 30 })
+      yield* Effect.addFinalizer(() => executor.closeAll)
+      const input = { url: local.url, headers: Headers.empty }
+      yield* executor.preconnect(input)
+      yield* waitFor(() => local.closed.includes(1))
+      yield* executor.preconnect(input)
+      expect(local.opened).toHaveLength(2)
+    }),
+  )
+
+  it.live("disposal closes idle, active, temporary and opening sockets and rejects reuse", () =>
+    Effect.gen(function* () {
+      const local = yield* server
+      const executor = pool()
+      yield* Effect.addFinalizer(() => executor.closeAll)
+      const input = { url: local.url, headers: Headers.empty }
+      yield* executor.preconnect({ ...input, url: `${local.url}?idle=true` })
+      const first = yield* executor.open(input)
+      const temporary = yield* executor.open(input)
+      local.handshake.delay = 100
+      const opening = yield* executor
+        .preconnect({ ...input, url: `${local.url}?opening=true` })
+        .pipe(Effect.exit, Effect.forkChild)
+      yield* waitFor(() => local.handshake.count === 4)
+      yield* executor.closeAll
+      yield* Fiber.join(opening)
+      yield* waitFor(() => local.closed.length === 3)
+      yield* first.close
+      yield* temporary.close
+      yield* executor.closeAll
+      expect((yield* executor.open(input).pipe(Effect.flip)).message).toContain("pool is closed")
+      expect((yield* executor.preconnect(input).pipe(Effect.flip)).message).toContain("pool is closed")
+      expect(local.handshake.count).toBe(4)
+    }),
+  )
+
   it.live("reuses a connection and its cache across sequential leases", () =>
     Effect.gen(function* () {
       const local = yield* server

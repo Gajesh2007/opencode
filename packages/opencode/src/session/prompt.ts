@@ -58,12 +58,14 @@ import { and, eq } from "@/storage/db"
 import * as Database from "@/storage/db"
 import { MessageTable, SessionTable } from "./session.sql"
 import { referencePromptMetadata, referenceTextPart } from "./prompt/reference"
+import { SessionReference } from "./prompt/session-reference"
 import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
 import { LLMEvent } from "@opencode-ai/llm"
 import { Goal } from "./goal"
 import { MetaAgent } from "./metaagent"
 import { ReasoningReviewer } from "./reasoning-reviewer"
+import { SessionTiming } from "./timing"
 import { Memory } from "@/memory/memory"
 import { Collaboration } from "@/agent/collaboration"
 import { collaborationGuidance } from "./collaboration"
@@ -90,6 +92,11 @@ const elog = EffectLogger.create({ service: "session.prompt" })
 
 // Max times the per-step reasoning reviewer (metacognition) may redirect within one turn.
 const MAX_REASONING_REDIRECTS = 2
+
+// A step-finish snapshot may stand in for the next step's start snapshot only
+// when the loop continues immediately (normally a few milliseconds later). Any
+// longer gap, or a non-model step in between, takes a fresh snapshot instead.
+const SNAPSHOT_CARRY_MS = 1_000
 
 export interface Interface {
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
@@ -166,6 +173,7 @@ export const layer = Layer.effect(
         Effect.fnUntraced(function* (match) {
           const name = match[1]
           if (!name) return
+          if (name.startsWith("codex:") || name.startsWith("opencode:")) return
           if (seen.has(name)) return
           seen.add(name)
 
@@ -362,6 +370,19 @@ export const layer = Layer.effect(
         subagent_type: task.agent,
         command: task.command,
       }
+      const timing = SessionTiming.start(
+        {
+          sessionID,
+          messageID: assistantMessage.id,
+          providerID: taskModel.providerID,
+          modelID: taskModel.id,
+          variant: lastUser.model.variant,
+          requestedTier: lastUser.model.serviceTier,
+          purpose: "subtask",
+        },
+        { enabled: !flags.disableTiming },
+      )
+      timing.toolStart(part.callID, TaskTool.id)
       yield* plugin.trigger(
         "tool.execute.before",
         { tool: TaskTool.id, sessionID, callID: part.id },
@@ -398,11 +419,17 @@ export const layer = Layer.effect(
             }),
           ask: (req: any) =>
             permission
-              .ask({
-                ...req,
-                sessionID,
-                ruleset: Permission.merge(taskAgent.permission, session.permission ?? []),
-              })
+              .ask(
+                {
+                  ...req,
+                  sessionID,
+                  ruleset: Permission.merge(taskAgent.permission, session.permission ?? []),
+                },
+                () => {
+                  const token = timing.permissionStart(part.callID)
+                  return (status) => timing.permissionEnd(token, status)
+                },
+              )
               .pipe(Effect.orDie),
         })
         .pipe(
@@ -430,6 +457,18 @@ export const layer = Layer.effect(
                   },
                 } satisfies MessageV2.ToolPart)
               }
+            }),
+          ),
+          Effect.onExit((exit) =>
+            Effect.sync(() => {
+              const status =
+                Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)
+                  ? "interrupted"
+                  : error || Exit.isFailure(exit)
+                    ? "error"
+                    : "completed"
+              timing.toolEnd(part.callID, status)
+              timing.finish(status)
             }),
           ),
         )
@@ -582,11 +621,24 @@ export const layer = Layer.effect(
             return { msg, part, cwd: ctx.directory }
           }).pipe(Effect.ensuring(markReady))
 
+          const timing = SessionTiming.start(
+            {
+              sessionID: input.sessionID,
+              messageID: msg.id,
+              providerID: msg.providerID,
+              modelID: msg.modelID,
+              purpose: "shell",
+            },
+            { enabled: !flags.disableTiming },
+          )
+          timing.toolStart(part.callID, ShellID.ToolID)
+          const command = timing.command(part.callID)
           const cfg = yield* config.get()
           const sh = Shell.preferred(cfg.shell)
           const args = Shell.args(sh, input.command, cwd)
           let output = ""
           let aborted = false
+          let commandExit: number | undefined
 
           const finish = Effect.uninterruptible(
             Effect.gen(function* () {
@@ -634,24 +686,45 @@ export const layer = Layer.effect(
                 stdin: "ignore",
                 forceKillAfter: "3 seconds",
               })
+              command.start()
               const handle = yield* spawner.spawn(cmd)
-              yield* Stream.runForEach(Stream.decodeText(handle.all), (chunk) =>
-                Effect.gen(function* () {
-                  output += chunk
-                  if (part.state.status === "running") {
-                    part.state.metadata = { output, description: "" }
-                    yield* sessions.updatePart(part)
-                  }
-                }),
+              const result = yield* Effect.all(
+                [
+                  handle.all.pipe(
+                    Stream.tap((chunk) =>
+                      Effect.sync(() => {
+                        if (chunk.byteLength) command.firstOutput()
+                      }),
+                    ),
+                    Stream.decodeText,
+                    Stream.runForEach((chunk) =>
+                      Effect.gen(function* () {
+                        output += chunk
+                        if (part.state.status === "running") {
+                          part.state.metadata = { output, description: "" }
+                          yield* sessions.updatePart(part)
+                        }
+                      }),
+                    ),
+                  ),
+                  handle.exitCode,
+                ],
+                { concurrency: 2 },
               )
-              yield* handle.exitCode
+              commandExit = result[1]
             }).pipe(Effect.scoped, Effect.orDie),
           ).pipe(Effect.exit)
 
           if (Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause) && !Cause.hasDies(exit.cause)) {
             aborted = true
           }
+          command.end({
+            exitCode: commandExit,
+            status: aborted ? "interrupted" : Exit.isFailure(exit) || commandExit !== 0 ? "error" : "completed",
+          })
           yield* finish
+          timing.toolEnd(part.callID, aborted ? "interrupted" : Exit.isFailure(exit) ? "error" : "completed")
+          timing.finish(aborted ? "interrupted" : Exit.isFailure(exit) ? "error" : "completed")
 
           if (Exit.isFailure(exit) && !aborted && !Cause.hasInterruptsOnly(exit.cause)) {
             return yield* Effect.failCause(exit.cause)
@@ -728,7 +801,7 @@ export const layer = Layer.effect(
           : undefined
       const variant = input.variant ?? (ag.variant && full?.variants?.[ag.variant] ? ag.variant : undefined)
       const reasoningMode = input.reasoningMode
-      const serviceTier = input.serviceTier && input.serviceTier !== "default" ? input.serviceTier : undefined
+      const serviceTier = input.serviceTier || undefined
       const upstream = input.upstream && input.upstream !== "default" ? input.upstream : undefined
 
       const info: MessageV2.User = {
@@ -1082,9 +1155,12 @@ export const layer = Layer.effect(
         return [{ ...part, messageID: info.id, sessionID: input.sessionID }]
       })
 
-      const resolvedParts = yield* Effect.forEach(input.parts, resolvePart, { concurrency: "unbounded" }).pipe(
-        Effect.map((x) => x.flat().map(assign)),
+      const referencedSessions = yield* SessionReference.resolve(
+        input.parts.filter((part): part is MessageV2.TextPartInput => part.type === "text"),
       )
+      const resolvedParts = yield* Effect.forEach([...input.parts, ...referencedSessions], resolvePart, {
+        concurrency: "unbounded",
+      }).pipe(Effect.map((x) => x.flat().map(assign)))
 
       yield* plugin.trigger(
         "chat.message",
@@ -1270,9 +1346,14 @@ export const layer = Layer.effect(
         let structured: unknown
         let step = 0
         let reasoningRedirects = 0
+        let carried: SessionProcessor.Handle["snapshot"]
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
         while (true) {
+          // Consumed by this iteration's model step only; subtasks, compaction,
+          // and other branches that `continue` must not leave it behind.
+          const reuse = carried && Date.now() - carried.at < SNAPSHOT_CARRY_MS ? carried.snapshot : undefined
+          carried = undefined
           yield* status.set(sessionID, { type: "busy" })
           yield* slog.info("loop", { step })
 
@@ -1407,17 +1488,38 @@ export const layer = Layer.effect(
             yield* sessions.updateMessage(msg)
           })
 
+          const timing = SessionTiming.start(
+            {
+              sessionID,
+              messageID: msg.id,
+              providerID: model.providerID,
+              modelID: model.id,
+              variant: lastUser.model.variant,
+              requestedTier: lastUser.model.serviceTier,
+              purpose: "assistant",
+            },
+            { enabled: !flags.disableTiming },
+          )
           const handle = yield* processor
             .create({
               assistantMessage: msg,
               sessionID,
               model,
+              timing,
+              snapshot: reuse,
             })
-            .pipe(Effect.onInterrupt(() => finalizeInterruptedAssistant))
+            .pipe(
+              Effect.onInterrupt(() => finalizeInterruptedAssistant),
+              Effect.onExit((exit) =>
+                Effect.sync(() => {
+                  if (Exit.isFailure(exit)) timing.finish(Cause.hasInterruptsOnly(exit.cause) ? "interrupted" : "error")
+                }),
+              ),
+            )
 
           // Metacognition config for this session — drives the lens injected into the
           // system prompt and the per-step reasoning reviewer below. Read fresh each step.
-          const metaConfig = yield* metaagent.get(sessionID)
+          const metaConfig = flags.experimentalMetaAgent ? yield* metaagent.get(sessionID) : undefined
 
           const outcome: "break" | "continue" = yield* Effect.gen(function* () {
             const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
@@ -1524,6 +1626,7 @@ export const layer = Layer.effect(
             // https://developers.openai.com/api/docs/guides/websocket-mode.
             const previousResponseId =
               lastAssistant && lastAssistant.provider_response_id ? lastAssistant.provider_response_id : undefined
+            handle.timing.prepared()
             const result = yield* handle.process({
               user: lastUser,
               agent,
@@ -1571,7 +1674,13 @@ export const layer = Layer.effect(
           }).pipe(
             Effect.ensuring(instruction.clear(handle.message.id)),
             Effect.onInterrupt(() => finalizeInterruptedAssistant),
+            Effect.onExit((exit) =>
+              Effect.sync(() => {
+                if (Exit.isFailure(exit)) timing.finish(Cause.hasInterruptsOnly(exit.cause) ? "interrupted" : "error")
+              }),
+            ),
           )
+          carried = handle.message.error ? undefined : handle.snapshot
           // Goal auto-continuation is event-driven now (GoalDriver, on session.idle).
           // What runs here is the per-step metacognition reviewer: when a meta agent is
           // configured, grade this step's reasoning and, if it drifts, inject a
@@ -1584,17 +1693,15 @@ export const layer = Layer.effect(
                 .slice(-3)
                 .map((p) => p.text)
                 .join("\n---\n")
-              const verdict = yield* reviewer
-                .review({
-                  sessionID,
-                  reasoning,
-                  priorReasoning,
-                  basePrompt: metaConfig.basePrompt,
-                  model: metaConfig.model ?? MetaAgent.DEFAULT_MODEL,
-                  effort: metaConfig.effort,
-                  fallback: model,
-                })
-                .pipe(Effect.catch(() => Effect.succeed({ type: "ok" as const, message: "" })))
+              const verdict = yield* reviewer.review({
+                sessionID,
+                reasoning,
+                priorReasoning,
+                basePrompt: metaConfig.basePrompt,
+                model: metaConfig.model ?? MetaAgent.DEFAULT_MODEL,
+                effort: metaConfig.effort,
+                fallback: model,
+              })
               if (verdict.type === "redirect" && verdict.message) {
                 reasoningRedirects++
                 const reviewMsg = yield* sessions.updateMessage({

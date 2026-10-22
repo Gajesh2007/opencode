@@ -10,14 +10,14 @@ describe("workflow.finding", () => {
       "```",
       "Hope that helps.",
     ].join("\n")
-    const out = parseFindings(text)
+    const out = parseFindings(text).findings
     expect(out.length).toBe(1)
     expect(out[0].file).toBe("a.ts")
     expect(out[0].severity).toBe("high")
   })
 
   test("parseFindings extracts a raw array and fills defaults", () => {
-    const out = parseFindings('[{"line":1,"title":"T","description":"D"}]', { file: "b.ts", lens: "logic" })
+    const out = parseFindings('[{"line":1,"title":"T","description":"D"}]', { file: "b.ts", lens: "logic" }).findings
     expect(out.length).toBe(1)
     expect(out[0].file).toBe("b.ts")
     expect(out[0].lens).toBe("logic")
@@ -30,13 +30,20 @@ describe("workflow.finding", () => {
       '{"file":"a.ts","severity":"not-a-severity","lens":"logic","title":"bad","description":"d"},',
       '{"file":"a.ts","lens":"logic"}]', // missing title + description
     ].join("")
-    const out = parseFindings(text)
+    const parsed = parseFindings(text)
+    expect(parsed.status).toBe("partial")
+    expect(parsed.rejected).toBe(2)
+    const out = parsed.findings
     expect(out.length).toBe(1)
     expect(out[0].title).toBe("ok")
   })
 
-  test("parseFindings returns [] when there is no JSON", () => {
-    expect(parseFindings("no findings here")).toEqual([])
+  test("parseFindings distinguishes clean, empty and malformed output", () => {
+    expect(parseFindings("[]")).toEqual({ findings: [], status: "valid", rejected: 0 })
+    expect(parseFindings("  ").status).toBe("empty")
+    for (const text of ["no findings here", "[invalid]", "[{}]", '[{"title":"T","description":"D"}']) {
+      expect(parseFindings(text).status).toBe("malformed")
+    }
   })
 
   test("dedupe merges the same finding reported by different lenses", () => {

@@ -64,6 +64,39 @@ describe("ToolStream", () => {
     }),
   )
 
+  for (const method of ["finish", "finishWithInput", "finishAll"] as const) {
+    it.effect(`${method} preserves malformed arguments as a recoverable tool call`, () =>
+      Effect.gen(function* () {
+        const tools = ToolStream.start(ToolStream.empty<string>(), "item_1", {
+          id: "call_1",
+          name: "list_agents",
+          input: method === "finishWithInput" ? "{}" : "{",
+          providerMetadata: { openai: { itemId: "item_1" } },
+        })
+        const finished = yield* method === "finishAll"
+          ? ToolStream.finishAll(ADAPTER, tools)
+          : method === "finishWithInput"
+            ? ToolStream.finishWithInput(ADAPTER, tools, "item_1", "{")
+            : ToolStream.finish(ADAPTER, tools, "item_1")
+
+        expect(finished).toMatchObject({
+          tools: {},
+          events: [
+            { type: "tool-input-end", id: "call_1", name: "list_agents" },
+            {
+              type: "tool-call",
+              id: "call_1",
+              name: "list_agents",
+              input: "{",
+              inputError: expect.stringContaining("Invalid JSON input"),
+              providerMetadata: { openai: { itemId: "item_1" } },
+            },
+          ],
+        })
+      }),
+    )
+  }
+
   it.effect("preserves providerExecuted and clears all tools", () =>
     Effect.gen(function* () {
       const first: ToolStream.State<number> = ToolStream.start(ToolStream.empty<number>(), 0, {

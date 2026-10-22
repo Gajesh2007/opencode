@@ -343,7 +343,7 @@ function normalizeMessages(
   return msgs
 }
 
-function applyCaching(msgs: ModelMessage[], model: Provider.Model): ModelMessage[] {
+function applyCaching(msgs: ModelMessage[], model: Provider.Model, tailTtl?: unknown): ModelMessage[] {
   const system = msgs.filter((msg) => msg.role === "system").slice(0, 2)
   const final = msgs.filter((msg) => msg.role !== "system").slice(-2)
 
@@ -351,9 +351,11 @@ function applyCaching(msgs: ModelMessage[], model: Provider.Model): ModelMessage
   // Cache reads are 0.1× base for both; cache writes are 1.25× at 5m and 2× at
   // 1h. The system prompt is stable across a coding session that easily runs
   // longer than 5m, so the 2× write pays itself back well before the cache
-  // expires; the trailing user/assistant pair is transient and stays at 5m.
-  // The Anthropic API also requires 1h breakpoints to appear before 5m
-  // breakpoints in the request, which the system-then-final order satisfies.
+  // expires. The trailing user/assistant pair defaults to 5m; request
+  // preparation opts primary direct-API sessions into 1h, because the TTL runs
+  // from each request's start and long tools or a short pause otherwise force
+  // a full-context rewrite. The Anthropic API also requires 1h breakpoints to
+  // appear before 5m breakpoints, which the system-then-final order satisfies.
   const ANTHROPIC_LONG = { cacheControl: { type: "ephemeral", ttl: "1h" } }
   const ANTHROPIC_SHORT = { cacheControl: { type: "ephemeral" } }
   const longLived = {
@@ -365,7 +367,7 @@ function applyCaching(msgs: ModelMessage[], model: Provider.Model): ModelMessage
     alibaba: { cacheControl: { type: "ephemeral", ttl: "1h" } },
   }
   const transient = {
-    anthropic: ANTHROPIC_SHORT,
+    anthropic: tailTtl === "1h" ? ANTHROPIC_LONG : ANTHROPIC_SHORT,
     openrouter: ANTHROPIC_SHORT,
     bedrock: { cachePoint: { type: "default" } },
     openaiCompatible: { cache_control: { type: "ephemeral" } },
@@ -456,7 +458,7 @@ export function message(msgs: ModelMessage[], model: Provider.Model, options: Re
   // (OpenAI/Google) cache implicitly and don't need breakpoints.
   const gatewayAnthropic = model.api.npm === "@ai-sdk/gateway" && model.api.id.toLowerCase().startsWith("anthropic/")
   if ((looksAnthropic && model.api.npm !== "@ai-sdk/gateway") || gatewayAnthropic) {
-    msgs = applyCaching(msgs, model)
+    msgs = applyCaching(msgs, model, options.promptCacheTtl)
   }
 
   // Remap providerOptions keys from stored providerID to expected SDK key
@@ -779,14 +781,20 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
   if (id.includes("grok")) return {}
 
   switch (model.api.npm) {
-    case "@openrouter/ai-sdk-provider":
-      if (!id.includes("gpt") && !id.includes("gemini-3") && !id.includes("claude")) return {}
+    case "@openrouter/ai-sdk-provider": {
+      if (!id.includes("gpt") && !id.includes("gemini-3") && !id.includes("gemini-4") && !id.includes("claude"))
+        return {}
+      // OpenRouter forwards `reasoning.effort` to Anthropic's `output_config.effort`,
+      // so Claude models that accept the `max` tier upstream can request it here too.
+      const efforts = id.includes("gpt")
+        ? openaiCompatibleReasoningEfforts(id)
+        : adaptiveEfforts?.includes("max")
+          ? [...OPENAI_EFFORTS, "max"]
+          : OPENAI_EFFORTS
       return Object.fromEntries(
-        (id.includes("gpt") ? openaiCompatibleReasoningEfforts(id) : OPENAI_EFFORTS).map((effort) => [
-          effort,
-          { reasoning: { effort: openaiWireReasoningEffort(effort) } },
-        ]),
+        efforts.map((effort) => [effort, { reasoning: { effort: openaiWireReasoningEffort(effort) } }]),
       )
+    }
 
     case "ai-gateway-provider": {
       // Cloudflare AI Gateway routes every upstream through its OpenAI-compatible
@@ -1210,6 +1218,12 @@ export function serviceTiers(model: Provider.Model): Record<string, Record<strin
   const isOpusFastEligible = ["opus-4-6", "opus-4.6", "opus-4-7", "opus-4.7", "opus-4-8", "opus-4.8", "opus-5"].some(
     (v) => apiId.includes(v),
   )
+  const hasUltrafast =
+    (model.providerID !== "openai-codex" || GPT61_SOL_RE.test(apiId) || GPT6_ASTRA_RE.test(apiId)) &&
+    (GPT6_ASTRA_RE.test(apiId) ||
+      GPT61_SOL_RE.test(apiId) ||
+      /^(?:openai\/)?gpt-5\.6-sol(?:-\d{4}-\d{2}-\d{2})?$/.test(apiId) ||
+      BEDROCK_REASONING_RE.test(apiId))
 
   switch (model.api.npm) {
     case "@ai-sdk/anthropic":
@@ -1229,18 +1243,26 @@ export function serviceTiers(model: Provider.Model): Record<string, Record<strin
       const hasPriority =
         /(^|\/)(gpt-4|gpt-5-mini|o3|o4-mini)(?:[.-]|$)/.test(apiId) ||
         (/(^|\/)gpt-5(?:[.-]|$)/.test(apiId) && !apiId.includes("gpt-5-nano")) ||
-        /(^|\/)gpt-6-astra(?:-\d{4}-\d{2}-\d{2})?$/.test(apiId) ||
+        GPT6_ASTRA_RE.test(apiId) ||
         GPT61_SOL_RE.test(apiId)
       // Flex: o3 / o4-mini / gpt-5 family
       const hasFlex = /(^|\/)(o3|o4-mini)(?:[.-]|$)/.test(apiId) || /(^|\/)gpt-5(?:[.-]|$)/.test(apiId)
       if (hasPriority) tiers["priority"] = { serviceTier: "priority" }
       if (hasFlex) tiers["flex"] = { serviceTier: "flex" }
-      // Ultrafast is a direct Responses API tier, not an OpenRouter upstream pin.
-      if (model.providerID === "openai" && /^(gpt-6-astra|gpt-5\.6-sol)(?:-\d{4}-\d{2}-\d{2})?$/.test(apiId)) {
+      // Responses API tiers also work through Bedrock and custom OpenAI endpoints.
+      if (hasUltrafast) {
         tiers["ultrafast"] = { serviceTier: "ultrafast" }
       }
       return tiers
     }
+
+    case "@ai-sdk/amazon-bedrock/mantle":
+      return model.providerID === "amazon-bedrock" && BEDROCK_REASONING_RE.test(apiId)
+        ? { ultrafast: { serviceTier: "ultrafast" } }
+        : {}
+
+    case "@ai-sdk/azure":
+      return hasUltrafast ? { ultrafast: { serviceTier: "ultrafast" } } : {}
 
     case "@ai-sdk/gateway": {
       // Per Vercel docs: serviceTier is honored for OpenAI / Google AI Studio /
@@ -1333,7 +1355,7 @@ export function options(input: {
     result["usage"] = {
       include: true,
     }
-    if (input.model.api.id.includes("gemini-3")) {
+    if (input.model.api.id.includes("gemini-3") || input.model.api.id.includes("gemini-4")) {
       result["reasoning"] = { effort: "high" }
     }
   }

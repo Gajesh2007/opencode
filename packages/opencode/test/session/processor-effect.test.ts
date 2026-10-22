@@ -31,7 +31,7 @@ import { SyncEvent } from "@/sync"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { SessionEvent } from "@opencode-ai/core/session-event"
-import { LLM as NativeLLM, LLMEvent, Usage, tool as nativeTool } from "@opencode-ai/llm"
+import { LLM as NativeLLM, LLMEvent, Usage, tool as nativeTool, type ProviderMetadata } from "@opencode-ai/llm"
 import * as OpenAI from "@opencode-ai/llm/providers/openai"
 import { ToolRuntime } from "../../../llm/src/tool-runtime"
 
@@ -256,6 +256,144 @@ it.live("session.processor effect tests capture llm input cleanly", () =>
         expect(value).toBe("continue")
         expect(calls).toBe(1)
         expect(parts.some((part) => part.type === "text" && part.text === "hello")).toBe(true)
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
+it.live("session.processor persists requested and provider-confirmed service metadata separately", () =>
+  provideTmpdirServer(
+    ({ dir }) =>
+      Effect.gen(function* () {
+        const { session, provider } = yield* boot()
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const cases: { metadata?: ProviderMetadata; tier?: string; model?: string }[] = [
+          {
+            metadata: { openai: { serviceTier: "default", modelId: "wire-model" } },
+            tier: "default",
+            model: "wire-model",
+          },
+          { metadata: { bedrock: { serviceTier: { type: "priority" } } }, tier: "priority", model: undefined },
+          { metadata: undefined, tier: undefined, model: undefined },
+        ]
+        for (const item of cases) {
+          const processors = yield* Layer.build(
+            SessionProcessor.layer.pipe(
+              Layer.fresh,
+              Layer.provide(summary),
+              Layer.provide(Image.defaultLayer),
+              Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
+            ),
+          ).pipe(
+            Effect.map((services) => Context.get(services, SessionProcessor.Service)),
+            Effect.provideService(LLM.Service, {
+              stream: (input) =>
+                Stream.suspend(() => {
+                  input.onRequest?.({ serviceTier: "ultrafast" })
+                  return Stream.make(
+                    LLMEvent.textStart({ id: "text" }),
+                    LLMEvent.textDelta({ id: "text", text: "answer" }),
+                    LLMEvent.textEnd({ id: "text" }),
+                    LLMEvent.stepFinish({
+                      index: 0,
+                      reason: "tool-calls",
+                      providerMetadata: { openai: { serviceTier: "ultrafast", modelId: "previous-step" } },
+                    }),
+                    LLMEvent.stepFinish({ index: 1, reason: "stop", providerMetadata: item.metadata }),
+                  )
+                }),
+            }),
+          )
+          const chat = yield* session.create({})
+          const parent = yield* user(chat.id, "hi")
+          const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+          // An unconfirmed later response must not inherit a previous confirmation.
+          msg.service_tier = "ultrafast"
+          msg.model_resolved = "old-model"
+          const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+          yield* handle.process({
+            user: parent,
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [{ role: "user", content: "hi" }],
+            tools: {},
+          })
+          const stored = yield* MessageV2.get({ sessionID: chat.id, messageID: msg.id })
+          expect(stored.info.role).toBe("assistant")
+          if (stored.info.role !== "assistant") throw new Error("expected assistant")
+          expect(stored.info.service_tier_requested).toBe("ultrafast")
+          expect(stored.info.service_tier).toBe(item.tier)
+          expect(stored.info.model_resolved).toBe(item.model)
+          expect(stored.info.modelID).toBe(ref.modelID)
+          expect(stored.info.cost).toBe(0)
+        }
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
+it.live("session.processor clears service metadata when the next request fails before setup", () =>
+  provideTmpdirServer(
+    ({ dir }) =>
+      Effect.gen(function* () {
+        const { session, provider } = yield* boot()
+        let calls = 0
+        const processors = yield* Layer.build(
+          SessionProcessor.layer.pipe(
+            Layer.fresh,
+            Layer.provide(summary),
+            Layer.provide(Image.defaultLayer),
+            Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
+          ),
+        ).pipe(
+          Effect.map((services) => Context.get(services, SessionProcessor.Service)),
+          Effect.provideService(LLM.Service, {
+            stream: (input) =>
+              Stream.suspend(() => {
+                if (++calls > 1) return Stream.fail(new Error("request setup failed"))
+                input.onRequest?.({ serviceTier: "ultrafast" })
+                return Stream.make(
+                  LLMEvent.textStart({ id: "text" }),
+                  LLMEvent.textDelta({ id: "text", text: "answer" }),
+                  LLMEvent.textEnd({ id: "text" }),
+                  LLMEvent.stepFinish({
+                    index: 0,
+                    reason: "tool-calls",
+                    providerMetadata: { openai: { serviceTier: "default", modelId: "wire-model" } },
+                  }),
+                )
+              }),
+          }),
+        )
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "hi")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+        const input = {
+          user: parent,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "hi" }],
+          tools: {},
+        } satisfies LLM.StreamInput
+        expect(yield* handle.process(input)).toBe("continue")
+        expect(msg.service_tier_requested).toBe("ultrafast")
+        expect(msg.service_tier).toBe("default")
+        expect(msg.model_resolved).toBe("wire-model")
+
+        expect(yield* handle.process(input)).toBe("stop")
+        const stored = yield* MessageV2.get({ sessionID: chat.id, messageID: msg.id })
+        if (stored.info.role !== "assistant") throw new Error("expected assistant")
+        expect(stored.info.error).toBeDefined()
+        expect(stored.info.service_tier_requested).toBeUndefined()
+        expect(stored.info.service_tier).toBeUndefined()
+        expect(stored.info.model_resolved).toBeUndefined()
+        expect(calls).toBe(2)
       }),
     { config: (url) => providerCfg(url) },
   ),
@@ -619,6 +757,93 @@ it.live("session.processor does not prefetch native tool execution past compacti
         expect(msg.error).toBeUndefined()
         expect(result).toBe("compact")
         expect(executions).toBe(0)
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
+it.live("session.processor retains malformed tool feedback without a session error or false tool success", () =>
+  provideTmpdirServer(
+    ({ dir }) =>
+      Effect.gen(function* () {
+        const { session, provider } = yield* boot()
+        const events = yield* EventV2Bridge.Service
+        let executions = 0
+        const processors = yield* Layer.build(
+          SessionProcessor.layer.pipe(
+            Layer.fresh,
+            Layer.provide(summary),
+            Layer.provide(Image.defaultLayer),
+            Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
+          ),
+        ).pipe(
+          Effect.map((services) => Context.get(services, SessionProcessor.Service)),
+          Effect.provideService(LLM.Service, {
+            stream: () =>
+              ToolRuntime.stream({
+                request: NativeLLM.request({
+                  model: OpenAI.configure({ apiKey: "test" }).chat("test-model"),
+                  prompt: "List agents",
+                }),
+                tools: {
+                  list_agents: nativeTool({
+                    description: "List agents",
+                    jsonSchema: { type: "object" },
+                    execute: () => Effect.sync(() => ++executions),
+                  }),
+                },
+                stream: () =>
+                  Stream.make(
+                    LLMEvent.toolCall({
+                      id: "call_bad",
+                      name: "list_agents",
+                      input: "{",
+                      inputError: "Invalid JSON input. Retry with valid JSON arguments.",
+                    }),
+                    LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+                    LLMEvent.finish({ reason: "tool-calls" }),
+                  ),
+              }),
+          }),
+        )
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "list agents")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+        const recorded: string[] = []
+        const off = yield* events.sync((event) =>
+          Effect.sync(() => {
+            if (
+              typeof event.data === "object" &&
+              event.data !== null &&
+              "sessionID" in event.data &&
+              event.data.sessionID === chat.id
+            )
+              recorded.push(event.type)
+          }),
+        )
+        yield* Effect.addFinalizer(() => off)
+        expect(
+          yield* handle.process({
+            user: parent,
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [],
+            tools: {},
+          }),
+        ).toBe("continue")
+        expect(executions).toBe(0)
+        expect(msg.error).toBeUndefined()
+        expect(msg.finish).toBe("tool-calls")
+        expect(MessageV2.parts(msg.id).find((part) => part.type === "tool")?.state).toMatchObject({
+          status: "error",
+          error: "Invalid JSON input. Retry with valid JSON arguments.",
+        })
+        expect(recorded.filter((type) => type === SessionEvent.Tool.Failed.type)).toHaveLength(1)
+        expect(recorded.filter((type) => type === SessionEvent.Tool.Success.type)).toHaveLength(0)
       }),
     { config: (url) => providerCfg(url) },
   ),

@@ -12,7 +12,7 @@
 // The leader-key cycle (promptCycle) uses a two-step pattern: first press
 // arms the leader, second press within the timeout fires the action.
 import type { KeyBinding } from "@opentui/core"
-export { displayCharAt, displaySlice, mentionTriggerIndex } from "../prompt-display"
+export { displayCharAt, displaySlice, isSessionMention, mentionTriggerIndex } from "../prompt-display"
 import { formatBinding, parseBindings } from "./keymap.shared"
 import type { FooterKeybinds, RunPrompt } from "./types"
 

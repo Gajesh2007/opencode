@@ -679,6 +679,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
                   headers: {},
                   options: { workflowRef: m.ref },
                   cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+                  costKnown: false,
                   limit: { context: m.context, output: m.output },
                   capabilities: {
                     temperature: false,
@@ -940,6 +941,8 @@ export const Model = Schema.Struct({
   family: optionalOmitUndefined(Schema.String),
   capabilities: ProviderCapabilities,
   cost: ProviderCost,
+  /** Whether base input/output prices are present, including explicitly free models. */
+  costKnown: optionalOmitUndefined(Schema.Boolean),
   limit: ProviderLimit,
   status: ModelStatus,
   options: Schema.Record(Schema.String, Schema.Any),
@@ -1088,6 +1091,11 @@ function cost(c: ModelsDev.Model["cost"]): Model["cost"] {
 }
 
 function fromModelsDevModel(provider: ModelsDev.Provider, model: ModelsDev.Model): Model {
+  // Sol's Runtime profiles may still inherit Converse metadata while serving the Responses API.
+  const bedrockResponses =
+    provider.id === "amazon-bedrock" &&
+    (model.provider?.npm ?? provider.npm) === "@ai-sdk/amazon-bedrock" &&
+    /^(?:us|global)\.openai\.gpt-6\.1-sol(?:-\d{4}-\d{2}-\d{2})?$/.test(model.id)
   const base: Model = {
     id: ModelID.make(model.id),
     providerID: ProviderID.make(provider.id),
@@ -1095,13 +1103,18 @@ function fromModelsDevModel(provider: ModelsDev.Provider, model: ModelsDev.Model
     family: model.family,
     api: {
       id: model.id,
-      url: model.provider?.api ?? provider.api ?? "",
-      npm: model.provider?.npm ?? provider.npm ?? "@ai-sdk/openai-compatible",
+      url: bedrockResponses
+        ? "https://bedrock-runtime.${AWS_REGION}.amazonaws.com/openai/v1"
+        : (model.provider?.api ?? provider.api ?? ""),
+      npm: bedrockResponses
+        ? "@ai-sdk/amazon-bedrock/mantle"
+        : (model.provider?.npm ?? provider.npm ?? "@ai-sdk/openai-compatible"),
     },
     status: model.status ?? "active",
     headers: {},
     options: {},
     cost: cost(model.cost),
+    costKnown: Number.isFinite(model.cost?.input) && Number.isFinite(model.cost?.output),
     limit: {
       context: model.limit.context,
       input: model.limit.input,
@@ -1146,7 +1159,14 @@ export function fromModelsDevProvider(provider: ModelsDev.Provider): Info {
   const models: Record<string, Model> = {}
   for (const [key, model] of Object.entries(provider.models)) {
     models[key] = fromModelsDevModel(provider, model)
-    for (const [mode, opts] of Object.entries(model.experimental?.modes ?? {})) {
+    // Tier availability can precede models.dev mode metadata. Keep upstream pricing/options when present.
+    const modes: NonNullable<ModelsDev.Model["experimental"]>["modes"] = {
+      ...(models[key].serviceTiers?.ultrafast
+        ? { ultrafast: { provider: { body: { service_tier: "ultrafast" } } } }
+        : {}),
+      ...model.experimental?.modes,
+    }
+    for (const [mode, opts] of Object.entries(modes)) {
       const id = `${model.id}-${mode}`
       const base = fromModelsDevModel(provider, model)
       models[id] = {
@@ -1154,6 +1174,9 @@ export function fromModelsDevProvider(provider: ModelsDev.Provider): Info {
         id: ModelID.make(id),
         name: `${model.name} ${mode[0].toUpperCase()}${mode.slice(1)}`,
         cost: opts.cost ? mergeDeep(base.cost, cost(opts.cost)) : base.cost,
+        costKnown: opts.cost
+          ? (Number.isFinite(opts.cost.input) && Number.isFinite(opts.cost.output)) || base.costKnown
+          : base.costKnown,
         options: opts.provider?.body
           ? Object.fromEntries(
               Object.entries(opts.provider.body).map(([k, v]) => [
@@ -1406,6 +1429,9 @@ export const layer = Layer.effect(
                   write: model?.cost?.cache_write ?? existingModel?.cost?.cache.write ?? 0,
                 },
               },
+              costKnown:
+                (Number.isFinite(model.cost?.input) && Number.isFinite(model.cost?.output)) ||
+                existingModel?.costKnown === true,
               options: mergeDeep(existingModel?.options ?? {}, model.options ?? {}),
               limit: {
                 context: model.limit?.context ?? existingModel?.limit?.context ?? 0,
@@ -1466,7 +1492,7 @@ export const layer = Layer.effect(
         for (const plugin of plugins) {
           if (!plugin.auth) continue
           const providerID = ProviderID.make(plugin.auth.provider)
-          if (disabled.has(providerID)) continue
+          if (disabled.has(providerID) || !database[providerID]) continue
 
           const stored = yield* auth.get(providerID).pipe(Effect.orDie)
           if (!stored) continue
@@ -1573,6 +1599,22 @@ export const layer = Layer.effect(
 
             if (!model.serviceTiers || Object.keys(model.serviceTiers).length === 0) {
               model.serviceTiers = mapValues(ProviderTransform.serviceTiers(model), (v) => v)
+            }
+
+            // Azure's explicit Chat Completions route cannot serialize Responses-only tiers.
+            if (
+              (providerID === "azure" || providerID === "azure-cognitive-services") &&
+              Boolean({ ...provider.options, ...model.options }.useCompletionUrls)
+            ) {
+              delete model.serviceTiers.ultrafast
+              if (
+                modelID === `${model.api.id}-ultrafast` &&
+                model.options.serviceTier === "ultrafast" &&
+                !configProvider?.models?.[modelID]
+              ) {
+                delete provider.models[modelID]
+                continue
+              }
             }
 
             const configServiceTiers = configProvider?.models?.[modelID]?.serviceTiers
@@ -1725,7 +1767,9 @@ export const layer = Layer.effect(
           // Strip openai itemId metadata following what codex does
           if (
             (model.api.npm === "@ai-sdk/openai" || model.api.npm === "@ai-sdk/azure") &&
-            opts.body &&
+            typeof opts.body === "string" &&
+            // SDK item keys are literal; escaped keys conservatively take the parsing path.
+            (opts.body.includes('"id"') || opts.body.includes("\\u")) &&
             opts.method === "POST"
           ) {
             const body = JSON.parse(opts.body as string)
@@ -1967,9 +2011,11 @@ export const defaultLayer = Layer.suspend(() =>
 )
 
 const priority = ["gpt-5", "claude-sonnet-4", "big-pickle", "gemini-3-pro"]
-export function sort<T extends { id: string }>(models: T[]) {
+export function sort<T extends { id: string; options?: Record<string, unknown> }>(models: T[]) {
   return sortBy(
     models,
+    // Premium aliases stay selectable but must not become automatic defaults.
+    [(model) => (model.options?.serviceTier === "ultrafast" ? 1 : 0), "asc"],
     [(model) => priority.findIndex((filter) => model.id.includes(filter)), "desc"],
     [(model) => (model.id.includes("latest") ? 0 : 1), "asc"],
     [(model) => model.id, "desc"],

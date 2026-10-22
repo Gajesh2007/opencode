@@ -36,6 +36,7 @@ type PrepareInput = {
 }
 
 export type Prepared = {
+  readonly warmPrefix?: string
   readonly system: string[]
   readonly messages: ModelMessage[]
   readonly tools: Record<string, Tool>
@@ -55,12 +56,14 @@ const mergeOptions = (target: Record<string, any>, source: Record<string, any> |
 
 export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: PrepareInput) {
   const isOpenaiOauth = input.provider.id === ProviderID.openaiCodex && input.auth?.type === "oauth"
+  const builtin = SystemPrompt.provider(input.model).join("\n")
   const system = [
     [
-      ...SystemPrompt.provider(input.model),
+      builtin,
       ...(input.agent.prompt ? [input.agent.prompt] : []),
       ...input.system,
       ...(input.user.system ? [input.user.system] : []),
+      `For this request, your configured model is ${input.model.name}. The selected model ID is ${input.model.providerID}/${input.model.id}. The API model ID is ${input.model.api.id}.`,
     ]
       .filter((x) => x)
       .join("\n"),
@@ -96,7 +99,12 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
       ? input.model.serviceTiers[input.user.model.serviceTier]
       : undefined
   const tierHeaders: Record<string, string> = (tierEntry?.headers as Record<string, string> | undefined) ?? {}
-  const tierOptions = tierEntry ? Object.fromEntries(Object.entries(tierEntry).filter(([k]) => k !== "headers")) : {}
+  // Explicit Default must override the tier baked into an Ultrafast model alias.
+  const tierOptions = tierEntry
+    ? Object.fromEntries(Object.entries(tierEntry).filter(([k]) => k !== "headers"))
+    : !input.small && input.user.model.serviceTier === "default" && input.model.options.serviceTier === "ultrafast"
+      ? { serviceTier: "default" }
+      : {}
   // Upstream pin: when the user pinned a specific provider via /provider
   // (info.model.upstream), translate it to the provider-specific only-array
   // routing knob. Gateway uses providerOptions.gateway.only (Vercel docs);
@@ -135,19 +143,12 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     upstreamOptions,
   ].reduce<Record<string, any>>((result, item) => mergeOptions(result, item), base)
   if (isOpenaiOauth) options.instructions = system.join("\n")
-
-  const messages =
-    isOpenaiOauth || input.isWorkflow
-      ? input.messages
-      : [
-          ...system.map(
-            (x): ModelMessage => ({
-              role: "system",
-              content: x,
-            }),
-          ),
-          ...input.messages,
-        ]
+  // Applied after variants, which otherwise pin "summarized" on every effort
+  // level. "omitted" streams only the signature: thinking runs ~9% faster on
+  // Opus 5.5 fast mode, and the first text or tool call arrives that much sooner.
+  const display = input.provider.options.thinkingDisplay
+  if ((display === "omitted" || display === "summarized") && options.thinking?.type === "adaptive")
+    options.thinking = { ...options.thinking, display }
 
   const params = yield* input.plugin.trigger(
     "chat.params",
@@ -175,6 +176,71 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   if (params.options.openai) {
     params.options.openai = { ...params.options.openai }
     delete params.options.openai.previousResponseId
+  }
+
+  // This fork defaults only the selected public OpenAI Ultrafast Sol/Astra
+  // path on. An explicit model/agent/variant or provider false always wins.
+  params.options.contextWarming =
+    params.options.contextWarming ??
+    input.provider.options.contextWarming ??
+    (input.model.providerID === ProviderID.openai &&
+      input.provider.id === ProviderID.openai &&
+      input.model.api.npm === "@ai-sdk/openai" &&
+      ["https://api.openai.com/v1", "https://api.openai.com/v1/"].includes(
+        input.provider.options.baseURL ?? (input.model.api.url || "https://api.openai.com/v1"),
+      ) &&
+      /^gpt-(?:6[.-]1-sol|6-astra)(?:-\d{4}-\d{2}-\d{2})?$/.test(input.model.api.id) &&
+      params.options.serviceTier === "ultrafast")
+  const warming =
+    params.options.contextWarming === true &&
+    !input.isWorkflow &&
+    input.provider.id === ProviderID.openai &&
+    input.model.api.npm === "@ai-sdk/openai"
+  // Split only after both hooks have run and the original leading system
+  // message is intact. Never certify any added or rewritten plugin text.
+  if (warming && system[0] === header) system.splice(0, 1, builtin, header.slice(builtin.length + 1))
+  const messages =
+    isOpenaiOauth || input.isWorkflow
+      ? input.messages
+      : [
+          ...system.map(
+            (x): ModelMessage => ({
+              role: "system",
+              content: x,
+            }),
+          ),
+          ...input.messages,
+        ]
+
+  if (
+    params.options.promptCacheOptions?.mode === "explicit" &&
+    input.provider.id !== ProviderID.openaiCodex &&
+    !input.isWorkflow &&
+    ["@ai-sdk/openai", "@ai-sdk/azure", "@ai-sdk/amazon-bedrock/mantle"].includes(input.model.api.npm)
+  ) {
+    // Explicit-only mode needs a reusable boundary. Never guess one in user or tool content.
+    const end = messages.findIndex((message) => message.role !== "system")
+    const index = (end === -1 ? messages.length : end) - 1
+    const message = messages[index]
+    if (message?.role === "system") {
+      messages[index] = {
+        ...message,
+        providerOptions: mergeDeep(
+          ProviderTransform.providerOptions(input.model, { promptCacheBreakpoint: { mode: "explicit" } }),
+          message.providerOptions ?? {},
+        ),
+      }
+    }
+  }
+
+  // Only this literal, separately delimited built-in prompt is eligible for
+  // background warming. Agent, user, environment and plugin text never is.
+  const warmPrefix = warming && system[0] === builtin && messages[0]?.content === builtin ? builtin : undefined
+  if (warmPrefix && messages[0]?.role === "system") {
+    messages[0] = {
+      ...messages[0],
+      providerOptions: ProviderTransform.providerOptions(input.model, { promptCacheBreakpoint: { mode: "explicit" } }),
+    }
   }
 
   const { headers } = yield* input.plugin.trigger(
@@ -215,11 +281,13 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     : undefined
 
   return {
+    warmPrefix,
     system,
     messages,
     tools: Object.fromEntries(Object.entries(tools).toSorted(([a], [b]) => a.localeCompare(b))),
     params,
-    messageTransformOptions: options,
+    // Only message caching reads this; it never reaches the provider body.
+    messageTransformOptions: { ...options, promptCacheTtl: promptCacheTtl(input) },
     headers: {
       ...(input.model.providerID.startsWith("opencode")
         ? {
@@ -241,12 +309,30 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   }
 })
 
+// Anthropic's cache TTL runs from the start of each request, so a 5m tail
+// expires during long tool calls, subagent waits, or a short pause, and the
+// next step rewrites the entire conversation (seconds of extra time to first
+// token on large contexts). Primary direct-API sessions keep the tail for an
+// hour, as Claude Code does for its main conversation; subagents and auxiliary
+// calls rarely idle that long and keep the cheaper 5m writes.
+function promptCacheTtl(input: Pick<PrepareInput, "small" | "parentSessionID" | "model" | "provider">) {
+  if (input.small || input.parentSessionID) return undefined
+  if (input.model.providerID !== ProviderID.anthropic) return undefined
+  const configured = input.provider.options.promptCacheTtl
+  if (configured === "5m" || configured === "1h") return configured
+  return "1h"
+}
+
 function resolveTools(input: Pick<PrepareInput, "tools" | "agent" | "permission" | "user">) {
   const disabled = Permission.disabled(
     Object.keys(input.tools),
     Permission.merge(input.agent.permission, input.permission ?? []),
   )
-  return Record.filter(input.tools, (_, k) => input.user.tools?.[k] !== false && !disabled.has(k))
+  return Record.filter(
+    input.tools,
+    (_, k) =>
+      input.user.tools?.[k] !== false && !(k === "read_many" && input.user.tools?.read === false) && !disabled.has(k),
+  )
 }
 
 export function hasToolCalls(messages: ModelMessage[]): boolean {

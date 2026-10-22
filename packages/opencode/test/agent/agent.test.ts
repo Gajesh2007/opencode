@@ -26,6 +26,7 @@ const agentLayer = (flags: Partial<RuntimeFlags.Info> = {}) =>
 
 const it = testEffect(agentLayer())
 const scout = testEffect(agentLayer({ experimentalScout: true }))
+const workflow = testEffect(agentLayer({ experimentalWorkflow: true }))
 
 // Helper to evaluate permission for a tool with wildcard pattern
 function evalPerm(agent: Agent.Info | undefined, permission: string): Permission.Action | undefined {
@@ -232,7 +233,7 @@ it.instance(
   },
 )
 
-it.instance(
+workflow.instance(
   "declarative workflow agent gets the fan-out directive and workflow permission",
   () =>
     Effect.gen(function* () {
@@ -261,6 +262,52 @@ it.instance(
             synthesis: { agent: "triage-synth" },
             format: "findings",
           },
+        },
+      },
+    },
+  },
+)
+
+it.instance("hides the workflow review orchestrator by default without disabling batch", () =>
+  Effect.gen(function* () {
+    expect(yield* load((svc) => svc.get("review"))).toBeUndefined()
+    expect((yield* load((svc) => svc.list())).map((agent) => agent.name)).not.toContain("review")
+    expect(yield* load((svc) => svc.get("batch"))).toBeDefined()
+  }),
+)
+
+workflow.instance("exposes the workflow review orchestrator after explicit opt-in", () =>
+  Effect.gen(function* () {
+    const agent = yield* load((svc) => svc.get("review"))
+    expect(agent?.prompt).toContain("workflow")
+    expect(evalPerm(agent, "workflow")).toBe("allow")
+  }),
+)
+
+it.instance(
+  "preserves a user-defined review agent without workflow opt-in",
+  () =>
+    Effect.gen(function* () {
+      expect((yield* load((svc) => svc.get("review")))?.prompt).toBe("Review the code directly.")
+    }),
+  { config: { agent: { review: { prompt: "Review the code directly." } } } },
+)
+
+it.instance(
+  "does not inject workflow instructions or grants without opt-in",
+  () =>
+    Effect.gen(function* () {
+      const agent = yield* load((svc) => svc.get("triage"))
+      expect(agent?.prompt).toBe("You are a triage lead.")
+      expect(evalPerm(agent, "workflow")).toBe("deny")
+    }),
+  {
+    config: {
+      agent: {
+        triage: {
+          prompt: "You are a triage lead.",
+          permission: { "*": "deny" },
+          workflow: { passes: [{ name: "fast", agent: "triage-fast" }] },
         },
       },
     },

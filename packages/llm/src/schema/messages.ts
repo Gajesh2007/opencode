@@ -92,6 +92,7 @@ export const ToolCallPart = Object.assign(
     id: Schema.String,
     name: Schema.String,
     input: Schema.Unknown,
+    inputError: Schema.optional(Schema.String),
     providerExecuted: Schema.optional(Schema.Boolean),
     metadata: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
     providerMetadata: Schema.optional(ProviderMetadata),

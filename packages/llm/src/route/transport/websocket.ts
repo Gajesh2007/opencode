@@ -1,4 +1,4 @@
-import { Cause, Context, Effect, Layer, Queue, Stream } from "effect"
+import { Cause, Context, Effect, Exit, Layer, Queue, Stream } from "effect"
 import { Headers } from "effect/unstable/http"
 import { LLMError, TransportReason } from "../../schema"
 import * as HttpTransport from "./http"
@@ -17,6 +17,8 @@ export interface WebSocketConnection {
 
 export interface Interface {
   readonly open: (input: WebSocketRequest) => Effect.Effect<WebSocketConnection, LLMError>
+  /** Establish an authenticated idle socket without sending a model request. */
+  readonly preconnect?: (input: WebSocketRequest) => Effect.Effect<void, LLMError>
 }
 
 type WebSocketConstructorWithHeaders = new (
@@ -49,7 +51,7 @@ const binaryMessage = (data: unknown) => {
   return undefined
 }
 
-const waitOpen = (ws: globalThis.WebSocket, input: WebSocketRequest) => {
+const waitOpen = (ws: globalThis.WebSocket, input: WebSocketRequest, closeOnAbort = true) => {
   if (ws.readyState === globalThis.WebSocket.OPEN) return Effect.void
   if (ws.readyState === globalThis.WebSocket.CLOSING || ws.readyState === globalThis.WebSocket.CLOSED) {
     return Effect.fail(
@@ -68,7 +70,11 @@ const waitOpen = (ws: globalThis.WebSocket, input: WebSocketRequest) => {
     }
     const onAbort = () => {
       cleanup()
-      if (ws.readyState !== globalThis.WebSocket.CLOSED && ws.readyState !== globalThis.WebSocket.CLOSING)
+      if (
+        closeOnAbort &&
+        ws.readyState !== globalThis.WebSocket.CLOSED &&
+        ws.readyState !== globalThis.WebSocket.CLOSING
+      )
         ws.close(1000)
     }
     const onOpen = () => {
@@ -246,7 +252,7 @@ export const fromWebSocket = (
 //   normal close but drop it on unexpected close or send error.
 
 export interface PoolOptions {
-  /** How long an idle socket stays warm before the sweeper closes it. */
+  /** How long an idle socket stays warm (default: five minutes). */
   readonly idleTtlMillis?: number
   /** Hard upper bound on a socket's lifetime (OpenAI: 60 minutes). */
   readonly maxAgeMillis?: number
@@ -259,10 +265,11 @@ interface PoolEntry {
   readonly key: string
   readonly openedAt: number
   busy: boolean
+  waiters: number
   idleTimer?: ReturnType<typeof setTimeout>
 }
 
-const DEFAULT_IDLE_TTL_MS = 30_000
+const DEFAULT_IDLE_TTL_MS = 300_000
 const DEFAULT_MAX_AGE_MS = 55 * 60 * 1000 // a few minutes under OpenAI's 60-min hard limit
 const DEFAULT_MAX_IDLE_CONNECTIONS = 64
 
@@ -276,25 +283,23 @@ const keyFor = (input: WebSocketRequest) => {
 }
 
 const isHealthy = (entry: PoolEntry, maxAge: number) =>
-  !entry.busy &&
-  entry.ws.readyState === globalThis.WebSocket.OPEN &&
-  Date.now() - entry.openedAt < maxAge
+  !entry.busy && entry.ws.readyState === globalThis.WebSocket.OPEN && Date.now() - entry.openedAt < maxAge
 
-export const pool = (options: PoolOptions = {}): Interface => {
+export const pool = (options: PoolOptions = {}) => {
   const idleTtl = options.idleTtlMillis ?? DEFAULT_IDLE_TTL_MS
   const maxAge = options.maxAgeMillis ?? DEFAULT_MAX_AGE_MS
   const maxIdle = options.maxIdleConnections ?? DEFAULT_MAX_IDLE_CONNECTIONS
   const entries = new Map<string, PoolEntry>()
   const idle = new Set<PoolEntry>()
+  const sockets = new Set<PoolEntry>()
+  let disposed = false
 
   const evict = (entry: PoolEntry) => {
     if (entry.idleTimer) clearTimeout(entry.idleTimer)
     idle.delete(entry)
+    sockets.delete(entry)
     if (entries.get(entry.key) === entry) entries.delete(entry.key)
-    if (
-      entry.ws.readyState !== globalThis.WebSocket.CLOSED &&
-      entry.ws.readyState !== globalThis.WebSocket.CLOSING
-    ) {
+    if (entry.ws.readyState !== globalThis.WebSocket.CLOSED && entry.ws.readyState !== globalThis.WebSocket.CLOSING) {
       try {
         entry.ws.close(1000)
       } catch {
@@ -305,19 +310,93 @@ export const pool = (options: PoolOptions = {}): Interface => {
 
   const armIdle = (entry: PoolEntry) => {
     if (entry.idleTimer) clearTimeout(entry.idleTimer)
-    entry.idleTimer = setTimeout(() => {
-      // If the entry is still parked when the idle timer fires, close it. If a
-      // request grabbed it in the meantime, `busy` would be true and we leave
-      // it alone — the next release will re-arm.
-      if (entry.busy) return
-      evict(entry)
-    }, idleTtl)
+    entry.idleTimer = setTimeout(
+      () => {
+        // If the entry is still parked when the idle timer fires, close it. If a
+        // request grabbed it in the meantime, `busy` would be true and we leave
+        // it alone — the next release will re-arm.
+        if (entry.busy) return
+        evict(entry)
+      },
+      Math.min(idleTtl, Math.max(0, maxAge - (Date.now() - entry.openedAt))),
+    )
+    entry.idleTimer.unref?.()
   }
 
-  const acquire = (input: WebSocketRequest) =>
+  const park = (entry: PoolEntry) => {
+    if (
+      disposed ||
+      entries.get(entry.key) !== entry ||
+      entry.ws.readyState !== globalThis.WebSocket.OPEN ||
+      Date.now() - entry.openedAt >= maxAge
+    ) {
+      evict(entry)
+      return
+    }
+    armIdle(entry)
+    idle.add(entry)
+    if (idle.size > maxIdle) {
+      const oldest = idle.values().next().value
+      if (oldest) evict(oldest)
+    }
+  }
+
+  const create = (input: WebSocketRequest, busy: boolean) =>
+    Effect.try({
+      try: () => {
+        const ws = new (globalThis.WebSocket as unknown as WebSocketConstructorWithHeaders)(input.url, {
+          headers: input.headers,
+        })
+        const entry: PoolEntry = { ws, key: keyFor(input), openedAt: Date.now(), busy, waiters: 0 }
+        sockets.add(entry)
+        return entry
+      },
+      catch: (error) =>
+        transportError("open", error instanceof Error ? error.message : "Failed to construct WebSocket", {
+          url: input.url,
+          kind: "open",
+        }),
+    })
+
+  const awaitWarm = (entry: PoolEntry, input: WebSocketRequest) =>
+    Effect.uninterruptibleMask((restore) => {
+      entry.waiters++
+      return restore(waitOpen(entry.ws, input, false)).pipe(
+        Effect.tap(() =>
+          Effect.sync(() => {
+            if (!entry.busy && !idle.has(entry)) park(entry)
+          }),
+        ),
+        Effect.tapError(() => Effect.sync(() => evict(entry))),
+        Effect.ensuring(
+          Effect.sync(() => {
+            entry.waiters--
+            // A cancelled waiter cannot tear down another caller's handshake.
+            if (entry.waiters === 0 && !entry.busy && !idle.has(entry)) evict(entry)
+          }),
+        ),
+      )
+    })
+
+  const acquire = (input: WebSocketRequest): Effect.Effect<PoolEntry, LLMError> =>
     Effect.gen(function* () {
+      if (disposed) return yield* transportError("open", "WebSocket pool is closed", { url: input.url, kind: "open" })
       const key = keyFor(input)
       const existing = entries.get(key)
+      if (existing && !existing.busy && existing.ws.readyState === globalThis.WebSocket.CONNECTING) {
+        // Reserve the handshake before warm callbacks can park or retire it.
+        existing.busy = true
+        yield* awaitWarm(existing, input).pipe(
+          Effect.onExitIf(Exit.isFailure, () =>
+            Effect.sync(() => {
+              existing.busy = false
+              if (existing.ws.readyState === globalThis.WebSocket.OPEN) return park(existing)
+              if (existing.waiters === 0) evict(existing)
+            }),
+          ),
+        )
+        return existing
+      }
       if (existing && isHealthy(existing, maxAge)) {
         if (existing.idleTimer) clearTimeout(existing.idleTimer)
         idle.delete(existing)
@@ -328,18 +407,7 @@ export const pool = (options: PoolOptions = {}): Interface => {
       // Its temporary socket is closed on release instead of entering the pool.
       if (existing && !existing.busy) evict(existing)
 
-      const ws = yield* Effect.try({
-        try: () =>
-          new (globalThis.WebSocket as unknown as WebSocketConstructorWithHeaders)(input.url, {
-            headers: input.headers,
-          }),
-        catch: (error) =>
-          transportError("open", error instanceof Error ? error.message : "Failed to construct WebSocket", {
-            url: input.url,
-            kind: "open",
-          }),
-      })
-      const entry: PoolEntry = { ws, key, openedAt: Date.now(), busy: true }
+      const entry = yield* create(input, true)
       if (!existing?.busy) entries.set(key, entry)
       return entry
     })
@@ -347,45 +415,54 @@ export const pool = (options: PoolOptions = {}): Interface => {
   const open = (input: WebSocketRequest): Effect.Effect<WebSocketConnection, LLMError> =>
     Effect.gen(function* () {
       const entry = yield* acquire(input)
-      const session = yield* attach(entry.ws, input).pipe(
-        Effect.tapCause(() => Effect.sync(() => evict(entry))),
-      )
+      const session = yield* attach(entry.ws, input).pipe(Effect.tapCause(() => Effect.sync(() => evict(entry))))
       let released = false
       const release = Effect.sync(() => {
         if (released) return
         released = true
         entry.busy = false
-        // Re-check health: if the socket died while we were using it, evict
-        // instead of returning it to the pool.
-        if (
-          entries.get(entry.key) !== entry ||
-          entry.ws.readyState !== globalThis.WebSocket.OPEN ||
-          Date.now() - entry.openedAt >= maxAge
-        ) {
-          evict(entry)
-          return
-        }
-        armIdle(entry)
-        // Set insertion order tracks release recency; active leases are absent.
-        idle.add(entry)
-        if (idle.size > maxIdle) {
-          const oldest = idle.values().next().value
-          if (oldest) evict(oldest)
-        }
+        park(entry)
       })
       return {
-        sendText: (message) =>
-          session.sendText(message).pipe(Effect.tapCause(() => Effect.sync(() => evict(entry)))),
+        sendText: (message) => session.sendText(message).pipe(Effect.tapCause(() => Effect.sync(() => evict(entry)))),
         messages: session.messages,
         close: session.cleanup.pipe(Effect.andThen(release)),
       }
     })
 
-  return { open }
+  const preconnect = (input: WebSocketRequest): Effect.Effect<void, LLMError> =>
+    Effect.gen(function* () {
+      if (disposed)
+        return yield* transportError("preconnect", "WebSocket pool is closed", { url: input.url, kind: "open" })
+      const key = keyFor(input)
+      const existing = entries.get(key)
+      // Warming must never consume, replace, or duplicate an active lease.
+      if (existing?.busy || (existing && isHealthy(existing, maxAge))) return
+      if (existing?.ws.readyState === globalThis.WebSocket.CONNECTING) return yield* awaitWarm(existing, input)
+      if (existing) evict(existing)
+      const entry = yield* create(input, false)
+      entries.set(key, entry)
+      yield* awaitWarm(entry, input)
+    })
+
+  // Disposal is terminal, including for callers still awaiting a handshake.
+  const closeAll = Effect.sync(() => {
+    disposed = true
+    for (const entry of sockets) evict(entry)
+  })
+
+  return { open, preconnect, closeAll }
 }
 
 export const poolLayer = (options: PoolOptions = {}): Layer.Layer<Service> =>
-  Layer.sync(Service, () => Service.of(pool(options)))
+  Layer.effect(
+    Service,
+    Effect.gen(function* () {
+      const executor = pool(options)
+      yield* Effect.addFinalizer(() => executor.closeAll)
+      return Service.of(executor)
+    }),
+  )
 
 export const messageText = (message: string | Uint8Array, decoder: TextDecoder) =>
   typeof message === "string" ? message : decoder.decode(message)
@@ -410,6 +487,8 @@ export interface JsonTransport<Body, Message> extends Transport<Body, JsonPrepar
 export const json = <Body, Message>(input: JsonInput<Body, Message>): JsonTransport<Body, Message> => ({
   id: "websocket-json",
   with: (patch) => json({ ...input, ...patch }),
+  preconnect: (prepared, _request, runtime) =>
+    runtime.webSocket?.preconnect?.({ url: prepared.url, headers: prepared.headers }) ?? Effect.void,
   prepare: (prepareInput) =>
     Effect.gen(function* () {
       const parts = yield* HttpTransport.jsonRequestParts({

@@ -116,8 +116,15 @@ function formatGoal(goal: Goal.Info): string {
   const lines = [
     `Objective: ${goal.objective}`,
     `Status: ${goal.status}`,
-    `Tokens used: ${goal.tokensUsed}${goal.tokenBudget ? ` / ${goal.tokenBudget}` : ""}`,
-    `Cost: $${goal.costUsed.toFixed(4)}${goal.costBudget ? ` / $${goal.costBudget.toFixed(2)} budget` : ""}`,
+    `Known tokens used: ${goal.tokensUsed}${goal.tokenBudget ? ` / ${goal.tokenBudget}` : ""}`,
+    `Recorded cost (${goal.usage?.pricing ?? "unknown"}): $${goal.costUsed.toFixed(4)}${goal.costBudget ? ` / $${goal.costBudget.toFixed(2)} budget` : ""}`,
+    `Usage coverage: recorded root and descendant attempts only; ${goal.usage?.unknownAttempts ?? "unknown"} attempts with unknown usage. Auxiliary coverage is partial; external-tool spend and unreported provider retries are unknown. Catalog prices may not reflect the served tier; this is not a complete billing total.`,
+    `Unknown/unverified costs: ${goal.usage?.unknownCosts ?? "unknown"}. Cost budgets cannot guarantee a billing cap when usage or tier pricing is missing.`,
+    "Goal boundary: attempts started after creation/replacement; already-running attempts are excluded. Started attempts may finish after goal completion.",
   ]
+  if (goal.wholeTaskUsage)
+    lines.push(
+      `Whole-task recorded usage: ${goal.wholeTaskUsage.tokens} tokens, $${goal.wholeTaskUsage.cost.toFixed(4)} (${goal.wholeTaskUsage.pricing}); ${goal.wholeTaskUsage.unknownAttempts} unknown attempts.`,
+    )
   return lines.join("\n")
 }

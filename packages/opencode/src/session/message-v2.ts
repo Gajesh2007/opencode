@@ -509,6 +509,12 @@ export const Assistant = Schema.Struct({
    * provider/route doesn't surface a response id.
    */
   provider_response_id: Schema.optional(Schema.String),
+  /** Actual outbound tier after request options and plugins are applied. */
+  service_tier_requested: Schema.optional(Schema.String),
+  /** Provider-reported tier; absent when the response does not confirm it. */
+  service_tier: Schema.optional(Schema.String),
+  /** Provider-reported model ID, not the selected model or alias. */
+  model_resolved: Schema.optional(Schema.String),
 }).annotate({ identifier: "AssistantMessage" })
 export type Assistant = Omit<Types.DeepMutable<Schema.Schema.Type<typeof Assistant>>, "error"> & {
   error?: AssistantError

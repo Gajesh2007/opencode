@@ -112,8 +112,27 @@ const contentPart = (part: unknown) => {
 const content = (value: ModelMessage["content"]) =>
   typeof value === "string" ? [{ type: "text" as const, text: value }] : value.map(contentPart)
 
+// The canonical native request separates system content from message history.
+// Hoisting an interleaved system message would change an explicitly marked prefix.
+export const unsupportedCacheOrdering = (messages: readonly ModelMessage[]) => {
+  const first = messages.findIndex((message) => message.role !== "system")
+  if (first === -1 || !messages.slice(first).some((message) => message.role === "system")) return false
+  return messages.some(
+    (message) =>
+      providerMetadata(message.providerOptions)?.openai?.promptCacheBreakpoint !== undefined ||
+      (typeof message.content !== "string" &&
+        message.content.some(
+          (part) => isRecord(part) && partProviderMetadata(part)?.openai?.promptCacheBreakpoint !== undefined,
+        )),
+  )
+}
+
 const messages = (input: readonly ModelMessage[]) => {
-  const system = input.flatMap((message) => (message.role === "system" ? [SystemPart.make(message.content)] : []))
+  const system = input.flatMap((message) =>
+    message.role === "system"
+      ? [{ ...SystemPart.make(message.content), metadata: providerMetadata(message.providerOptions) }]
+      : [],
+  )
   const messages = input.flatMap((message) => {
     if (message.role === "system") return []
     return [
@@ -197,6 +216,11 @@ export const model = (input: Provider.Model | RequestInput, headers?: Record<str
 }
 
 export const request = (input: RequestInput) => {
+  if (
+    (input.model.api.npm === "@ai-sdk/openai" || input.model.api.npm === "@ai-sdk/azure") &&
+    unsupportedCacheOrdering(input.messages)
+  )
+    throw new Error("Native Responses cannot preserve explicit cache breakpoints with interleaved system messages")
   const converted = messages(input.messages)
   // This is the only native adapter boundary that should construct canonical
   // @opencode-ai/llm request objects from opencode's session/AI SDK-shaped data.

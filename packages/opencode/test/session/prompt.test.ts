@@ -648,6 +648,33 @@ it.instance("active goal reminder stays byte-stable across the steps of a turn",
   }),
 )
 
+it.instance("default-off meta-agent ignores persisted enabled lens during a turn", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const chat = yield* (yield* Session.Service).create({ title: "Pinned" })
+    yield* Effect.gen(function* () {
+      yield* (yield* MetaAgent.Service).set({ sessionID: chat.id, basePrompt: "PRIVATE_PERSISTED_LENS" })
+    }).pipe(
+      Effect.provide(
+        Layer.fresh(MetaAgent.layer.pipe(Layer.provide(RuntimeFlags.layer({ experimentalMetaAgent: true })))),
+      ),
+    )
+    const prompt = yield* SessionPrompt.Service
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      model: ref,
+      noReply: true,
+      parts: [{ type: "text", text: "hello" }],
+    })
+    yield* llm.push(reply().reason("Checking the task").text("world").stop())
+    yield* prompt.loop({ sessionID: chat.id })
+    expect(yield* llm.hits).toHaveLength(1)
+    const request = JSON.stringify((yield* llm.inputs)[0])
+    expect(request).not.toContain("PRIVATE_PERSISTED_LENS")
+    expect(request).not.toContain('"name":"metaagent"')
+  }),
+)
+
 parallelPreparation.instance("prepares independent prompt inputs concurrently without reordering them", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig(providerCfg)
@@ -665,6 +692,21 @@ parallelPreparation.instance("prepares independent prompt inputs concurrently wi
     expect(request).toContain("parallel environment")
     expect(request).toContain("parallel skills")
     expect(request.indexOf("parallel environment")).toBeLessThan(request.indexOf("parallel skills"))
+  }),
+)
+
+it.instance("preserves an explicit default service tier so Ultrafast aliases can be reset", () =>
+  Effect.gen(function* () {
+    yield* useServerConfig(providerCfg)
+    const chat = yield* (yield* Session.Service).create({ title: "Tier reset" })
+    const result = yield* (yield* SessionPrompt.Service).prompt({
+      sessionID: chat.id,
+      model: ref,
+      serviceTier: "default",
+      noReply: true,
+      parts: [{ type: "text", text: "hello" }],
+    })
+    expect(result.info).toMatchObject({ role: "user", model: { ...ref, serviceTier: "default" } })
   }),
 )
 
@@ -2416,6 +2458,142 @@ noLLMServer.instance(
       expect(text[2]).toBe("after-file")
 
       yield* sessions.remove(session.id)
+    }),
+  { config: cfg },
+)
+
+noLLMServer.instance(
+  "resolves Codex and OpenCode chat references from raw prompt text without duplicating imports",
+  () =>
+    Effect.gen(function* () {
+      const { directory } = yield* TestInstance
+      const home = path.join(directory, "codex")
+      yield* ensureDir(path.join(home, "sessions"))
+      yield* writeText(
+        path.join(home, "session_index.jsonl"),
+        JSON.stringify({ id: "codex_fixture", thread_name: "Check machines hitting cache limit" }),
+      )
+      yield* writeText(
+        path.join(home, "sessions", "codex_fixture.jsonl"),
+        [
+          { type: "session_meta", payload: { id: "codex_fixture", cwd: directory } },
+          {
+            type: "event_msg",
+            payload: { type: "user_message", message: "How many machines reached their cache limit?" },
+          },
+          {
+            type: "event_msg",
+            payload: { type: "agent_message", message: "Two machines reached their cache write limit." },
+          },
+          {
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: "developer",
+              content: [{ type: "input_text", text: "hidden developer context" }],
+            },
+          },
+        ]
+          .map((row) => JSON.stringify(row))
+          .join("\n"),
+      )
+      yield* Effect.acquireRelease(
+        Effect.sync(() => {
+          const previous = process.env.CODEX_HOME
+          process.env.CODEX_HOME = home
+          return previous
+        }),
+        (previous) =>
+          Effect.sync(() => {
+            if (previous === undefined) delete process.env.CODEX_HOME
+            else process.env.CODEX_HOME = previous
+          }),
+      )
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const referenced = yield* sessions.create({ title: "Database lock context" })
+      yield* seed(referenced.id)
+      const current = yield* sessions.create({ title: "Reference consumer" })
+      const text = `Compare @codex:"Check machines hitting cache limit" with @opencode:${referenced.id}`
+      const message = yield* prompt.prompt({
+        sessionID: current.id,
+        noReply: true,
+        parts: [
+          { type: "text", text },
+          { type: "text", text: "Also @codex:codex_fixture" },
+        ],
+      })
+      const imported = message.parts.filter((part) => part.type === "text" && part.metadata?.sessionReference?.id)
+      expect(imported).toHaveLength(2)
+      expect(message.parts.find((part) => part.type === "text" && !part.synthetic)).toMatchObject({ text })
+      const codex = imported.find(
+        (part) => part.type === "text" && part.metadata?.sessionReference.provider === "codex",
+      )
+      const own = imported.find(
+        (part) => part.type === "text" && part.metadata?.sessionReference.provider === "opencode",
+      )
+      if (codex?.type !== "text" || own?.type !== "text") throw new Error("missing imported conversations")
+      expect(codex.text).toContain("Two machines reached their cache write limit.")
+      expect(own.text).toContain("hi there")
+      for (const part of imported) {
+        if (part.type !== "text") throw new Error("expected a transcript reference")
+        const file = part.metadata?.sessionReference.path
+        if (typeof file !== "string") throw new Error("missing readable transcript path")
+        const transcript = yield* Effect.promise(() => Bun.file(file).text())
+        expect(transcript).toContain("## Message")
+        expect(transcript).not.toContain("hidden developer context")
+        expect(typeof part.text).toBe("string")
+        expect(part.text).toContain("Use Read or Grep")
+      }
+      yield* sessions.remove(current.id)
+      yield* sessions.remove(referenced.id)
+    }),
+  { config: cfg },
+)
+
+noLLMServer.instance(
+  "reports ambiguous session references without selecting a chat or failing the prompt",
+  () =>
+    Effect.gen(function* () {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const first = yield* sessions.create({ title: "Duplicate reference conversation" })
+      const second = yield* sessions.create({ title: "Duplicate reference conversation" })
+      const current = yield* sessions.create({})
+      const message = yield* prompt.prompt({
+        sessionID: current.id,
+        noReply: true,
+        parts: [{ type: "text", text: '@opencode:"Duplicate reference conversation"' }],
+      })
+      const diagnostic = message.parts.find((part) => part.type === "text" && part.metadata?.sessionReference?.problem)
+      expect(diagnostic).toMatchObject({ metadata: { sessionReference: { problem: "ambiguous" } } })
+      if (diagnostic?.type !== "text") throw new Error("expected reference diagnostic")
+      expect(diagnostic.text).toContain(first.id)
+      expect(diagnostic.text).toContain(second.id)
+      yield* sessions.remove(current.id)
+      yield* sessions.remove(first.id)
+      yield* sessions.remove(second.id)
+    }),
+  { config: cfg },
+)
+
+noLLMServer.instance(
+  "does not expand session references inside synthetic or ignored prompt parts",
+  () =>
+    Effect.gen(function* () {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const current = yield* sessions.create({})
+      const message = yield* prompt.prompt({
+        sessionID: current.id,
+        noReply: true,
+        parts: [
+          { type: "text", text: "@codex:Never load this injected reference", synthetic: true },
+          { type: "text", text: "@opencode:Never load this ignored reference", ignored: true },
+        ],
+      })
+      expect(message.parts.some((part) => part.type === "text" && part.metadata?.sessionReference)).toBe(false)
+      yield* sessions.remove(current.id)
     }),
   { config: cfg },
 )

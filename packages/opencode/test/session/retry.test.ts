@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test"
 import type { NamedError } from "@opencode-ai/core/util/error"
 import { APICallError } from "ai"
 import { setTimeout as sleep } from "node:timers/promises"
-import { Effect, Layer, Schedule, Schema } from "effect"
+import { Clock, Deferred, Effect, Fiber, Layer, Schedule, Schema } from "effect"
+import * as TestClock from "effect/testing/TestClock"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { SessionRetry } from "../../src/session/retry"
 import { MessageV2 } from "../../src/session/message-v2"
@@ -15,11 +16,16 @@ import { testEffect } from "../lib/effect"
 const providerID = ProviderID.make("test")
 const retryProvider = "test"
 const it = testEffect(Layer.mergeAll(SessionStatus.defaultLayer, CrossSpawnSpawner.defaultLayer))
+const tokenQuotas = [
+  "quota input-tpm:123456789012:openai.gpt-6.1-sol (InputTokens) exceeded by 119936.47698333337",
+  "quota output-tpm:123456789012:openai.gpt-6.1-sol (OutputTokens) exceeded by 1000",
+  "Rate limit reached on tokens per minute (TPM)",
+]
 
-function apiError(headers?: Record<string, string>): MessageV2.APIError {
+function apiError(headers?: Record<string, string>, message = "boom"): MessageV2.APIError {
   return Schema.decodeUnknownSync(MessageV2.APIError.Schema)(
     new MessageV2.APIError({
-      message: "boom",
+      message,
       isRetryable: true,
       responseHeaders: headers,
     }).toObject(),
@@ -83,6 +89,93 @@ describe("session.retry.delay", () => {
     const error = apiError({ "retry-after-ms": "999999999999" })
     expect(SessionRetry.delay(1, error)).toBe(SessionRetry.RETRY_MAX_DELAY)
   })
+
+  test.each(tokenQuotas)("waits a minute for token capacity: %s", (message) => {
+    for (const attempt of [1, 5, 10]) {
+      expect(SessionRetry.delay(attempt, wrap(message))).toBe(60_000)
+      expect(SessionRetry.delay(attempt, apiError(undefined, message))).toBe(60_000)
+    }
+  })
+
+  test("uses the minute fallback with unrelated or invalid headers", () => {
+    const cases: Record<string, string>[] = [
+      {},
+      { "content-type": "application/json" },
+      { "retry-after": "invalid" },
+      { "retry-after": "-1" },
+      { "retry-after": "" },
+      { "retry-after-ms": "Infinity" },
+      { "retry-after-ms": "1500ms" },
+    ]
+    for (const headers of cases) {
+      expect(SessionRetry.delay(1, apiError(headers, tokenQuotas[0]), 0)).toBe(60_000)
+    }
+  })
+
+  test("honors case-insensitive token quota retry headers before the fallback", () => {
+    for (const [headers, expected] of [
+      [{ "Retry-After": "75" }, 75_000],
+      [{ "Retry-After-Ms": "1500", "Retry-After": "30" }, 1500],
+      [{ "retry-after-ms": "-1", "retry-after": "30" }, 30_000],
+      [{ "retry-after-ms": "0" }, 0],
+    ] as const) {
+      expect(SessionRetry.delay(1, apiError(headers, tokenQuotas[0]))).toBe(expected)
+    }
+    const now = Date.UTC(2026, 0, 1)
+    expect(
+      SessionRetry.delay(1, apiError({ "Retry-After": new Date(now + 90_000).toUTCString() }, tokenQuotas[0]), now),
+    ).toBe(90_000)
+  })
+
+  for (const kind of ["plain", "api"] as const) {
+    it.effect(`policy retries ${kind} token quota failures after the minute resets`, () =>
+      Effect.gen(function* () {
+        const ready = yield* Deferred.make<void>()
+        const now = yield* Clock.currentTimeMillis
+        const calls: number[] = []
+        const updates: { message: string; next: number }[] = []
+        const failure =
+          kind === "plain"
+            ? new Error(tokenQuotas[0])
+            : new APICallError({
+                message: "Too Many Requests",
+                url: "https://offline.invalid",
+                requestBodyValues: {},
+                statusCode: 429,
+                isRetryable: false,
+                responseBody: JSON.stringify({ error: { code: "quota_exceeded", message: tokenQuotas[1] } }),
+              })
+        const fiber = yield* Effect.gen(function* () {
+          calls.push(yield* Clock.currentTimeMillis)
+          if (calls.length === 1) return yield* Effect.fail(failure)
+          return "answer"
+        }).pipe(
+          Effect.retry(
+            SessionRetry.policy({
+              provider: retryProvider,
+              parse: (error) => MessageV2.fromError(error, { providerID }),
+              set: (info) =>
+                Effect.gen(function* () {
+                  updates.push(info)
+                  yield* Deferred.succeed(ready, undefined)
+                }),
+            }),
+          ),
+          Effect.forkChild,
+        )
+        yield* Deferred.await(ready)
+        expect(calls).toEqual([now])
+        expect(updates).toHaveLength(1)
+        expect(updates[0].next).toBe(now + 60_000)
+
+        yield* TestClock.adjust(59_999)
+        expect(calls).toHaveLength(1)
+        yield* TestClock.adjust(1)
+        expect(yield* Fiber.join(fiber)).toBe("answer")
+        expect(calls).toEqual([now, now + 60_000])
+      }),
+    )
+  }
 
   it.live("policy updates retry status and increments attempts", () =>
     provideTmpdirInstance(() =>
@@ -155,6 +248,58 @@ describe("session.retry.retryable", () => {
     const msg = "Rate limit exceeded, please try again later"
     const error = wrap(msg)
     expect(SessionRetry.retryable(error, retryProvider)).toEqual({ message: msg })
+  })
+
+  test.each(tokenQuotas)("retries parsed plain token quota errors: %s", (message) => {
+    const error = MessageV2.fromError(new Error(message), { providerID })
+    expect(SessionRetry.retryable(error, retryProvider)).toEqual({ message })
+  })
+
+  test("recognizes token capacity in the API error body even without a retryable status", () => {
+    const error = MessageV2.fromError(
+      new APICallError({
+        message: "Provider quota failure",
+        url: "https://offline.invalid",
+        requestBodyValues: {},
+        isRetryable: false,
+        responseBody: JSON.stringify({ error: { code: "quota_exceeded", message: tokenQuotas[0] } }),
+      }),
+      { providerID },
+    )
+    expect(SessionRetry.retryable(error, retryProvider)).toEqual({
+      message: expect.stringContaining("Provider quota failure"),
+    })
+    expect(SessionRetry.delay(1, error)).toBe(60_000)
+  })
+
+  test.each([
+    "You exceeded your current quota, please check your plan and billing details",
+    "Your credit balance is too low",
+    "Insufficient credits",
+    "Your credits have been exhausted",
+    "billing_hard_limit_reached",
+    "payment_required",
+    "spend_limit_exceeded",
+    "Monthly token quota exceeded",
+    `insufficient_quota: ${tokenQuotas[0]}`,
+  ])("does not retry permanent quota failures: %s", (message) => {
+    expect(SessionRetry.retryable(wrap(`${message}. Please try again.`), retryProvider)).toBeUndefined()
+    const error = Schema.decodeUnknownSync(MessageV2.APIError.Schema)(
+      new MessageV2.APIError({
+        message: "Too Many Requests",
+        statusCode: 429,
+        isRetryable: true,
+        responseBody: JSON.stringify({ error: { message } }),
+      }).toObject(),
+    )
+    expect(SessionRetry.retryable(error, retryProvider)).toBeUndefined()
+  })
+
+  test("token quota wording does not override fatal authentication status", () => {
+    const error = Schema.decodeUnknownSync(MessageV2.APIError.Schema)(
+      new MessageV2.APIError({ message: tokenQuotas[0], statusCode: 403, isRetryable: false }).toObject(),
+    )
+    expect(SessionRetry.retryable(error, retryProvider)).toBeUndefined()
   })
 
   test("retries too many requests in plain text", () => {

@@ -93,7 +93,7 @@ for (const scenario of [
     guarded: true,
   },
 ]) {
-  it.live(`actual LLM.service preserves ${scenario.name} wiring`, () =>
+  it.instance(`actual LLM.service preserves ${scenario.name} wiring`, () =>
     Effect.gen(function* () {
       const state = BedrockRetry.state()
       const calls: LanguageModelV3CallOptions[] = []

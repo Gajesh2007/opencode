@@ -139,6 +139,9 @@ describe("run prompt shared", () => {
     expect(mentionTriggerIndex("hello@")).toBeUndefined()
     expect(mentionTriggerIndex("foo@bar.com")).toBeUndefined()
     expect(mentionTriggerIndex("中文 @src file")).toBeUndefined()
+    expect(mentionTriggerIndex("@codex:Check")).toBeUndefined()
+    expect(mentionTriggerIndex("@opencode:ses_example")).toBeUndefined()
+    expect(mentionTriggerIndex("@./codex:notes")).toBe(0)
   })
 
   test("handles direct and leader-based variant cycling", () => {

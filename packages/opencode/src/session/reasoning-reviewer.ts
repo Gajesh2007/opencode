@@ -1,4 +1,4 @@
-import { Effect, Layer, Context, Stream } from "effect"
+import { Effect, Layer, Context } from "effect"
 import { LLM } from "./llm"
 import { Agent } from "../agent/agent"
 import { Provider } from "@/provider/provider"
@@ -6,8 +6,8 @@ import type { MetaAgent } from "./metaagent"
 import { MessageV2 } from "./message-v2"
 import { MessageID, type SessionID } from "./schema"
 import { jsonSchema, tool } from "ai"
-import { LLMEvent } from "@opencode-ai/llm"
-import * as Log from "@opencode-ai/core/util/log"
+import { RuntimeFlags } from "@/effect/runtime-flags"
+import * as Auxiliary from "./auxiliary"
 
 // Thin per-step reasoning reviewer (metacognition layer). Mirrors session/steering.ts:
 // it runs a small, cheap, cross-provider model under the configured base prompt ("lens")
@@ -15,10 +15,8 @@ import * as Log from "@opencode-ai/core/util/log"
 // course-correction. Model-agnostic: it consumes whatever reasoning representation exists
 // (raw, summarized, or none).
 
-const log = Log.create({ service: "session.reasoning-reviewer" })
-
 export interface ReviewResult {
-  readonly type: "ok" | "redirect"
+  readonly type: "ok" | "redirect" | "unavailable" | "skipped"
   readonly message: string
 }
 
@@ -48,12 +46,13 @@ export const layer = Layer.effect(
     const llm = yield* LLM.Service
     const agents = yield* Agent.Service
     const prov = yield* Provider.Service
+    const flags = yield* RuntimeFlags.Service
 
-    const review = Effect.fn("ReasoningReviewer.review")(function* (input: ReviewInput): Generator<any, ReviewResult, any> {
+    const review = Effect.fn("ReasoningReviewer.review")(function* (input: ReviewInput) {
+      if (!flags.experimentalMetaAgent) return { type: "skipped" as const, message: "" }
       const ag = yield* agents.get("reasoning-reviewer")
       if (!ag) {
-        log.warn("reasoning-reviewer agent not found")
-        return { type: "ok", message: "" }
+        return { type: "skipped" as const, message: "" }
       }
 
       // Resolve the configured reviewer model; fall back to the main model (small) if it
@@ -80,8 +79,8 @@ export const layer = Layer.effect(
         }),
         execute: async (args) => {
           const msgs = [...MessageV2.stream(input.sessionID)]
-          const offset = args.offset ?? 0
-          const limit = args.limit ?? 20
+          const offset = Math.max(0, Math.trunc(args.offset ?? 0))
+          const limit = Math.max(0, Math.min(20, Math.trunc(args.limit ?? 20)))
           const slice = msgs.slice(offset, offset + limit)
           const lines = slice.map((msg, i) => {
             const idx = offset + i
@@ -102,7 +101,8 @@ export const layer = Layer.effect(
             content: [
               {
                 type: "text" as const,
-                text: `Showing messages ${offset}-${offset + slice.length - 1} of ${msgs.length}\n\n` + lines.join("\n\n"),
+                text:
+                  `Showing messages ${offset}-${offset + slice.length - 1} of ${msgs.length}\n\n` + lines.join("\n\n"),
               },
             ],
           }
@@ -117,9 +117,7 @@ export const layer = Layer.effect(
         "<reasoning_to_review>",
         input.reasoning || "(the model produced no explicit reasoning this step — judge the step's actions/direction)",
         "</reasoning_to_review>",
-        ...(input.priorReasoning
-          ? ["", "<earlier_reasoning>", input.priorReasoning, "</earlier_reasoning>"]
-          : []),
+        ...(input.priorReasoning ? ["", "<earlier_reasoning>", input.priorReasoning, "</earlier_reasoning>"] : []),
         "",
         "Judge the latest reasoning against the lens. Reply with exactly REVIEW_OK if on-track, otherwise a short course-correction for the next step.",
       ].join("\n")
@@ -143,23 +141,19 @@ export const layer = Layer.effect(
           model: mdl,
           sessionID: input.sessionID,
           retries: 1,
+          usageKind: "reviewer",
           messages: [...modelMsgs, { role: "user" as const, content: reviewPrompt }],
         })
-        .pipe(
-          Stream.filter(LLMEvent.is.textDelta),
-          Stream.map((e) => e.text),
-          Stream.mkString,
-          Effect.orDie,
-        )
+        .pipe(Auxiliary.text)
 
       const cleaned = text.replace(/<think>[\s\S]*?<\/think>\s*/g, "").trim()
-      log.info("review result", { text: cleaned.slice(0, 200) })
-      if (cleaned === "" || cleaned === "REVIEW_OK") return { type: "ok", message: "" }
-      return { type: "redirect", message: cleaned }
+      if (!cleaned || /<\/?think>/.test(cleaned)) return { type: "unavailable" as const, message: "" }
+      if (cleaned === "REVIEW_OK") return { type: "ok" as const, message: "" }
+      return { type: "redirect" as const, message: cleaned }
     })
 
     return Service.of({
-      review: (input: ReviewInput) => review(input).pipe(Effect.orDie) as Effect.Effect<ReviewResult>,
+      review: (input) => Auxiliary.recover(review(input), { type: "unavailable" as const, message: "" }),
     })
   }),
 )
@@ -169,6 +163,7 @@ export const defaultLayer = Layer.suspend(() =>
     Layer.provide(LLM.defaultLayer),
     Layer.provide(Agent.defaultLayer),
     Layer.provide(Provider.defaultLayer),
+    Layer.provide(RuntimeFlags.defaultLayer),
   ),
 )
 

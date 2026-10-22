@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { Effect, Fiber, Layer, Random, Ref } from "effect"
+import { Effect, Fiber, Layer, Random, Ref, Stream } from "effect"
 import * as TestClock from "effect/testing/TestClock"
 import { Headers, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 import { LLM, LLMError } from "../src"
@@ -17,6 +17,9 @@ const request = HttpClientRequest.post("https://provider.test/v1/chat?api_key=se
 const secretRequest = HttpClientRequest.post("https://provider.test/v1/chat?api_key=query-secret-123&debug=1").pipe(
   HttpClientRequest.setHeaders(Headers.fromInput({ authorization: "Bearer header-secret-456" })),
 )
+
+const inputQuota = "quota input-tpm:084828557146:openai.gpt-6.1-sol (InputTokens) exceeded by 119936.47698333337"
+const outputQuota = "quota output-tpm:084828557146:openai.gpt-6.1-sol (OutputTokens) exceeded by 119936.47698333337"
 
 const responsesLayer = (responses: ReadonlyArray<Response>) =>
   RequestExecutor.layer.pipe(
@@ -117,6 +120,72 @@ describe("RequestExecutor", () => {
           ),
         ),
       ),
+    ),
+  )
+
+  it.effect("classifies token quotas as retryable without replay when RetryLimit is zero", () =>
+    Effect.forEach(
+      [
+        inputQuota,
+        outputQuota,
+        JSON.stringify({ error: { code: "quota_exceeded", message: inputQuota } }),
+        JSON.stringify({ error: { code: "quota_exceeded", message: outputQuota } }),
+        JSON.stringify({ error: { code: "quota_exceeded", message: "Tokens per minute limit exceeded" } }),
+        JSON.stringify({ error: { code: "quota_exceeded", message: "TPM limit exceeded" } }),
+        "quota input_tpm exceeded",
+        "quota output tpm exceeded",
+        "quota tokens/min exceeded",
+      ],
+      (body) =>
+        Effect.gen(function* () {
+          const attempts = yield* Ref.make(0)
+          const error = yield* Effect.flatMap(RequestExecutor.Service, (executor) => executor.execute(request)).pipe(
+            Effect.provide(countedResponsesLayer(attempts, [new Response(body, { status: 429 })])),
+            Effect.provideService(RequestExecutor.RetryLimit, 0),
+            Effect.flip,
+          )
+
+          expectLLMError(error)
+          expect(error).toMatchObject({
+            retryable: true,
+            retryAfterMs: 60_000,
+            reason: { _tag: "RateLimit" },
+          })
+          expect(yield* Ref.get(attempts)).toBe(1)
+        }),
+    ),
+  )
+
+  it.effect("does not retry permanent quota errors even when they mention token capacity", () =>
+    Effect.forEach(
+      [
+        JSON.stringify({ error: { code: "quota_exceeded", message: "Account quota exceeded" } }),
+        JSON.stringify({ error: { code: "quota_exceeded", message: "Requests per minute exceeded" } }),
+        JSON.stringify({ error: { code: "insufficient_quota", message: inputQuota } }),
+        JSON.stringify({ error: { code: "billing_hard_limit_reached", message: outputQuota } }),
+        `Payment required: ${inputQuota}`,
+        `Insufficient credits: ${inputQuota}`,
+        `Your credit balance is too low: ${outputQuota}`,
+        `Your credits have been exhausted: ${inputQuota}`,
+        `Spending limit reached: ${outputQuota}`,
+      ],
+      (body) =>
+        Effect.gen(function* () {
+          const attempts = yield* Ref.make(0)
+          const error = yield* Effect.flatMap(RequestExecutor.Service, (executor) => executor.execute(request)).pipe(
+            Effect.provide(
+              countedResponsesLayer(attempts, [
+                new Response(body, { status: 429, headers: { "retry-after": "0" } }),
+                new Response("should not retry", { status: 200 }),
+              ]),
+            ),
+            Effect.flip,
+          )
+
+          expectLLMError(error)
+          expect(error).toMatchObject({ retryable: false, reason: { _tag: "QuotaExceeded" } })
+          expect(yield* Ref.get(attempts)).toBe(1)
+        }),
     ),
   )
 
@@ -345,6 +414,59 @@ describe("RequestExecutor", () => {
     }),
   )
 
+  it.effect("uses the token reset delay for invalid headers and never caps valid Retry-After", () => {
+    const cases: Array<{ headers: Record<string, string>; delay: number; status?: number }> = [
+      { headers: {}, delay: 60_000 },
+      { headers: { "retry-after": "" }, delay: 60_000 },
+      { headers: { "retry-after": "not a delay" }, delay: 60_000 },
+      { headers: { "retry-after": "-1" }, delay: 60_000 },
+      { headers: { "retry-after": "Infinity" }, delay: 60_000 },
+      { headers: { "retry-after": "1e308" }, delay: 60_000 },
+      { headers: { "retry-after-ms": " " }, delay: 60_000 },
+      { headers: { "retry-after-ms": "-1" }, delay: 60_000 },
+      { headers: { "retry-after-ms": "Infinity" }, delay: 60_000 },
+      { headers: { "retry-after-ms": "not a delay" }, delay: 60_000 },
+      { headers: { "retry-after": "5.5" }, delay: 5_500 },
+      { headers: { "retry-after": "90" }, delay: 90_000 },
+      { headers: { "retry-after-ms": "12500", "retry-after": "90" }, delay: 12_500 },
+      { headers: { "retry-after-ms": "bad", "retry-after": "75" }, delay: 75_000 },
+      { headers: { "retry-after": "Thu, 01 Jan 1970 00:01:30 GMT" }, delay: 90_000 },
+      { headers: { "retry-after": "90" }, delay: 90_000, status: 503 },
+    ]
+    return Effect.forEach(cases, (input) =>
+      Effect.gen(function* () {
+        const attempts = yield* Ref.make(0)
+        yield* TestClock.setTime(0)
+        yield* Effect.gen(function* () {
+          const executor = yield* RequestExecutor.Service
+          const fiber = yield* executor.execute(request).pipe(Effect.forkChild)
+
+          yield* Effect.yieldNow
+          expect(yield* Ref.get(attempts)).toBe(1)
+
+          yield* TestClock.adjust(input.delay - 1)
+          yield* Effect.yieldNow
+          expect(yield* Ref.get(attempts)).toBe(1)
+
+          yield* TestClock.adjust(1)
+          const response = yield* Fiber.join(fiber)
+          expect(response.status).toBe(200)
+          expect(yield* Ref.get(attempts)).toBe(2)
+        }).pipe(
+          Effect.provide(
+            countedResponsesLayer(attempts, [
+              new Response(input.status === 503 ? "busy" : inputQuota, {
+                status: input.status ?? 429,
+                headers: input.headers,
+              }),
+              new Response("ok", { status: 200 }),
+            ]),
+          ),
+        )
+      }),
+    )
+  })
+
   it.effect("uses exponential jittered delay when retry-after is absent", () =>
     Effect.gen(function* () {
       const attempts = yield* Ref.make(0)
@@ -413,6 +535,41 @@ describe("RequestExecutor", () => {
       expectLLMError(error)
       expect(error.reason).toMatchObject({ _tag: "InvalidProviderOutput" })
       expect(yield* Ref.get(attempts)).toBe(1)
+    }),
+  )
+
+  it.effect("disables retries per stream while preserving the captured client's default retry limit", () =>
+    Effect.gen(function* () {
+      const attempts = yield* Ref.make(0)
+      const input = LLM.request({
+        model: OpenAIChat.route.model({ id: "test", provider: "test" }),
+        prompt: "Hello",
+      })
+      yield* Effect.gen(function* () {
+        const client = yield* LLMClient.Service
+        const error = yield* client
+          .stream(input)
+          .pipe(Stream.provideService(RequestExecutor.RetryLimit, 0), Stream.runDrain, Effect.flip)
+        expectLLMError(error)
+        expect(error.retryable).toBe(true)
+        expect(yield* Ref.get(attempts)).toBe(1)
+
+        const retried = yield* client.stream(input).pipe(Stream.runDrain, Effect.flip)
+        expectLLMError(retried)
+        expect(retried.retryable).toBe(true)
+        expect(yield* Ref.get(attempts)).toBe(4)
+      }).pipe(
+        Effect.provide(
+          LLMClient.layer.pipe(
+            Layer.provide(
+              countedResponsesLayer(
+                attempts,
+                Array.from({ length: 4 }, () => new Response("busy", { status: 503, headers: { "retry-after": "0" } })),
+              ),
+            ),
+          ),
+        ),
+      )
     }),
   )
 })

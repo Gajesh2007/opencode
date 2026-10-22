@@ -6,14 +6,31 @@ import { LLMClient, RequestExecutor, WebSocketExecutor } from "@opencode-ai/llm/
 import type { Provider } from "../src/provider/provider"
 import { ModelID, ProviderID } from "../src/provider/schema"
 import { LLMNativeRuntime } from "../src/session/llm/native-runtime"
+import { Auth } from "../src/auth"
+import { LLMNative } from "../src/session/llm/native-request"
 
-// Sends synthetic context only; never reads a workspace or auth file.
+// Sends synthetic context only; credentials are resolved but never logged.
 const id = process.env.BENCH_MODEL ?? "gpt-5.2"
 const turns = Number(process.env.BENCH_TURNS ?? 6)
 if (!Number.isInteger(turns) || turns < 2 || turns > 30) throw new Error("BENCH_TURNS must be between 2 and 30")
 const local = process.env.BENCH_LOCAL === "1"
-const apiKey = local ? "local-benchmark-only" : process.env.OPENAI_API_KEY
-if (!apiKey) throw new Error("OPENAI_API_KEY is required; this benchmark makes billable requests")
+const cold = process.env.BENCH_COLD === "1"
+const pauseMs = Number(process.env.BENCH_PAUSE_MS ?? 0)
+const handshakeMs = Number(process.env.BENCH_HANDSHAKE_MS ?? 0)
+if (!Number.isInteger(pauseMs) || pauseMs < 0 || pauseMs > 360_000) throw new Error("Invalid BENCH_PAUSE_MS")
+if (!Number.isInteger(handshakeMs) || handshakeMs < 0 || handshakeMs > 2000)
+  throw new Error("Invalid BENCH_HANDSHAKE_MS")
+const saved = local
+  ? undefined
+  : await Effect.runPromise(
+      Effect.flatMap(Auth.Service, (service) => service.get("openai")).pipe(Effect.provide(Auth.defaultLayer)),
+    )
+const apiKey = local ? "local-benchmark-only" : saved?.type === "api" ? saved.key : process.env.OPENAI_API_KEY
+if (!apiKey) throw new Error("An OpenAI API key is required; this benchmark makes billable requests")
+const tier = process.env.BENCH_TIER ?? "default"
+if (!["default", "priority", "ultrafast"].includes(tier)) throw new Error("Unsupported BENCH_TIER")
+if (process.env.BENCH_OUTPUT && (await Bun.file(process.env.BENCH_OUTPUT).exists()))
+  throw new Error("Refusing to overwrite BENCH_OUTPUT")
 let sequence = 0
 function response() {
   const responseId = `resp_${++sequence}`
@@ -29,7 +46,14 @@ function response() {
     },
     {
       type: "response.completed",
-      response: { id: responseId, status: "completed", output: [], usage: { input_tokens: 1, output_tokens: 1 } },
+      response: {
+        id: responseId,
+        model: id,
+        service_tier: tier,
+        status: "completed",
+        output: [],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
     },
   ]
 }
@@ -38,6 +62,7 @@ const server = local
       hostname: "127.0.0.1",
       port: 0,
       async fetch(request, server) {
+        if (request.headers.get("upgrade") === "websocket" && handshakeMs) await Bun.sleep(handshakeMs)
         if (server.upgrade(request, { data: {} })) return
         await request.json()
         return new Response(
@@ -66,7 +91,7 @@ const server = local
     })
   : undefined
 const baseURL = server ? `${server.url}v1` : "https://api.openai.com/v1"
-const options = { store: false, reasoningEffort: "low", textVerbosity: "low" }
+const options = { store: false, reasoningEffort: "low", textVerbosity: "low", serviceTier: tier }
 const model: Provider.Model = {
   id: ModelID.make(id),
   providerID: ProviderID.openai,
@@ -88,8 +113,21 @@ const model: Provider.Model = {
   headers: {},
   release_date: "2026-01-01",
 }
-type Sample = { firstTextMs: number; totalMs: number; bytes: number; requests: number; incremental: boolean }
-const modes = ["ai-sdk-http", "native-http", "native-ws", "native-ws-continuation"] as const
+type Sample = {
+  firstTextMs: number
+  totalMs: number
+  bytes: number
+  requests: number
+  incremental: boolean
+  servedTier: string
+  preconnectMs: number
+}
+const baselineModes = ["ai-sdk-http", "native-http", "native-ws", "native-ws-continuation"] as const
+const modes = [
+  ...baselineModes,
+  ...(process.env.BENCH_AUTO === "1" ? ["native-auto" as const] : []),
+  ...(process.env.BENCH_PRECONNECT === "1" ? ["native-ws-preconnected" as const] : []),
+]
 const states = modes.map((mode) => ({
   mode,
   messages: [
@@ -120,6 +158,7 @@ const measuredFetch: typeof fetch = Object.assign(
 )
 const pool = WebSocketExecutor.pool()
 const socket = WebSocketExecutor.Service.of({
+  preconnect: pool.preconnect,
   open: (request) =>
     pool.open(request).pipe(
       Effect.map((connection) => ({
@@ -138,13 +177,33 @@ const exit = await Effect.runPromiseExit(
   Effect.gen(function* () {
     const client = yield* LLMClient.Service
     for (let turn = 0; turn < turns; turn++) {
+      if (turn > 0 && pauseMs) yield* Effect.promise(() => Bun.sleep(pauseMs))
       // Rotate order to reduce systematic cache/server-load bias between modes.
       for (let offset = 0; offset < states.length; offset++) {
         const state = states[(turn + offset) % states.length]
+        const sessionID = cold ? `${state.mode}-${turn}` : state.mode
+        const headers = { "x-session-affinity": sessionID }
         state.messages.push({ role: "user", content: `Turn ${turn}: acknowledge with OK.` })
+        const warmStarted = performance.now()
+        if (state.mode === "native-ws-preconnected" && client.preconnect)
+          yield* client
+            .preconnect(
+              LLMNative.request({
+                model,
+                apiKey,
+                baseURL,
+                messages: [],
+                tools: {},
+                providerOptions: { openai: options },
+                headers,
+                transport: "websocket",
+              }),
+            )
+            .pipe(Effect.timeout("10 seconds"))
+        const preconnectMs = state.mode === "native-ws-preconnected" ? performance.now() - warmStarted : 0
         Object.assign(measure, { bytes: 0, requests: 0, incremental: false })
         const start = performance.now()
-        const output = { text: "", first: 0 }
+        const output = { text: "", first: 0, tier: "" }
         const abort = AbortSignal.timeout(60_000)
         if (state.mode === "ai-sdk-http") {
           const result = streamText({
@@ -159,6 +218,10 @@ const exit = await Effect.runPromiseExit(
           yield* Effect.promise(async () => {
             for await (const event of result.fullStream) {
               if (event.type === "error") throw event.error
+              if (event.type === "finish-step") {
+                const served = event.providerMetadata?.openai?.serviceTier
+                if (typeof served === "string") output.tier = served
+              }
               if (event.type !== "text-delta") continue
               if (!output.first) output.first = performance.now() - start
               output.text += event.text
@@ -176,20 +239,24 @@ const exit = await Effect.runPromiseExit(
               options: {
                 apiKey,
                 baseURL,
-                transport: state.mode === "native-http" ? "http" : "websocket",
-                responsesContinuation: state.mode === "native-ws-continuation",
+                transport:
+                  state.mode === "native-auto" ? undefined : state.mode === "native-http" ? "http" : "websocket",
+                responsesContinuation:
+                  state.mode === "native-auto"
+                    ? undefined
+                    : state.mode === "native-ws-continuation" || state.mode === "native-ws-preconnected",
               },
             },
             auth: undefined,
             llmClient: client,
             continuation,
-            sessionID: state.mode,
+            sessionID,
             previousResponseId: state.responseId,
             messages: state.messages,
             tools: {},
             providerOptions: options,
             maxOutputTokens: 512,
-            headers: { "x-session-affinity": state.mode },
+            headers,
             abort,
           })
           if (result.type !== "supported") throw new Error(result.reason)
@@ -205,6 +272,8 @@ const exit = await Effect.runPromiseExit(
                 if (event.type === "finish") {
                   const responseId = event.providerMetadata?.openai?.responseId
                   if (typeof responseId === "string") state.responseId = responseId
+                  const served = event.providerMetadata?.openai?.serviceTier
+                  if (typeof served === "string") output.tier = served
                 }
               }),
             ),
@@ -212,20 +281,30 @@ const exit = await Effect.runPromiseExit(
           )
         }
         if (!output.text) throw new Error(`${state.mode} returned no text; cannot measure first-text latency`)
+        if (output.tier !== tier && !(tier === "priority" && output.tier === "fast"))
+          throw new Error(`${state.mode} did not return the requested tier`)
         state.messages.push({ role: "assistant", content: output.text })
-        const sample = { firstTextMs: output.first, totalMs: performance.now() - start, ...measure }
+        const sample = {
+          firstTextMs: output.first,
+          totalMs: performance.now() - start,
+          ...measure,
+          servedTier: output.tier,
+          preconnectMs,
+        }
         state.samples.push(sample)
-        console.log(JSON.stringify({ mode: state.mode, local, turn, model: id, ...sample }))
+        console.log(JSON.stringify({ mode: state.mode, local, cold, turn, model: id, ...sample }))
       }
     }
     for (const state of states) {
-      const warm = state.samples.slice(1)
+      const warm = cold ? state.samples : state.samples.slice(1)
       const sorted = warm.map((sample) => sample.firstTextMs).sort((a, b) => a - b)
       console.log(
         JSON.stringify({
           summary: state.mode,
           local,
+          cold,
           model: id,
+          requestedTier: tier,
           warmSamples: warm.length,
           firstRequestTextMs: state.samples[0].firstTextMs,
           warmP50FirstTextMs: sorted[Math.floor(sorted.length * 0.5)],
@@ -238,11 +317,28 @@ const exit = await Effect.runPromiseExit(
   }).pipe(Effect.provide(layers)),
 )
 server?.stop(true)
+await Effect.runPromise(pool.closeAll)
 // The benchmark owns the process; do not wait for idle pooled sockets to expire.
 if (exit._tag === "Failure") {
   // Do not dump SDK request objects or authentication headers on failure.
-  const { Cause } = await import("effect")
-  console.error(Cause.pretty(exit.cause))
+  console.error("Latency benchmark failed; request and authentication data are not logged.")
   process.exit(1)
 }
+if (process.env.BENCH_OUTPUT)
+  await Bun.write(
+    process.env.BENCH_OUTPUT,
+    JSON.stringify(
+      {
+        model: id,
+        requestedTier: tier,
+        local,
+        cold,
+        pauseMs,
+        handshakeMs,
+        modes: states.map((state) => ({ mode: state.mode, samples: state.samples })),
+      },
+      null,
+      2,
+    ) + "\n",
+  )
 process.exit(0)

@@ -153,6 +153,8 @@ export const ToolCall = Schema.Struct({
   id: ToolCallID,
   name: Schema.String,
   input: Schema.Unknown,
+  /** When present, input contains malformed arguments and must not be executed. */
+  inputError: Schema.optional(Schema.String),
   providerExecuted: Schema.optional(Schema.Boolean),
   providerMetadata: Schema.optional(ProviderMetadata),
 }).annotate({ identifier: "LLM.Event.ToolCall" })

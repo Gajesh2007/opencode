@@ -39,7 +39,7 @@ export const resolve = Effect.fn("ChildModel.resolve")(function* (input: Input) 
   const configured = model.providerID === input.agent.model?.providerID && model.modelID === input.agent.model?.modelID
   const variant =
     input.variant ?? (changed ? (configured ? input.agent.variant : undefined) : current.variant) ?? "default"
-  const serviceTier = current.serviceTier === "default" ? undefined : current.serviceTier
+  const serviceTier = current.serviceTier
   const upstream = current.upstream === "default" ? undefined : current.upstream
   const source = input.current && !input.resetModel ? input.current : input.parent
   const tierSource =
@@ -82,6 +82,7 @@ export const resolve = Effect.fn("ChildModel.resolve")(function* (input: Input) 
   }
   if (
     serviceTier &&
+    serviceTier !== "default" &&
     (!Object.hasOwn(target.serviceTiers ?? {}, serviceTier) || target.providerID !== tierSource.providerID)
   ) {
     return yield* Effect.fail(

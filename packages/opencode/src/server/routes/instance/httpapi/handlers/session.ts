@@ -8,12 +8,14 @@ import { Session } from "@/session/session"
 import { SessionCompaction } from "@/session/compaction"
 import { MessageV2 } from "@/session/message-v2"
 import { SessionPrompt } from "@/session/prompt"
+import { LLM } from "@/session/llm"
 import { SessionRevert } from "@/session/revert"
 import { SessionRunState } from "@/session/run-state"
 import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
 import { Goal } from "@/session/goal"
+import { SessionUsage } from "@/session/usage"
 import { isQueuedUserMessage } from "@/session/queued-message"
 import { MessageID, PartID, SessionID } from "@/session/schema"
 import { NamedError } from "@opencode-ai/core/util/error"
@@ -28,6 +30,7 @@ import {
   ForkPayload,
   InitPayload,
   ListQuery,
+  SearchQuery,
   MessagesQuery,
   PermissionResponsePayload,
   PromptPayload,
@@ -36,6 +39,7 @@ import {
   SummarizePayload,
   UnrevertQuery,
   UpdatePayload,
+  WarmPayload,
 } from "../groups/session"
 import { PermissionNotFoundError } from "../errors"
 import * as SessionError from "./session-errors"
@@ -51,6 +55,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const session = yield* Session.Service
     const shareSvc = yield* SessionShare.Service
     const promptSvc = yield* SessionPrompt.Service
+    const llm = yield* LLM.Service
     const revertSvc = yield* SessionRevert.Service
     const compactSvc = yield* SessionCompaction.Service
     const runState = yield* SessionRunState.Service
@@ -79,12 +84,31 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       return Object.fromEntries(yield* statusSvc.list())
     })
 
+    const search = Effect.fn("SessionHttpApi.search")(function* (ctx: { query: typeof SearchQuery.Type }) {
+      return yield* session.search(ctx.query)
+    })
+
     const requireSession = Effect.fn("SessionHttpApi.requireSession")(function* (sessionID: SessionID) {
       return yield* SessionError.mapStorageNotFound(session.get(sessionID))
     })
 
     const get = Effect.fn("SessionHttpApi.get")(function* (ctx: { params: { sessionID: SessionID } }) {
       return yield* requireSession(ctx.params.sessionID)
+    })
+
+    const warm = Effect.fn("SessionHttpApi.warm")(function* (ctx: {
+      params: { sessionID: SessionID }
+      request: HttpServerRequest.HttpServerRequest
+    }) {
+      const current = yield* requireSession(ctx.params.sessionID)
+      const payload = yield* Schema.decodeUnknownEffect(WarmPayload)(
+        yield* tryParseJson(yield* ctx.request.text.pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))),
+        { onExcessProperty: "error" },
+      ).pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
+      return yield* (
+        llm.warm?.({ ...payload, sessionID: current.id, parentSessionID: current.parentID }) ??
+        Effect.succeed({ connection: "skipped" as const, context: "skipped" as const })
+      ).pipe(Effect.catchCause(() => Effect.succeed({ connection: "failed" as const, context: "skipped" as const })))
     })
 
     const children = Effect.fn("SessionHttpApi.children")(function* (ctx: { params: { sessionID: SessionID } }) {
@@ -100,6 +124,11 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const goal = Effect.fn("SessionHttpApi.goal")(function* (ctx: { params: { sessionID: SessionID } }) {
       yield* requireSession(ctx.params.sessionID)
       return (yield* goalSvc.get(ctx.params.sessionID)) ?? null
+    })
+
+    const usage = Effect.fn("SessionHttpApi.usage")(function* (ctx: { params: { sessionID: SessionID } }) {
+      yield* requireSession(ctx.params.sessionID)
+      return yield* Effect.sync(() => SessionUsage.summarize(ctx.params.sessionID))
     })
 
     const diff = Effect.fn("SessionHttpApi.diff")(function* (ctx: {
@@ -182,6 +211,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     })
 
     const remove = Effect.fn("SessionHttpApi.remove")(function* (ctx: { params: { sessionID: SessionID } }) {
+      yield* requireSession(ctx.params.sessionID)
+      yield* llm.cancelWarm?.(ctx.params.sessionID) ?? Effect.void
       yield* SessionError.mapStorageNotFound(session.remove(ctx.params.sessionID))
       return true
     })
@@ -234,6 +265,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     })
 
     const abort = Effect.fn("SessionHttpApi.abort")(function* (ctx: { params: { sessionID: SessionID } }) {
+      yield* requireSession(ctx.params.sessionID)
+      yield* llm.cancelWarm?.(ctx.params.sessionID) ?? Effect.void
       yield* promptSvc.cancel(ctx.params.sessionID)
       return true
     })
@@ -434,11 +467,14 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
 
     return handlers
       .handle("list", list)
+      .handle("search", search)
       .handle("status", status)
       .handle("get", get)
+      .handleRaw("warm", warm)
       .handle("children", children)
       .handle("todo", todo)
       .handle("goal", goal)
+      .handle("usage", usage)
       .handle("diff", diff)
       .handle("messages", messages)
       .handle("message", message)

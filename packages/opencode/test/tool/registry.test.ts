@@ -108,6 +108,12 @@ const scout = testEffect(
   Layer.mergeAll(registryLayer({ flags: { experimentalScout: true } }), node, Agent.defaultLayer),
 )
 const background = testEffect(Layer.mergeAll(registryLayer(), node, Agent.defaultLayer))
+const workflow = testEffect(
+  Layer.mergeAll(registryLayer({ flags: { experimentalWorkflow: true } }), node, Agent.defaultLayer),
+)
+const metaagent = testEffect(
+  Layer.mergeAll(registryLayer({ flags: { experimentalMetaAgent: true } }), node, Agent.defaultLayer),
+)
 const withBrokenPlugin = testEffect(
   Layer.mergeAll(registryLayer({ plugin: brokenPluginLayer }), node, Agent.defaultLayer),
 )
@@ -117,6 +123,46 @@ afterEach(async () => {
 })
 
 describe("tool.registry", () => {
+  it.instance("hides metaagent by default", () =>
+    Effect.gen(function* () {
+      const registry = yield* ToolRegistry.Service
+      expect(yield* registry.ids()).not.toContain("metaagent")
+      expect((yield* registry.all()).map((tool) => tool.id)).not.toContain("metaagent")
+    }),
+  )
+
+  metaagent.instance("exposes metaagent after dedicated opt-in", () =>
+    Effect.gen(function* () {
+      const registry = yield* ToolRegistry.Service
+      expect(yield* registry.ids()).toContain("metaagent")
+    }),
+  )
+
+  it.instance("hides workflow by default without disabling other delegation tools", () =>
+    Effect.gen(function* () {
+      const registry = yield* ToolRegistry.Service
+      expect(yield* registry.ids()).not.toContain("workflow")
+      expect((yield* registry.all()).map((tool) => tool.id)).not.toContain("workflow")
+      const agent = yield* (yield* Agent.Service).get("build")
+      if (!agent) throw new Error("build agent not found")
+      const tools = yield* registry.tools({ providerID: ProviderID.opencode, modelID: ModelID.make("test"), agent })
+      expect(tools.map((tool) => tool.id)).not.toContain("workflow")
+      expect(tools.map((tool) => tool.id)).toContain("task")
+      expect(tools.map((tool) => tool.id)).toContain("spawn_agent")
+    }),
+  )
+
+  workflow.instance("exposes workflow after explicit opt-in", () =>
+    Effect.gen(function* () {
+      const registry = yield* ToolRegistry.Service
+      expect(yield* registry.ids()).toContain("workflow")
+      const agent = yield* (yield* Agent.Service).get("build")
+      if (!agent) throw new Error("build agent not found")
+      const tools = yield* registry.tools({ providerID: ProviderID.opencode, modelID: ModelID.make("test"), agent })
+      expect(tools.map((tool) => tool.id)).toContain("workflow")
+    }),
+  )
+
   it.instance("hides repo research tools unless experimental", () =>
     Effect.gen(function* () {
       const registry = yield* ToolRegistry.Service

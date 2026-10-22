@@ -20,7 +20,7 @@ import { useFrecency } from "./frecency"
 import { useBindings, useCommandSlashes, useOpencodeModeStack } from "../../keymap"
 import { Reference } from "@/reference/reference"
 import { ConfigReference } from "@/config/reference"
-import { displayCharAt, mentionTriggerIndex } from "@/cli/cmd/prompt-display"
+import { displayCharAt, isSessionMention, mentionTriggerIndex } from "@/cli/cmd/prompt-display"
 
 function removeLineRange(input: string) {
   const hashIndex = input.lastIndexOf("#")
@@ -774,6 +774,8 @@ export function Autocomplete(props: {
             props.input().cursorOffset <= store.index ||
             // There is a space between the trigger and the cursor
             props.input().getTextRange(store.index, props.input().cursorOffset).match(/\s/) ||
+            (store.visible === "@" &&
+              isSessionMention(props.input().getTextRange(store.index, props.input().cursorOffset))) ||
             // "/<command>" is not the sole content
             (store.visible === "/" && value.match(/^\S+\s+\S+\s*$/))
           ) {

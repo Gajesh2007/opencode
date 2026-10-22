@@ -5,6 +5,7 @@ import { jsonSchema, tool, type ModelMessage, type Tool } from "ai"
 import { Effect, Layer, Stream } from "effect"
 import { LLMNative } from "@/session/llm/native-request"
 import { LLMNativeRuntime } from "@/session/llm/native-runtime"
+import { readOnlyTools } from "@/session/llm/tool-execution"
 import type { Provider } from "@/provider/provider"
 import { ModelID, ProviderID } from "@/provider/schema"
 import { OAUTH_DUMMY_KEY } from "@/auth"
@@ -148,6 +149,89 @@ const expectOpenAIResponsesRequest = (input: {
   })
 
 describe("session.llm-native.request", () => {
+  test("rejects explicit cache prefixes that system-message hoisting would change", () => {
+    const messages: ModelMessage[] = [
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "Stable reference",
+            providerOptions: { openai: { promptCacheBreakpoint: { mode: "explicit" } } },
+          },
+        ],
+      },
+      { role: "system", content: "Dynamic developer suffix" },
+      { role: "user", content: "Question" },
+    ]
+    expect(LLMNative.unsupportedCacheOrdering(messages)).toBe(true)
+    expect(() => LLMNative.request({ model: baseModel, messages })).toThrow("interleaved system messages")
+    expect(
+      LLMNative.unsupportedCacheOrdering([
+        {
+          role: "system",
+          content: "Stable instructions",
+          providerOptions: { openai: { promptCacheBreakpoint: { mode: "explicit" } } },
+        },
+        { role: "user", content: "Question" },
+      ]),
+    ).toBe(false)
+    expect(
+      LLMNative.unsupportedCacheOrdering([
+        { role: "user", content: "Reference without a breakpoint" },
+        { role: "system", content: "Existing legacy ordering" },
+      ]),
+    ).toBe(false)
+  })
+
+  it.effect("preserves opt-in Responses cache controls and system/text breakpoints", () =>
+    Effect.gen(function* () {
+      const prepared = yield* prepareNativeRequest({
+        model: { ...baseModel, api: { ...baseModel.api, id: "gpt-6.1-sol" } },
+        apiKey: "test-openai-key",
+        providerOptions: { openai: { promptCacheOptions: { mode: "explicit", ttl: "30m", prewarm: true } } },
+        messages: [
+          {
+            role: "system",
+            content: "Stable developer instructions",
+            providerOptions: { openai: { promptCacheBreakpoint: { mode: "explicit" } } },
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: "Stable reference",
+                providerOptions: { openai: { promptCacheBreakpoint: { mode: "explicit" } } },
+              },
+            ],
+          },
+          { role: "user", content: "Changing question" },
+        ],
+      })
+      expect(prepared.body).toMatchObject({
+        prompt_cache_options: { mode: "explicit", ttl: "30m", prewarm: true },
+        input: [
+          {
+            role: "developer",
+            content: [
+              {
+                type: "input_text",
+                text: "Stable developer instructions",
+                prompt_cache_breakpoint: { mode: "explicit" },
+              },
+            ],
+          },
+          {
+            role: "user",
+            content: [{ type: "input_text", text: "Stable reference", prompt_cache_breakpoint: { mode: "explicit" } }],
+          },
+          { role: "user", content: [{ type: "input_text", text: "Changing question" }] },
+        ],
+      })
+    }),
+  )
+
   test("maps normalized stream inputs to a native LLM request", () => {
     const messages: ModelMessage[] = [
       {
@@ -500,6 +584,19 @@ describe("session.llm-native.request", () => {
       apiKey: "provider-key",
     })
   })
+
+  it.effect("native tool wrapper only eagerly dispatches explicitly marked read-only tools", () =>
+    Effect.sync(() => {
+      const trusted = tool({ inputSchema: jsonSchema({ type: "object" }), execute: async () => "ok" })
+      readOnlyTools.add(trusted)
+      const wrapped = LLMNativeRuntime.nativeTools(
+        { trusted, read: tool({ inputSchema: jsonSchema({ type: "object" }), execute: async () => "custom" }) },
+        { messages: [], abort: new AbortController().signal },
+      )
+      expect(wrapped.trusted.execution).toBe("eager")
+      expect(wrapped.read.execution).toBeUndefined()
+    }),
+  )
 
   it.effect("native tool wrapper converts thrown errors into typed ToolFailure", () =>
     Effect.gen(function* () {

@@ -1,0 +1,9 @@
+Read several known text files or directories, with optional per-item line ranges, in one bounded call.
+
+- Provide 1-16 items in files. Each item accepts the same filePath, offset, and limit as read.
+- Prefer absolute paths. Use glob or grep first if you do not yet know the paths.
+- Reads run independently, at most 8 at a time. Results are labeled and returned in input order, including repeated paths with different ranges.
+- Each item defaults to 200 lines starting at line 1. Lines, directory entries, read permissions, external-directory checks, and nearby instructions follow read behavior.
+- A missing, denied, binary, or otherwise unreadable file produces an error for that item, without discarding successful siblings. Cancellation is labeled separately from errors.
+- Total text output is capped at 50 KiB, shared between items. Large results are clipped explicitly. Use read with a narrower range to continue or retrieve omitted instructions.
+- This tool is text-only. Images and PDFs produce an explicit per-item error; use read to receive those attachments.

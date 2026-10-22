@@ -25,6 +25,7 @@ export type Retryable = {
 export const RETRY_INITIAL_DELAY = 2000
 export const RETRY_BACKOFF_FACTOR = 2
 export const RETRY_MAX_DELAY_NO_HEADERS = 30_000 // 30 seconds
+export const RETRY_TOKEN_QUOTA_DELAY = 60_000
 export const RETRY_MAX_DELAY = 2_147_483_647 // max 32-bit signed integer for setTimeout
 
 // Sentinel error message the session processor throws to flag a "hollow"
@@ -39,35 +40,54 @@ function cap(ms: number) {
   return Math.min(ms, RETRY_MAX_DELAY)
 }
 
-export function delay(attempt: number, error?: MessageV2.APIError) {
-  if (error) {
-    const headers = error.data.responseHeaders
-    if (headers) {
-      const retryAfterMs = headers["retry-after-ms"]
-      if (retryAfterMs) {
-        const parsedMs = Number.parseFloat(retryAfterMs)
-        if (!Number.isNaN(parsedMs)) {
-          return cap(parsedMs)
-        }
-      }
+// Per-minute capacity replenishes, unlike billing or credit quotas. Explicit
+// billing failures take precedence even when the message also mentions TPM.
+export function quota(message: string, body = "") {
+  const text = `${message}\n${body}`
+  if (
+    /insufficient[-_\s]*quota|billing[-_\s]+(?:hard[-_\s]+)?(?:limit|quota)|payment[-_\s]+required|(?:credits?|balance|spend(?:ing)?|budget)[-_\s]+(?:limit|quota)/i.test(
+      text,
+    ) ||
+    /(?:insufficient|exhausted|depleted)[-_\s]+(?:your[-_\s]+)?(?:credits?|balance)|(?:credits?|balance)[^.\n]{0,32}(?:exhausted|depleted|too[-_\s]+low|insufficient)|(?:out[-_\s]+of|not[-_\s]+enough)[-_\s]+credits?/i.test(
+      text,
+    )
+  )
+    return "permanent"
+  if (/\b(?:(?:input|output)[-_\s]*)?(?:tpm|tokens?(?:[-_\s]+per[-_\s]+|\/)min(?:ute)?)\b/i.test(text))
+    return "temporary"
+  if (/quota[-_\s]*exceeded|exceeded.{0,40}\bquota\b/i.test(text)) return "permanent"
+}
 
-      const retryAfter = headers["retry-after"]
-      if (retryAfter) {
-        const parsedSeconds = Number.parseFloat(retryAfter)
-        if (!Number.isNaN(parsedSeconds)) {
-          // convert seconds to milliseconds
-          return cap(Math.ceil(parsedSeconds * 1000))
-        }
-        // Try parsing as HTTP date format
-        const parsed = Date.parse(retryAfter) - Date.now()
-        if (!Number.isNaN(parsed) && parsed > 0) {
-          return cap(Math.ceil(parsed))
-        }
-      }
+export function delay(attempt: number, error?: Err, now = Date.now()) {
+  const api = error && MessageV2.APIError.isInstance(error) ? error : undefined
+  const headers = api?.data.responseHeaders
+  if (headers) {
+    const normalized = new Headers(headers)
+    const retryAfterMs = normalized.get("retry-after-ms")
+    if (retryAfterMs?.trim()) {
+      const parsedMs = Number(retryAfterMs)
+      if (Number.isFinite(parsedMs) && parsedMs >= 0) return cap(parsedMs)
+    }
 
-      return cap(RETRY_INITIAL_DELAY * Math.pow(RETRY_BACKOFF_FACTOR, attempt - 1))
+    const retryAfter = normalized.get("retry-after")
+    if (retryAfter?.trim()) {
+      const parsedSeconds = Number(retryAfter)
+      if (Number.isFinite(parsedSeconds) && parsedSeconds >= 0) {
+        // convert seconds to milliseconds
+        return cap(Math.ceil(parsedSeconds * 1000))
+      }
+      if (Number.isNaN(parsedSeconds)) {
+        const parsed = Date.parse(retryAfter) - now
+        if (!Number.isNaN(parsed) && parsed > 0) return cap(Math.ceil(parsed))
+      }
     }
   }
+
+  const message = error && isRecord(error.data) ? error.data.message : undefined
+  if (typeof message === "string" && quota(message, api?.data.responseBody) === "temporary")
+    return RETRY_TOKEN_QUOTA_DELAY
+
+  if (headers) return cap(RETRY_INITIAL_DELAY * Math.pow(RETRY_BACKOFF_FACTOR, attempt - 1))
 
   return cap(Math.min(RETRY_INITIAL_DELAY * Math.pow(RETRY_BACKOFF_FACTOR, attempt - 1), RETRY_MAX_DELAY_NO_HEADERS))
 }
@@ -136,6 +156,7 @@ export function retryable(error: Err, provider: string) {
   }
   if (MessageV2.APIError.isInstance(error)) {
     const status = error.data.statusCode
+    const limit = quota(error.data.message, error.data.responseBody)
     // Retry transient server failures with backoff. 5xx and known transient status
     // codes are always retried (even when the SDK doesn't mark them retryable);
     // gateway/proxy errors that arrive without a status but with a transient message
@@ -145,7 +166,9 @@ export function retryable(error: Err, provider: string) {
       error.data.isRetryable ||
       (status !== undefined && (status >= 500 || RETRYABLE_STATUS.has(status))) ||
       ((status === undefined || !FATAL_STATUS.has(status)) &&
-        (isTransientMessage(error.data.message) || isTransientMessage(error.data.responseBody)))
+        (limit === "temporary" ||
+          isTransientMessage(error.data.message) ||
+          isTransientMessage(error.data.responseBody)))
     if (!transient) return undefined
     if (error.data.responseBody?.includes("FreeUsageLimitError")) {
       return {
@@ -193,6 +216,7 @@ export function retryable(error: Err, provider: string) {
         },
       }
     }
+    if (limit === "permanent") return undefined
     return { message: error.data.message.includes("Overloaded") ? "Provider is overloaded" : error.data.message }
   }
 
@@ -200,8 +224,10 @@ export function retryable(error: Err, provider: string) {
   // generic error (NamedError.Unknown) instead of a typed APIError — e.g. a gateway
   // "internal server error" thrown as a plain Error.
   const msg = isRecord(error.data) ? error.data.message : undefined
-  if (typeof msg === "string" && isTransientMessage(msg)) {
-    return { message: msg }
+  if (typeof msg === "string") {
+    const limit = quota(msg)
+    if (limit === "permanent") return undefined
+    if (limit === "temporary" || isTransientMessage(msg)) return { message: msg }
   }
 
   const json = parseJSON(msg)
@@ -253,8 +279,8 @@ export function policy(opts: {
       const retry = retryable(error, opts.provider)
       if (!retry) return Cause.done(meta.attempt)
       return Effect.gen(function* () {
-        const wait = delay(meta.attempt, MessageV2.APIError.isInstance(error) ? error : undefined)
         const now = yield* Clock.currentTimeMillis
+        const wait = delay(meta.attempt, error, now)
         yield* opts.set({
           attempt: meta.attempt,
           message: retry.message,

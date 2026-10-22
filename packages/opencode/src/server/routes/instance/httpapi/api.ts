@@ -14,7 +14,9 @@ import { PermissionApi } from "./groups/permission"
 import { ProjectApi } from "./groups/project"
 import { ProviderApi } from "./groups/provider"
 import { PtyApi, PtyConnectApi } from "./groups/pty"
+import { PairingConnectApi } from "./groups/server"
 import { QuestionApi } from "./groups/question"
+import { ServerApi } from "./groups/server"
 import { SessionApi } from "./groups/session"
 import { SyncApi } from "./groups/sync"
 import { TuiApi } from "./groups/tui"
@@ -30,6 +32,7 @@ const SyncEventSchemas = SyncEvent.effectPayloads()
 export const RootHttpApi = HttpApi.make("opencode-root")
   .addHttpApi(ControlApi)
   .addHttpApi(GlobalApi)
+  .addHttpApi(ServerApi)
   .middleware(SchemaErrorMiddleware)
   .middleware(Authorization)
 
@@ -56,7 +59,9 @@ export const OpenCodeHttpApi = HttpApi.make("opencode")
   .addHttpApi(EventApi)
   .addHttpApi(InstanceHttpApi)
   .addHttpApi(PtyConnectApi)
+  .addHttpApi(PairingConnectApi)
   .annotate(HttpApi.AdditionalSchemas, [EventSchema, ...SyncEventSchemas])
 
 export type RootHttpApiType = typeof RootHttpApi
 export type InstanceHttpApiType = typeof InstanceHttpApi
+export { PairingConnectApi } from "./groups/server"

@@ -1,6 +1,7 @@
 import type { AssistantMessage, Part, Provider, UserMessage } from "@opencode-ai/sdk/v2"
 import { Locale } from "@/util/locale"
 import * as Model from "./model"
+import { serviceTier } from "./service-tier"
 
 export type TranscriptOptions = {
   thinking: boolean
@@ -77,8 +78,9 @@ export function formatAssistantHeader(
     msg.time.completed && msg.time.created ? ((msg.time.completed - msg.time.created) / 1000).toFixed(1) + "s" : ""
 
   const modelName = Model.name(providers, msg.providerID, msg.modelID)
+  const tier = serviceTier(msg)
 
-  return `## Assistant (${Locale.titlecase(msg.agent)} · ${modelName}${duration ? ` · ${duration}` : ""})\n\n`
+  return `## Assistant (${Locale.titlecase(msg.agent)} · ${modelName}${msg.model_resolved ? ` · served model: ${msg.model_resolved}` : ""}${tier.text ? ` · ${tier.text}` : ""}${duration ? ` · ${duration}` : ""})\n\n`
 }
 
 export function formatPart(part: Part, options: TranscriptOptions): string {
