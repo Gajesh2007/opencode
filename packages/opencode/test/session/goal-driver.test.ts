@@ -82,6 +82,8 @@ const fakeSessionPrompt = Layer.succeed(
   SessionPrompt.Service,
   SessionPrompt.Service.of({
     cancel: () => Effect.void,
+    interrupt: () => Effect.succeed({ interrupted: false, resumed: false }),
+    stopSubagents: () => Effect.succeed([]),
     prompt: () => Effect.succeed({} as MessageV2.WithParts),
     loop: (input) =>
       Effect.sync(() => {

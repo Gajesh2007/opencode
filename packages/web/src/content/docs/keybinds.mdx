@@ -51,6 +51,8 @@ OpenCode has a list of keybinds that you can customize through `tui.json`.
     "session_child_cycle_reverse": "left",
     "session_parent": "up",
     "session_background": "ctrl+b",
+    "server_pair": "none",
+    "subagent_stop_all": "<leader>k",
 
     "stash_delete": "ctrl+d",
     "shell_kill": "ctrl+d",
@@ -207,6 +209,14 @@ Some navigation keybinds intentionally do not use the leader key by default. For
 `session_background` (`ctrl+b`) moves whatever the session is waiting on to the background: running shell commands, subagents, and `!` commands. They keep running, and their results are reported back to the session when they finish. `/tasks` lists them, and `shell_kill` (`ctrl+d`) stops a running shell command from the task list or its output view.
 
 `session_background` was previously named `subagent_background`. The old name still works.
+
+Pressing `session_interrupt` (`escape`) twice stops only the current turn. Running subagents keep going: one the turn was waiting on moves to the background and reports back when it finishes. Anything you queued while the agent was working starts a new turn right away. To stop the session's subagents, use `subagent_stop_all` (`<leader>k`), or stop one from `/tasks`.
+
+---
+
+## Pairing a Device
+
+`/pair` (`server_pair`, unbound by default) opens a dialog with one-time links and a QR code that sign a browser or the OpenCode app in to this session's server. Links work once and expire after 5 minutes; the dialog issues fresh ones. Press `r` in the dialog to turn on remote access, which exposes the server to the internet through an end-to-end encrypted OpenTunnel route (you're asked to confirm the first time), and `tab` to switch the QR code between the app payload and a plain link.
 
 ---
 

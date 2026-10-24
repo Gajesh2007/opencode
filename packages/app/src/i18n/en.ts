@@ -336,6 +336,20 @@ export const dict = {
   "dialog.server.add.usernamePlaceholder": "username",
   "dialog.server.add.password": "Password (optional)",
   "dialog.server.add.passwordPlaceholder": "password",
+  "dialog.server.add.pairing.hint": "You can also paste a pairing link from opencode pair.",
+  "dialog.server.add.pairing.detected": "Pairing link detected. Adding the server signs this device in.",
+  "server.connect.scan": "Scan QR code",
+  "server.connect.scan.description": "Point your camera at the QR code shown by opencode pair.",
+  "server.connect.scan.invalid": "This is not an OpenCode pairing code. Scan the code shown by opencode pair.",
+  "server.connect.scan.failed": "This browser could not read the QR code. Paste the pairing link instead.",
+  "server.connect.link.expired": "This pairing link expired or was already used. Run opencode pair to get a new one.",
+  "server.connect.link.unreachable":
+    "Could not reach {{url}}. Check that this device can reach the server, then try again.",
+  "server.connect.mixedContent":
+    "Could not connect to this HTTP server from an HTTPS page. Use an HTTPS server address instead.",
+  "server.connect.camera": "Pairing camera",
+  "server.connect.camera.starting": "Opening camera...",
+  "server.connect.camera.error": "Could not open the camera. Allow camera access, or paste the pairing link instead.",
   "dialog.server.edit.title": "Edit server",
   "dialog.server.default.title": "Default server",
   "dialog.server.default.description":

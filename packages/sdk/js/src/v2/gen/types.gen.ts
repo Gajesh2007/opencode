@@ -1505,6 +1505,13 @@ export type PairingCode = {
   expires_in: number
 }
 
+export type RemoteStatus = {
+  enabled: boolean
+  state: "off" | "provisioning" | "connecting" | "connected" | "error"
+  url?: string
+  error?: string
+}
+
 export type Model = {
   id: string
   providerID: string
@@ -4451,6 +4458,66 @@ export type ServerPairResponses = {
 
 export type ServerPairResponse = ServerPairResponses[keyof ServerPairResponses]
 
+export type ServerRemoteData = {
+  body?: never
+  path?: never
+  query?: never
+  url: "/api/remote"
+}
+
+export type ServerRemoteErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * Unauthorized
+   */
+  401: unknown
+}
+
+export type ServerRemoteError = ServerRemoteErrors[keyof ServerRemoteErrors]
+
+export type ServerRemoteResponses = {
+  /**
+   * Remote access status
+   */
+  200: RemoteStatus
+}
+
+export type ServerRemoteResponse = ServerRemoteResponses[keyof ServerRemoteResponses]
+
+export type ServerRemoteUpdateData = {
+  body?: {
+    enabled: boolean
+  }
+  path?: never
+  query?: never
+  url: "/api/remote"
+}
+
+export type ServerRemoteUpdateErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * Unauthorized
+   */
+  401: unknown
+}
+
+export type ServerRemoteUpdateError = ServerRemoteUpdateErrors[keyof ServerRemoteUpdateErrors]
+
+export type ServerRemoteUpdateResponses = {
+  /**
+   * Remote access status after the change
+   */
+  200: RemoteStatus
+}
+
+export type ServerRemoteUpdateResponse = ServerRemoteUpdateResponses[keyof ServerRemoteUpdateResponses]
+
 export type EventSubscribeData = {
   body?: never
   path?: never
@@ -7159,6 +7226,90 @@ export type SessionAbortResponses = {
 }
 
 export type SessionAbortResponse = SessionAbortResponses[keyof SessionAbortResponses]
+
+export type SessionInterruptData = {
+  body?: {
+    resume?: boolean
+  }
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/interrupt"
+}
+
+export type SessionInterruptErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionInterruptError = SessionInterruptErrors[keyof SessionInterruptErrors]
+
+export type SessionInterruptResponses = {
+  /**
+   * Interrupt result
+   */
+  200: {
+    /**
+     * A turn or shell command was running and is now stopped
+     */
+    interrupted: boolean
+    /**
+     * A new turn started for user input queued behind the stopped one
+     */
+    resumed: boolean
+  }
+}
+
+export type SessionInterruptResponse = SessionInterruptResponses[keyof SessionInterruptResponses]
+
+export type SessionStopSubagentsData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/subagents/stop"
+}
+
+export type SessionStopSubagentsErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionStopSubagentsError = SessionStopSubagentsErrors[keyof SessionStopSubagentsErrors]
+
+export type SessionStopSubagentsResponses = {
+  /**
+   * Stopped subagents
+   */
+  200: {
+    /**
+     * Session IDs of the stopped subagents, including subagents they spawned
+     */
+    stopped: Array<string>
+  }
+}
+
+export type SessionStopSubagentsResponse = SessionStopSubagentsResponses[keyof SessionStopSubagentsResponses]
 
 export type SessionBackgroundData = {
   body?: never

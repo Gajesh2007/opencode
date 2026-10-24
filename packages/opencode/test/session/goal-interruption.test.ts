@@ -60,6 +60,8 @@ const prompt = Layer.effect(
     const state = yield* SessionRunState.Service
     return SessionPrompt.Service.of({
       cancel: () => Effect.die("unexpected prompt.cancel"),
+      interrupt: () => Effect.die("unexpected prompt.interrupt"),
+      stopSubagents: () => Effect.die("unexpected prompt.stopSubagents"),
       prompt: () => Effect.die("unexpected prompt.prompt"),
       command: () => Effect.die("unexpected prompt.command"),
       shell: () => Effect.die("unexpected prompt.shell"),

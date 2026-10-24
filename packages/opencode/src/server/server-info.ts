@@ -3,15 +3,28 @@ export * as ServerInfo from "./server-info"
 import { networkInterfaces } from "node:os"
 
 let current: ReadonlyArray<string> = []
+let remote: ReadonlyArray<string> = []
 
-// Registered by Server.listen so /api/info can advertise every address the
+// Registered by Server.listen so /global/info can advertise every address the
 // server is reachable on. The last listener wins, matching Server.url.
 export function setURLs(urls: ReadonlyArray<string>) {
   current = urls
 }
 
+// Remote access URLs (an OpenTunnel route) while the tunnel is attached.
+export function setRemoteURLs(urls: ReadonlyArray<string>) {
+  remote = urls
+}
+
+/** Local addresses first, then remote ones. */
 export function urls() {
-  return current
+  return [...current, ...remote]
+}
+
+/** "host:port" of the network listener, for remote access to route to; undefined without a listener. */
+export function target() {
+  const first = current[0]
+  return first ? new URL(first).host : undefined
 }
 
 // Expand wildcard bindings into the concrete addresses a client can use.

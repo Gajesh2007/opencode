@@ -74,6 +74,9 @@ const resumeWhenIdle = Effect.fn("BackgroundNotify.resumeWhenIdle")(function* (
   // Anything newer than the notice means its turn already saw it: a newer user message starts its own
   // turn, and a newer reply means the busy turn picked the notice up.
   if (messages[0]?.info.id !== input.userID) return
+  // A session the user stopped (e.g. interrupted while subagents kept running) would not resume, so it is not
+  // announced; the notice waits for the next turn.
+  if (input.ops.stopped && (yield* input.ops.stopped(input.sessionID))) return
   yield* deps.bus.publish(TuiEvent.ToastShow, { ...input.toast, duration: 5000 })
   yield* input.ops
     .loop({ sessionID: input.sessionID })

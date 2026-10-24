@@ -102,6 +102,16 @@ export const BackgroundItem = Schema.Struct({
   type: Schema.String,
   title: Schema.optional(Schema.String),
 }).annotate({ identifier: "SessionBackgroundItem" })
+export const InterruptPayload = Schema.Struct(Struct.omit(SessionPrompt.InterruptInput.fields, ["sessionID"]))
+export const InterruptResult = Schema.Struct({
+  interrupted: Schema.Boolean.annotate({ description: "A turn or shell command was running and is now stopped" }),
+  resumed: Schema.Boolean.annotate({ description: "A new turn started for user input queued behind the stopped one" }),
+})
+export const StopSubagentsResult = Schema.Struct({
+  stopped: Schema.Array(SessionID).annotate({
+    description: "Session IDs of the stopped subagents, including subagents they spawned",
+  }),
+})
 
 export const SessionPaths = {
   list: root,
@@ -120,6 +130,8 @@ export const SessionPaths = {
   update: `${root}/:sessionID`,
   fork: `${root}/:sessionID/fork`,
   abort: `${root}/:sessionID/abort`,
+  interrupt: `${root}/:sessionID/interrupt`,
+  stopSubagents: `${root}/:sessionID/subagents/stop`,
   background: `${root}/:sessionID/background`,
   share: `${root}/:sessionID/share`,
   init: `${root}/:sessionID/init`,
@@ -342,7 +354,35 @@ export const SessionApi = HttpApi.make("session")
           OpenApi.annotations({
             identifier: "session.abort",
             summary: "Abort session",
-            description: "Abort an active session and stop any ongoing AI processing or command execution.",
+            description:
+              "Abort an active session and stop any ongoing AI processing or command execution, including every subagent it spawned.",
+          }),
+        ),
+        HttpApiEndpoint.post("interrupt", SessionPaths.interrupt, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          payload: Schema.optional(InterruptPayload),
+          success: described(InterruptResult, "Interrupt result"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.interrupt",
+            summary: "Interrupt session",
+            description:
+              "Stop the session's current turn and its foreground shell commands, but not its subagents: they keep running in the background and report back when they finish. With resume, user input queued behind the turn starts a new turn right away; otherwise the session stays stopped.",
+          }),
+        ),
+        HttpApiEndpoint.post("stopSubagents", SessionPaths.stopSubagents, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          success: described(StopSubagentsResult, "Stopped subagents"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.stopSubagents",
+            summary: "Stop subagents",
+            description:
+              "Stop every running subagent of the session, including the subagents they spawned, without interrupting the session's own turn or its shell commands.",
           }),
         ),
         HttpApiEndpoint.post("background", SessionPaths.background, {

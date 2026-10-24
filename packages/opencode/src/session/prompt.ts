@@ -34,6 +34,7 @@ import { Permission } from "@/permission"
 import { SessionStatus } from "./status"
 import { LLM } from "./llm"
 import { Shell } from "@/shell/shell"
+import { ServerAuth } from "@/server/auth"
 import { ShellProcess } from "@/shell/process"
 import { BackgroundJob } from "@/background/job"
 import { BackgroundNotify } from "@/background/notify"
@@ -46,7 +47,7 @@ import { Process } from "@/util/process"
 import { Cause, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Types } from "effect"
 import * as EffectLogger from "@opencode-ai/core/effect/logger"
 import { InstanceState } from "@/effect/instance-state"
-import { TaskTool, type TaskPromptOps } from "@/tool/task"
+import { TaskTool, interruptedOutput, type TaskPromptOps } from "@/tool/task"
 import { SessionRunState } from "./run-state"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -101,7 +102,15 @@ const MAX_REASONING_REDIRECTS = 2
 const SNAPSHOT_CARRY_MS = 1_000
 
 export interface Interface {
+  /** Stops the session's turn and all of its subagents. */
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
+  /**
+   * Stops the session's turn but leaves its subagents running. With `resume`, input queued behind the turn
+   * starts a new turn right away; otherwise the session stays stopped.
+   */
+  readonly interrupt: (input: InterruptInput) => Effect.Effect<InterruptResult>
+  /** Stops the session's running subagents (recursively) without interrupting its own turn. */
+  readonly stopSubagents: (sessionID: SessionID) => Effect.Effect<SessionID[]>
   readonly prompt: (input: PromptInput) => Effect.Effect<MessageV2.WithParts, Image.Error>
   readonly loop: (input: LoopInput, signal?: AbortSignal) => Effect.Effect<MessageV2.WithParts>
   readonly shell: (input: ShellInput) => Effect.Effect<MessageV2.WithParts, Session.BusyError>
@@ -155,12 +164,46 @@ export const layer = Layer.effect(
         resolvePromptParts: (template: string) => resolvePromptParts(template),
         prompt: (input: PromptInput) => prompt(input).pipe(Effect.catch(Effect.die)),
         loop: (input: LoopInput) => loop(input),
+        stopped: (sessionID: SessionID) => state.continuation(sessionID).pipe(Effect.map((signal) => signal.aborted)),
       } satisfies TaskPromptOps
     })
 
     const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
       yield* elog.info("cancel", { sessionID })
       yield* state.cancel(sessionID)
+    })
+
+    // The newest user message when each running loop began, i.e. the input the loop was started for.
+    // Input newer than it (and than the last reply) was queued while the loop ran.
+    const turnInputs = new Map<SessionID, MessageID>()
+
+    const interrupt = Effect.fn("SessionPrompt.interrupt")(function* (input: InterruptInput) {
+      yield* elog.info("interrupt", { sessionID: input.sessionID, resume: input.resume })
+      const turnInput = turnInputs.get(input.sessionID)
+      const interrupted = yield* state.interrupt(input.sessionID)
+      if (!input.resume || !(yield* hasQueuedInput(input.sessionID, turnInput))) return { interrupted, resumed: false }
+      // Queued input is explicit user intent, so it renews the continuation the interrupt just aborted.
+      const signal = yield* state.resume(input.sessionID)
+      yield* loop({ sessionID: input.sessionID }, signal).pipe(
+        Effect.ignore,
+        Effect.forkIn(scope, { startImmediately: true }),
+      )
+      return { interrupted, resumed: true }
+    })
+
+    // Whether real user input (not only synthetic notices) waits behind the session's last reply and behind the
+    // input its interrupted loop was started for.
+    const hasQueuedInput = Effect.fnUntraced(function* (sessionID: SessionID, turnInput?: MessageID) {
+      const latest = yield* sessions
+        .findMessage(sessionID, (item) => item.info.role === "assistant" || isExplicitInput(item))
+        .pipe(Effect.orElseSucceed(() => Option.none<MessageV2.WithParts>()))
+      if (Option.isNone(latest) || latest.value.info.role !== "user") return false
+      return turnInput === undefined || latest.value.info.id > turnInput
+    })
+
+    const stopSubagents = Effect.fn("SessionPrompt.stopSubagents")(function* (sessionID: SessionID) {
+      yield* elog.info("stopSubagents", { sessionID })
+      return yield* state.stopSubagents(sessionID)
     })
 
     const resolvePromptParts = Effect.fn("SessionPrompt.resolvePromptParts")(function* (template: string) {
@@ -449,18 +492,32 @@ export const layer = Layer.effect(
               assistantMessage.finish = "tool-calls"
               assistantMessage.time.completed = Date.now()
               yield* sessions.updateMessage(assistantMessage)
-              if (part.state.status === "running") {
-                yield* sessions.updatePart({
-                  ...part,
-                  state: {
-                    status: "error",
-                    error: "Cancelled",
-                    time: { start: part.state.time.start, end: Date.now() },
-                    metadata: part.state.metadata,
-                    input: part.state.input,
-                  },
-                } satisfies MessageV2.ToolPart)
-              }
+              if (part.state.status !== "running") return
+              // Interrupting the turn leaves its subagent running in the background (see TaskTool), unless the
+              // subagent was stopped too. A running one reports its result to the session when it finishes.
+              const childID = part.state.metadata?.sessionId
+              const job = typeof childID === "string" ? yield* jobs.get(childID) : undefined
+              const time = { start: part.state.time.start, end: Date.now() }
+              yield* sessions.updatePart({
+                ...part,
+                state:
+                  job?.background && job.status !== "cancelled"
+                    ? {
+                        status: "completed",
+                        input: part.state.input,
+                        title: part.state.title ?? task.description,
+                        metadata: { ...part.state.metadata, background: true },
+                        output: interruptedOutput(job.id),
+                        time,
+                      }
+                    : {
+                        status: "error",
+                        error: "Cancelled",
+                        time,
+                        metadata: part.state.metadata,
+                        input: part.state.input,
+                      },
+              } satisfies MessageV2.ToolPart)
             }),
           ),
           Effect.onExit((exit) =>
@@ -776,8 +833,7 @@ export const layer = Layer.effect(
                   callID: part.callID,
                   spawn: ChildProcess.make(sh, args, {
                     cwd,
-                    extendEnv: true,
-                    env: { ...shellEnv.env, TERM: "dumb" },
+                    env: { ...ServerAuth.withoutSecrets(process.env), ...shellEnv.env, TERM: "dumb" },
                     stdin: "ignore",
                     // Signals then reach the command's whole process group.
                     detached: process.platform !== "win32",
@@ -1516,13 +1572,15 @@ export const layer = Layer.effect(
           }
 
           step++
-          if (step === 1)
+          if (step === 1) {
+            turnInputs.set(sessionID, lastUser.id)
             yield* title({
               session,
               modelID: lastUser.model.modelID,
               providerID: lastUser.model.providerID,
               history: msgs,
             }).pipe(Effect.ignore, Effect.forkIn(scope))
+          }
 
           const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
           const task = tasks.pop()
@@ -1861,6 +1919,7 @@ export const layer = Layer.effect(
         yield* compaction.prune({ sessionID }).pipe(Effect.ignore, Effect.forkIn(scope))
         return yield* lastAssistant(sessionID)
       },
+      (effect, sessionID) => effect.pipe(Effect.ensuring(Effect.sync(() => turnInputs.delete(sessionID)))),
     )
 
     const loop: Interface["loop"] = Effect.fn("SessionPrompt.loop")(function* (input: LoopInput, signal?: AbortSignal) {
@@ -2012,6 +2071,8 @@ export const layer = Layer.effect(
 
     return Service.of({
       cancel,
+      interrupt,
+      stopSubagents,
       prompt,
       loop,
       shell,
@@ -2100,6 +2161,22 @@ export type PromptInput = Schema.Schema.Type<typeof PromptInput>
 export class LoopInput extends Schema.Class<LoopInput>("SessionPrompt.LoopInput")({
   sessionID: SessionID,
 }) {}
+
+export const InterruptInput = Schema.Struct({
+  sessionID: SessionID,
+  resume: Schema.optional(Schema.Boolean).annotate({
+    description:
+      "Start a new turn right away when user input was queued behind the interrupted turn. Without queued input the session stays stopped.",
+  }),
+})
+export type InterruptInput = Schema.Schema.Type<typeof InterruptInput>
+
+export type InterruptResult = {
+  /** A turn (or `!` command) was running and is now stopped. */
+  interrupted: boolean
+  /** A new turn started for input queued behind the interrupted one. */
+  resumed: boolean
+}
 
 export const ShellInput = Schema.Struct({
   sessionID: SessionID,
@@ -2209,6 +2286,16 @@ function formatLens(basePrompt: string): string {
     "Apply this lens to how you reason. Your reasoning is reviewed against it after each step.",
     "</thinking_lens>",
   ].join("\n")
+}
+
+// Input someone chose to send, as opposed to synthetic notices, undelivered mail, and automatic compaction.
+function isExplicitInput(message: MessageV2.WithParts) {
+  if (message.info.role !== "user") return false
+  return message.parts.some((part) => {
+    if (part.type === "text") return !part.synthetic && !part.ignored
+    if (part.type === "compaction") return !part.auto
+    return true
+  })
 }
 
 function reasoningOf(parts: readonly MessageV2.Part[]): string {

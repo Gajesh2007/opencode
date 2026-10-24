@@ -90,3 +90,9 @@ void Log.init({
 })
 
 initProjectors()
+
+// No test may load the real tunnel: it would contact opentunnel.xyz and expose this machine to the internet.
+// Tests that exercise remote access install their own fake with RemoteAccess.setTunnel.
+const { RemoteAccess } = await import("../src/server/remote")
+const forbidden = () => Promise.reject(new Error("tests must not load the real remote access tunnel"))
+RemoteAccess.setTunnel({ hostname: forbidden, run: forbidden })

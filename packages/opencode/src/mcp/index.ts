@@ -13,6 +13,7 @@ import {
   ToolListChangedNotificationSchema,
 } from "@modelcontextprotocol/sdk/types.js"
 import { Config } from "@/config/config"
+import { ServerAuth } from "@/server/auth"
 import { ConfigMCP } from "../config/mcp"
 import * as Log from "@opencode-ai/core/util/log"
 import { NamedError } from "@opencode-ai/core/util/error"
@@ -430,7 +431,7 @@ export const layer = Layer.effect(
         args,
         cwd,
         env: {
-          ...process.env,
+          ...ServerAuth.withoutSecrets(process.env),
           ...(cmd === "opencode" ? { BUN_BE_BUN: "1" } : {}),
           ...mcp.environment,
         },

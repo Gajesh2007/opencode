@@ -1,12 +1,13 @@
 import { NodeHttpServer } from "@effect/platform-node"
 import { describe, expect } from "bun:test"
 import { Effect, Layer, Option, Schema } from "effect"
-import { HttpClient, HttpClientRequest, HttpRouter } from "effect/unstable/http"
+import { HttpClient, HttpClientRequest, HttpRouter, HttpServerResponse } from "effect/unstable/http"
 import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiError, HttpApiGroup } from "effect/unstable/httpapi"
 import { ServerAuth } from "../../src/server/auth"
 import {
   Authorization,
   authorizationLayer,
+  authorizationRouterMiddleware,
   V2Authorization,
   v2AuthorizationLayer,
 } from "../../src/server/routes/instance/httpapi/middleware/authorization"
@@ -56,24 +57,46 @@ const v2ApiLayer = HttpRouter.serve(
   { disableListenLog: true, disableLogger: true },
 ).pipe(Layer.provideMerge(NodeHttpServer.layerTest))
 
+// Raw routes (UI fallback, docs, PTY upgrades) are guarded by the router middleware instead of HttpApi middleware.
+const rawLayer = HttpRouter.serve(
+  HttpRouter.use((router) => router.add("GET", "/raw", () => Effect.succeed(HttpServerResponse.text("ok")))).pipe(
+    Layer.provide(authorizationRouterMiddleware.layer),
+  ),
+  { disableListenLog: true, disableLogger: true },
+).pipe(Layer.provideMerge(NodeHttpServer.layerTest))
+
 const noAuthLayer = ServerAuth.Config.layer({ password: Option.none(), username: "opencode" })
 const secretLayer = ServerAuth.Config.layer({ password: Option.some("secret"), username: "opencode" })
 const kitSecretLayer = ServerAuth.Config.layer({ password: Option.some("secret"), username: "kit" })
+const colonSecretLayer = ServerAuth.Config.layer({ password: Option.some("se:cr:et"), username: "opencode" })
 
 const it = testEffect(apiLayer.pipe(Layer.provide(noAuthLayer)))
 const itSecret = testEffect(apiLayer.pipe(Layer.provide(secretLayer)))
 const itKitSecret = testEffect(apiLayer.pipe(Layer.provide(kitSecretLayer)))
+const itColonSecret = testEffect(apiLayer.pipe(Layer.provide(colonSecretLayer)))
 const itV2Secret = testEffect(v2ApiLayer.pipe(Layer.provide(secretLayer)))
+const itRawSecret = testEffect(rawLayer.pipe(Layer.provide(secretLayer)))
+const itRawColonSecret = testEffect(rawLayer.pipe(Layer.provide(colonSecretLayer)))
+
+const CHALLENGE = 'Basic realm="Secure Area"'
 
 const basic = (username: string, password: string) => ServerAuth.header({ username, password }) ?? ""
 
 const token = (username: string, password: string) => Buffer.from(`${username}:${password}`).toString("base64")
 
-const getProbe = (headers?: Record<string, string>) =>
-  HttpClientRequest.get("/probe").pipe(
+const get = (path: string, headers?: Record<string, string>) =>
+  HttpClientRequest.get(path).pipe(
     headers ? HttpClientRequest.setHeaders(headers) : (request) => request,
     HttpClient.execute,
   )
+
+const getProbe = (headers?: Record<string, string>) => get("/probe", headers)
+
+// Unauthenticated requests as sent by a non-browser client, a page navigation, and a browser fetch.
+const challengeProbes = (path: string) =>
+  Effect.all([get(path), get(path, { "sec-fetch-mode": "navigate" }), get(path, { "sec-fetch-mode": "cors" })], {
+    concurrency: "unbounded",
+  })
 
 describe("HttpApi authorization middleware", () => {
   it.live("allows requests when server password is not configured", () =>
@@ -169,6 +192,77 @@ describe("HttpApi authorization middleware", () => {
       expect(response.status).toBe(401)
       expect(response.headers["www-authenticate"] ?? "").toContain("Basic")
       expect(body).toEqual({ _tag: "UnauthorizedError", message: "Authentication required" })
+    }),
+  )
+
+  itColonSecret.live("accepts passwords containing colons", () =>
+    Effect.gen(function* () {
+      const [header, query, truncated] = yield* Effect.all(
+        [
+          getProbe({ authorization: basic("opencode", "se:cr:et") }),
+          HttpClient.get(`/probe?auth_token=${encodeURIComponent(token("opencode", "se:cr:et"))}`),
+          getProbe({ authorization: basic("opencode", "se") }),
+        ],
+        { concurrency: "unbounded" },
+      )
+
+      expect(header.status).toBe(200)
+      expect(query.status).toBe(200)
+      expect(truncated.status).toBe(401)
+    }),
+  )
+
+  itSecret.live("challenges only non-browser clients and page navigations", () =>
+    Effect.gen(function* () {
+      const [client, navigation, fetch] = yield* challengeProbes("/probe")
+
+      expect([client.status, navigation.status, fetch.status]).toEqual([401, 401, 401])
+      expect(client.headers["www-authenticate"]).toBe(CHALLENGE)
+      expect(navigation.headers["www-authenticate"]).toBe(CHALLENGE)
+      // A Basic challenge on fetch makes browsers show a native prompt instead of the app's sign-in screen.
+      expect(fetch.headers["www-authenticate"]).toBeUndefined()
+    }),
+  )
+
+  itV2Secret.live("challenges only non-browser clients and page navigations on v2 routes", () =>
+    Effect.gen(function* () {
+      const [client, navigation, fetch] = yield* challengeProbes("/api/probe")
+
+      expect([client.status, navigation.status, fetch.status]).toEqual([401, 401, 401])
+      expect(client.headers["www-authenticate"]).toBe(CHALLENGE)
+      expect(navigation.headers["www-authenticate"]).toBe(CHALLENGE)
+      expect(fetch.headers["www-authenticate"]).toBeUndefined()
+      expect(yield* fetch.json).toEqual({ _tag: "UnauthorizedError", message: "Authentication required" })
+    }),
+  )
+})
+
+describe("raw route authorization middleware", () => {
+  itRawSecret.live("challenges only non-browser clients and page navigations", () =>
+    Effect.gen(function* () {
+      const [client, navigation, fetch] = yield* challengeProbes("/raw")
+
+      expect([client.status, navigation.status, fetch.status]).toEqual([401, 401, 401])
+      expect(client.headers["www-authenticate"]).toBe(CHALLENGE)
+      expect(navigation.headers["www-authenticate"]).toBe(CHALLENGE)
+      expect(fetch.headers["www-authenticate"]).toBeUndefined()
+    }),
+  )
+
+  itRawColonSecret.live("accepts passwords containing colons", () =>
+    Effect.gen(function* () {
+      const [header, query, truncated] = yield* Effect.all(
+        [
+          get("/raw", { authorization: basic("opencode", "se:cr:et") }),
+          HttpClient.get(`/raw?auth_token=${encodeURIComponent(token("opencode", "se:cr:et"))}`),
+          get("/raw", { authorization: basic("opencode", "se") }),
+        ],
+        { concurrency: "unbounded" },
+      )
+
+      expect(header.status).toBe(200)
+      expect(query.status).toBe(200)
+      expect(truncated.status).toBe(401)
     }),
   )
 })

@@ -2,9 +2,22 @@ import { Schema } from "effect"
 import { HttpApi, HttpApiEndpoint, HttpApiGroup, OpenApi } from "effect/unstable/httpapi"
 import { described } from "./metadata"
 import { SchemaErrorMiddleware } from "../middleware/schema-error"
-import { UnauthorizedError } from "../errors"
+import { InvalidRequestError, UnauthorizedError } from "../errors"
 
 export const PAIRING_CONNECT_PATH = "/auth/connect/:code"
+
+export const RemoteStatus = Schema.Struct({
+  enabled: Schema.Boolean,
+  // "provisioning": this device has no tunnel yet; issuing its certificate can take a minute.
+  state: Schema.Literals(["off", "provisioning", "connecting", "connected", "error"]),
+  url: Schema.optional(Schema.String),
+  error: Schema.optional(Schema.String),
+}).annotate({ identifier: "RemoteStatus" })
+export type RemoteStatus = typeof RemoteStatus.Type
+
+export const RemoteUpdate = Schema.Struct({
+  enabled: Schema.Boolean,
+})
 
 export const PairingCode = Schema.Struct({
   code: Schema.String,
@@ -32,6 +45,27 @@ export const ServerApi = HttpApi.make("server").add(
           identifier: "server.pair",
           summary: "Create pairing code",
           description: "Create a short-lived, single-use code for a /auth/connect/:code pairing link.",
+        }),
+      ),
+      HttpApiEndpoint.get("remote", "/api/remote", {
+        success: described(RemoteStatus, "Remote access status"),
+      }).annotateMerge(
+        OpenApi.annotations({
+          identifier: "server.remote",
+          summary: "Get remote access status",
+          description: "Whether this server is reachable from the internet through its OpenTunnel route, and at which URL.",
+        }),
+      ),
+      HttpApiEndpoint.post("remoteUpdate", "/api/remote", {
+        payload: RemoteUpdate,
+        success: described(RemoteStatus, "Remote access status after the change"),
+        error: InvalidRequestError,
+      }).annotateMerge(
+        OpenApi.annotations({
+          identifier: "server.remoteUpdate",
+          summary: "Turn remote access on or off",
+          description:
+            "Expose this server to the internet through an end-to-end encrypted OpenTunnel route, or stop. Requires a server password and a network listener. The tunnel attaches in the background; poll server.remote for its URL. Clients must ask the user before enabling it the first time.",
         }),
       ),
     )

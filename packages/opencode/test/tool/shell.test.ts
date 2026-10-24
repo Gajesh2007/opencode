@@ -196,6 +196,32 @@ describe("tool.shell", () => {
     ),
   )
 
+  ;(process.platform === "win32" ? it.live.skip : it.live)("hides the server password from commands", () =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => {
+        const previous = process.env.OPENCODE_SERVER_PASSWORD
+        process.env.OPENCODE_SERVER_PASSWORD = "pairing-secret"
+        return previous
+      }),
+      () =>
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            const result = yield* run({
+              command: `printf '%s' "\${OPENCODE_SERVER_PASSWORD:-unset}"`,
+              description: "Print the server password",
+            })
+            expect(result.output).toBe("unset")
+          }),
+        ),
+      (previous) =>
+        Effect.sync(() => {
+          if (previous === undefined) delete process.env.OPENCODE_SERVER_PASSWORD
+          if (previous !== undefined) process.env.OPENCODE_SERVER_PASSWORD = previous
+        }),
+    ),
+  )
+
   it.live("falls back from terminal-only configured shell", () =>
     Effect.gen(function* () {
       const tmp = yield* tmpdirScoped({ config: { shell: "fish" } })

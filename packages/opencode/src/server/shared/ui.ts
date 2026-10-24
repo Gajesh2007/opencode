@@ -9,7 +9,8 @@ let embeddedUIPromise: Promise<Record<string, string> | null> | undefined
 export const UI_UPSTREAM = new URL("https://app.opencode.ai")
 
 export const csp = (hash = "") =>
-  `default-src 'self'; script-src 'self' 'wasm-unsafe-eval'${hash ? ` 'sha256-${hash}'` : ""}; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; media-src 'self' data:; connect-src * data:`
+  // `worker-src blob:` lets the web app's QR scanner run its decoder worker on browsers without a native barcode API.
+  `default-src 'self'; script-src 'self' 'wasm-unsafe-eval'${hash ? ` 'sha256-${hash}'` : ""}; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; media-src 'self' data:; connect-src * data:; worker-src 'self' blob:`
 export const DEFAULT_CSP = csp()
 
 export function themePreloadHash(body: string) {
@@ -25,6 +26,16 @@ function requestBody(request: HttpServerRequest.HttpServerRequest) {
   if (request.method === "GET" || request.method === "HEAD") return HttpBody.empty
   const len = request.headers["content-length"]
   return HttpBody.stream(request.stream, request.headers["content-type"], len === undefined ? undefined : Number(len))
+}
+
+function proxyRequestHeaders(headers: HttpServerRequest.HttpServerRequest["headers"]) {
+  const result = ProxyUtil.headers(headers, { host: UI_UPSTREAM.host })
+  // The upstream UI is a third party: never forward this server's credentials to it. Besides Basic auth and
+  // session cookies, the referer of a page opened with an `auth_token` query carries the password too.
+  result.delete("authorization")
+  result.delete("cookie")
+  result.delete("referer")
+  return result
 }
 
 function proxyResponseHeaders(headers: Record<string, string>) {
@@ -87,7 +98,7 @@ export function serveUIEffect(
 
     const response = yield* services.client.execute(
       HttpClientRequest.make(request.method)(upstreamURL(path), {
-        headers: ProxyUtil.headers(request.headers, { host: UI_UPSTREAM.host }),
+        headers: proxyRequestHeaders(request.headers),
         body: requestBody(request),
       }),
     )

@@ -53,6 +53,7 @@ const TOP_LEVEL = [
   "upgrade",
   "uninstall",
   "serve",
+  "pair",
   "web",
   "models",
   "stats",

@@ -166,6 +166,7 @@ const sessionBindingCommands = [
   "session.parent",
   "session.child.next",
   "session.child.previous",
+  "subagent.stop_all",
 ] as const
 
 const context = createContext<{
@@ -671,6 +672,25 @@ export function Session() {
             variant: "error",
           })
         }
+      },
+    },
+    {
+      // Interrupting (esc) leaves subagents running; this stops them without stopping the session's own turn.
+      title: "Stop subagents",
+      value: "subagent.stop_all",
+      category: "Session",
+      run: async () => {
+        dialog.clear()
+        const result = await sdk.client.session.stopSubagents({ sessionID: route.sessionID }).catch(() => undefined)
+        if (!result?.data) {
+          toast.show({ message: "Failed to stop subagents", variant: "error" })
+          return
+        }
+        const count = result.data.stopped.length
+        toast.show({
+          message: count ? `Stopped ${count} subagent${count === 1 ? "" : "s"}` : "No subagents running",
+          variant: count ? "success" : "info",
+        })
       },
     },
     {

@@ -10,6 +10,8 @@ export interface TaskPromptOps {
   resolvePromptParts(template: string): Effect.Effect<SessionPrompt.PromptInput["parts"]>
   prompt(input: SessionPrompt.PromptInput): Effect.Effect<MessageV2.WithParts>
   loop(input: SessionPrompt.LoopInput): Effect.Effect<MessageV2.WithParts>
+  /** Whether the user stopped the session, so automatic wakeups must leave it alone until new input arrives. */
+  stopped?(sessionID: SessionID): Effect.Effect<boolean>
 }
 
 const CONTINUE_REPLY_ATTEMPTS = 2

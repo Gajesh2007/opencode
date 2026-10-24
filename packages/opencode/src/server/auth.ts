@@ -28,11 +28,13 @@ export function required(config: Info) {
   return Option.isSome(config.password) && config.password.value !== ""
 }
 
-// Session tokens issued by pairing links are accepted anywhere the password is.
+// Session tokens issued by pairing links are accepted anywhere the password is. A token proves itself, so
+// it is accepted under any username: paired clients can't know a custom OPENCODE_SERVER_USERNAME.
 export function authorized(credentials: DecodedCredentials, config: Info) {
-  if (Option.isNone(config.password) || credentials.username !== config.username) return false
+  if (Option.isNone(config.password)) return false
   const password = Redacted.value(credentials.password)
-  return password === config.password.value || verifySession(password, config)
+  if (verifySession(password, config)) return true
+  return credentials.username === config.username && password === config.password.value
 }
 
 // Sessions are signed with a key derived from the server password, so rotating the password revokes every session.
@@ -76,4 +78,14 @@ export function headers(credentials?: Credentials) {
   const authorization = header(credentials)
   if (!authorization) return undefined
   return { Authorization: authorization }
+}
+
+/**
+ * `env` without the server password, for processes whose output reaches the transcript or that run code
+ * on a model's behalf. The TUI worker carries the pairing password in its env, and printing the
+ * environment must not leak a credential that grants remote access to this machine.
+ */
+export function withoutSecrets(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const { OPENCODE_SERVER_PASSWORD: _, ...rest } = env
+  return rest
 }

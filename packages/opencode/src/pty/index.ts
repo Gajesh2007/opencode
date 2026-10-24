@@ -6,6 +6,7 @@ import { EffectBridge } from "@/effect/bridge"
 import { lazy } from "@opencode-ai/core/util/lazy"
 import { Plugin } from "@/plugin"
 import { Shell } from "@/shell/shell"
+import { ServerAuth } from "@/server/auth"
 import type { Proc } from "#pty"
 import * as Log from "@opencode-ai/core/util/log"
 import { PtyID } from "./schema"
@@ -195,7 +196,7 @@ export const layer = Layer.effect(
       const cwd = input.cwd || s.dir
       const shell = yield* plugin.trigger("shell.env", { cwd }, { env: {} })
       const env = {
-        ...process.env,
+        ...ServerAuth.withoutSecrets(process.env),
         ...input.env,
         ...shell.env,
         TERM: "xterm-256color",

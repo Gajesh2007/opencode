@@ -1,10 +1,11 @@
 import { afterEach, describe, expect } from "bun:test"
-import { Effect, Exit, Fiber, Layer, Option } from "effect"
+import { Effect, Exit, Fiber, Layer, Option, Stream } from "effect"
 import { Agent } from "../../src/agent/agent"
 import { SubagentLimit } from "@/agent/subagent-limit"
 import { Team } from "@/agent/team"
 import { BackgroundJob } from "@/background/job"
 import { Bus } from "@/bus"
+import { TuiEvent } from "@/cli/cmd/tui/event"
 import { Config } from "@/config/config"
 import { Plugin } from "@/plugin"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -20,7 +21,7 @@ import { Truncate } from "@/tool/truncate"
 import { ToolRegistry } from "@/tool/registry"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { disposeAllInstances } from "../fixture/fixture"
-import { testEffect } from "../lib/effect"
+import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
 
 afterEach(async () => {
   await disposeAllInstances()
@@ -296,27 +297,39 @@ describe("tool.task", () => {
     }),
   )
 
-  it.instance("execute cancels child session when abort signal fires", () =>
+  // A subagent the interrupted turn waited for. It finishes once `finish` resolves; its completion notice for the
+  // parent lands in `delivered`.
+  function slowSubagent() {
+    const started = defer<SessionPrompt.PromptInput>()
+    const finish = defer<void>()
+    const delivered = defer<SessionPrompt.PromptInput>()
+    const cancelled: SessionID[] = []
+    const promptOps: TaskPromptOps = {
+      ...stubOps(),
+      cancel: (sessionID) =>
+        Effect.sync(() => {
+          cancelled.push(sessionID)
+        }),
+      prompt: (input) => {
+        if (input.noReply)
+          return Effect.sync(() => {
+            delivered.resolve(input)
+            return reply(input, "")
+          })
+        started.resolve(input)
+        return Effect.promise(() => finish.promise).pipe(Effect.as(reply(input, "subagent result")))
+      },
+    }
+    return { started, finish, delivered, cancelled, promptOps }
+  }
+
+  it.instance("execute leaves the subagent running in the background when the abort signal fires", () =>
     Effect.gen(function* () {
+      const jobs = yield* BackgroundJob.Service
       const { chat, assistant } = yield* seed()
-      const tool = yield* TaskTool
-      const def = yield* tool.init()
-      const ready = defer<SessionPrompt.PromptInput>()
-      const cancelled = defer<SessionID>()
+      const def = yield* (yield* TaskTool).init()
+      const subagent = slowSubagent()
       const abort = new AbortController()
-      const promptOps: TaskPromptOps = {
-        cancel: (sessionID) =>
-          Effect.sync(() => {
-            cancelled.resolve(sessionID)
-          }),
-        resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
-        prompt: (input) =>
-          Effect.promise(() => {
-            ready.resolve(input)
-            return cancelled.promise
-          }).pipe(Effect.as(reply(input, "cancelled"))),
-        loop: (input) => Effect.succeed(reply({ sessionID: input.sessionID, parts: [] }, "done")),
-      }
 
       const fiber = yield* def
         .execute(
@@ -330,7 +343,7 @@ describe("tool.task", () => {
             messageID: assistant.id,
             agent: "build",
             abort: abort.signal,
-            extra: { promptOps },
+            extra: { promptOps: subagent.promptOps },
             messages: [],
             metadata: () => Effect.void,
             ask: () => Effect.void,
@@ -338,12 +351,135 @@ describe("tool.task", () => {
         )
         .pipe(Effect.forkChild)
 
-      const input = yield* Effect.promise(() => ready.promise)
+      const child = yield* Effect.promise(() => subagent.started.promise)
       abort.abort()
-      expect(yield* Effect.promise(() => cancelled.promise)).toBe(input.sessionID)
+      const result = yield* awaitWithTimeout(Fiber.join(fiber), "task call did not return after the abort")
+      expect(result.metadata.background).toBe(true)
+      expect(result.output).toContain("interrupted the main turn")
+      expect((yield* jobs.get(child.sessionID))?.status).toBe("running")
+      expect(subagent.cancelled).toEqual([])
 
-      const exit = yield* Fiber.await(fiber)
-      expect(Exit.isSuccess(exit)).toBe(true)
+      // The detached subagent still reports its result to the parent session.
+      subagent.finish.resolve()
+      const notice = yield* Effect.promise(() => subagent.delivered.promise)
+      expect(notice.sessionID).toBe(chat.id)
+      expect(JSON.stringify(notice.parts)).toContain("subagent result")
+    }),
+  )
+
+  it.instance("execute leaves the subagent running when the call itself is interrupted", () =>
+    Effect.gen(function* () {
+      const jobs = yield* BackgroundJob.Service
+      const { chat, assistant } = yield* seed()
+      const def = yield* (yield* TaskTool).init()
+      const subagent = slowSubagent()
+
+      // A /command subtask runs the tool inside the turn's fiber, so interrupting the turn interrupts the call.
+      const fiber = yield* def
+        .execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "general",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: subagent.promptOps },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.forkChild)
+
+      const child = yield* Effect.promise(() => subagent.started.promise)
+      yield* Fiber.interrupt(fiber)
+      const job = yield* jobs.get(child.sessionID)
+      expect(job?.status).toBe("running")
+      expect(job?.background).toBe(true)
+      expect(subagent.cancelled).toEqual([])
+
+      subagent.finish.resolve()
+      const notice = yield* Effect.promise(() => subagent.delivered.promise)
+      expect(JSON.stringify(notice.parts)).toContain("subagent result")
+    }),
+  )
+
+  it.instance("a stopped parent records a background result without announcing or starting a turn", () =>
+    Effect.gen(function* () {
+      const bus = yield* Bus.Service
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const def = yield* (yield* TaskTool).init()
+      const toasts: string[] = []
+      yield* (yield* bus.subscribe(TuiEvent.ToastShow)).pipe(
+        Stream.runForEach((event) => Effect.sync(() => toasts.push(event.properties.message))),
+        Effect.forkScoped,
+      )
+      const checked = defer<SessionID>()
+      const loops: SessionID[] = []
+      const promptOps: TaskPromptOps = {
+        ...stubOps({ text: "subagent result" }),
+        // Records the notice like the real `noReply` prompt, so the idle parent sees it as its newest message.
+        prompt: (input) =>
+          input.noReply
+            ? sessions
+                .updateMessage({
+                  id: MessageID.ascending(),
+                  role: "user",
+                  sessionID: input.sessionID,
+                  agent: input.agent ?? "build",
+                  model: input.model ?? ref,
+                  time: { created: Date.now() },
+                })
+                .pipe(Effect.map((info) => ({ info, parts: [] })))
+            : Effect.succeed(reply(input, "subagent result")),
+        loop: (input) =>
+          Effect.sync(() => {
+            loops.push(input.sessionID)
+            return reply({ sessionID: input.sessionID, parts: [] }, "resumed")
+          }),
+        stopped: (sessionID) =>
+          Effect.sync(() => {
+            checked.resolve(sessionID)
+            return true
+          }),
+      }
+
+      yield* def.execute(
+        {
+          description: "inspect bug",
+          prompt: "look into the cache key path",
+          subagent_type: "general",
+          background: true,
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(
+        yield* awaitWithTimeout(
+          Effect.promise(() => checked.promise),
+          "wakeup never checked the parent",
+        ),
+      ).toBe(chat.id)
+      // The wakeup returns right after the check; give a toast or loop the chance to (wrongly) follow it.
+      yield* Effect.sleep("200 millis")
+      expect(toasts).toEqual([])
+      expect(loops).toEqual([])
+      const latest = yield* sessions.messages({ sessionID: chat.id, limit: 1 })
+      expect(latest[0]?.info.role).toBe("user")
     }),
   )
 
@@ -934,4 +1070,86 @@ describe("tool.task", () => {
       expect((yield* jobs.get(grandchild.id))?.status).toBe("cancelled")
     }),
   )
+
+  it.instance("interrupting a parent run stops its turn but leaves its subagents running", () =>
+    Effect.gen(function* () {
+      const jobs = yield* BackgroundJob.Service
+      const runState = yield* SessionRunState.Service
+      const sessions = yield* Session.Service
+      const { chat } = yield* seed()
+      const child = yield* sessions.create({ parentID: chat.id, title: "child" })
+      yield* jobs.start({
+        id: child.id,
+        type: "task",
+        metadata: { parentSessionId: chat.id, sessionId: child.id },
+        run: Effect.never,
+      })
+      const turn = yield* startTurn(chat.id)
+
+      expect(yield* runState.interrupt(chat.id)).toBe(true)
+      expect((yield* awaitWithTimeout(Fiber.join(turn), "interrupted turn did not settle")).info.id).toBe(
+        stopped.info.id,
+      )
+      expect((yield* jobs.get(child.id))?.status).toBe("running")
+      // Automatic work (goal mode, completion wakeups) must not restart the session.
+      expect((yield* runState.continuation(chat.id)).aborted).toBe(true)
+      expect(yield* runState.interrupt(chat.id)).toBe(false)
+    }),
+  )
+
+  it.instance("stopping subagents cancels them recursively but leaves the session's own turn and shells", () =>
+    Effect.gen(function* () {
+      const jobs = yield* BackgroundJob.Service
+      const runState = yield* SessionRunState.Service
+      const sessions = yield* Session.Service
+      const root = yield* sessions.create({ title: "root" })
+      // The session is itself a subagent: stopping its subagents must not stop it.
+      const chat = yield* sessions.create({ parentID: root.id, title: "chat" })
+      const child = yield* sessions.create({ parentID: chat.id, title: "child" })
+      const grandchild = yield* sessions.create({ parentID: child.id, title: "grandchild" })
+      const subagent = (id: SessionID, parentID: SessionID) =>
+        jobs.start({ id, type: "task", metadata: { parentSessionId: parentID, sessionId: id }, run: Effect.never })
+      yield* subagent(chat.id, root.id)
+      yield* subagent(child.id, chat.id)
+      yield* subagent(grandchild.id, child.id)
+      yield* jobs.start({
+        id: "shell_stop_subagents",
+        type: "shell",
+        metadata: { ownerSessionID: chat.id },
+        run: Effect.never,
+      })
+      const turn = yield* startTurn(chat.id)
+      // A child's run fiber lives outside its job, so stopping the job alone would leave the child busy.
+      const childTurn = yield* startTurn(child.id)
+
+      expect((yield* runState.stopSubagents(chat.id)).toSorted()).toEqual([child.id, grandchild.id].toSorted())
+      expect((yield* jobs.get(child.id))?.status).toBe("cancelled")
+      expect((yield* jobs.get(grandchild.id))?.status).toBe("cancelled")
+      expect((yield* awaitWithTimeout(Fiber.join(childTurn), "child turn was not stopped")).info.id).toBe(
+        stopped.info.id,
+      )
+      expect((yield* jobs.get(chat.id))?.status).toBe("running")
+      expect((yield* jobs.get("shell_stop_subagents"))?.status).toBe("running")
+      expect(Exit.isFailure(yield* runState.assertNotBusy(chat.id).pipe(Effect.exit))).toBe(true)
+      expect((yield* runState.continuation(chat.id)).aborted).toBe(false)
+
+      yield* runState.cancel(chat.id)
+      yield* Fiber.join(turn)
+    }),
+  )
+})
+
+const stopped = reply({ sessionID: SessionID.make("ses_stopped"), parts: [] }, "stopped")
+
+// Starts a turn that runs until it is cancelled, then resolves with `stopped`.
+const startTurn = Effect.fn("TaskToolTest.startTurn")(function* (sessionID: SessionID) {
+  const runState = yield* SessionRunState.Service
+  const turn = yield* runState.ensureRunning(sessionID, Effect.succeed(stopped), Effect.never).pipe(Effect.forkChild)
+  yield* pollWithTimeout(
+    runState
+      .assertNotBusy(sessionID)
+      .pipe(Effect.match({ onFailure: () => true as const, onSuccess: () => undefined })),
+    `turn for ${sessionID} never started`,
+  )
+  return turn
 })

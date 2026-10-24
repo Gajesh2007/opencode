@@ -156,6 +156,7 @@ export function Prompt(props: PromptProps) {
   const agentShortcut = useCommandShortcut("agent.cycle")
   const paletteShortcut = useCommandShortcut("command.palette.show")
   const tasksShortcut = useCommandShortcut("tasks.list")
+  const stopSubagentsShortcut = useCommandShortcut("subagent.stop_all")
   const renderer = useRenderer()
   const dimensions = useTerminalDimensions()
   const { theme, syntax } = useTheme()
@@ -354,16 +355,41 @@ export function Prompt(props: PromptProps) {
     }
   })
 
+  function runningSubagents(sessionID: string) {
+    return sync.data.session.filter((session) => {
+      const type = sync.data.session_status[session.id]?.type
+      return session.parentID === sessionID && (type === "busy" || type === "retry")
+    }).length
+  }
+
+  // Esc stops the turn but not its subagents; input queued behind the turn starts the next one right away.
+  async function interrupt(sessionID: string) {
+    const result = await sdk.client.session.interrupt({ sessionID, resume: true }).catch(() => undefined)
+    // A server that predates interrupt can only stop everything.
+    if (result?.response.status === 404) {
+      await sdk.client.session.abort({ sessionID }).catch(() => {})
+      return
+    }
+    const count = runningSubagents(sessionID)
+    if (!result?.data || !count) return
+    const them = count === 1 ? "it" : "them"
+    const shortcut = stopSubagentsShortcut()
+    toast.show({
+      variant: "info",
+      message: [
+        count === 1 ? "1 subagent keeps running" : `${count} subagents keep running`,
+        shortcut ? `${shortcut} to stop ${them}` : `"Stop subagents" stops ${them}`,
+      ].join(" · "),
+    })
+  }
+
   // Work that keeps running outside the transcript, e.g. "2 shells · 1 subagent". Opens /tasks.
   const [workHover, setWorkHover] = createSignal(false)
   const work = createMemo(() => {
     const sessionID = props.sessionID
     if (!sessionID) return
     const shells = sync.shell.list(sessionID).filter((shell) => shell.status === "running").length
-    const subagents = sync.data.session.filter((session) => {
-      const type = sync.data.session_status[session.id]?.type
-      return session.parentID === sessionID && (type === "busy" || type === "retry")
-    }).length
+    const subagents = runningSubagents(sessionID)
     return [
       shells ? `${shells} shell${shells === 1 ? "" : "s"}` : undefined,
       subagents ? `${subagents} subagent${subagents === 1 ? "" : "s"}` : undefined,
@@ -577,9 +603,7 @@ export function Prompt(props: PromptProps) {
           }, 5000)
 
           if (store.interrupt >= 2) {
-            void sdk.client.session.abort({
-              sessionID: props.sessionID,
-            })
+            void interrupt(props.sessionID)
             setStore("interrupt", 0)
           }
           dialog.clear()

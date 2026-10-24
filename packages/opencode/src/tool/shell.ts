@@ -15,6 +15,7 @@ import { BackgroundJob } from "@/background/job"
 import { BackgroundNotify } from "@/background/notify"
 import { Bus } from "@/bus"
 import { Config } from "@/config/config"
+import { ServerAuth } from "@/server/auth"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import type { SessionID } from "@/session/schema"
 import { Session } from "@/session/session"
@@ -480,7 +481,7 @@ export const ShellTool = Tool.define(
         { env: {} },
       )
       return {
-        ...process.env,
+        ...ServerAuth.withoutSecrets(process.env),
         ...extra.env,
       }
     })
@@ -672,7 +673,12 @@ export const ShellTool = Tool.define(
           }),
         )
 
-        if (outcome !== "aborted" && outcome?.type === "backgrounded") {
+        // Ctrl+B can land just as the command finishes; then it reports its real result like any other.
+        if (
+          outcome !== "aborted" &&
+          outcome?.type === "backgrounded" &&
+          (yield* shells.get(info.id).pipe(Effect.orDie)).status === "running"
+        ) {
           // The race has removed the abort listener. ctx.abort also fires at the end of every step,
           // so a moved command must stop listening to this call before it returns.
           yield* shells.unlisten(info.id, listener)

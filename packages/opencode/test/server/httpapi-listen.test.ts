@@ -2,6 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test"
 import net from "node:net"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import * as Log from "@opencode-ai/core/util/log"
+import { Effect, Option } from "effect"
+import { ServerAuth } from "../../src/server/auth"
 import { Server } from "../../src/server/server"
 import { PtyPaths } from "../../src/server/routes/instance/httpapi/groups/pty"
 import { withTimeout } from "../../src/util/timeout"
@@ -301,6 +303,44 @@ describe("HttpApi Server.listen", () => {
     }
 
     expect(output).not.toContain("Sent HTTP response")
+  })
+
+  test("a shared-runtime listener serves the live services of the in-process app", async () => {
+    await using tmp = await tmpdir({ git: true, config: { formatter: false, lsp: false } })
+    // Server.Default() reads its auth config through Effect's default ConfigProvider, which copies process.env once
+    // per process, possibly while an earlier test had set a password. Authenticate with whatever it captured.
+    const auth = Effect.runSync(
+      Effect.gen(function* () {
+        return yield* ServerAuth.Config
+      }).pipe(Effect.provide(ServerAuth.Config.defaultLayer)),
+    )
+    const headers = {
+      "x-opencode-directory": tmp.path,
+      "content-type": "application/json",
+      ...ServerAuth.headers({ username: auth.username, password: Option.getOrElse(auth.password, () => "") }),
+    }
+    // Subagent model overrides live only in memory, in the app-wide Agent service.
+    const override = (body: Record<string, string>) =>
+      Server.Default().app.request("/agent/subagent-model", { method: "POST", headers, body: JSON.stringify(body) })
+    const overrides = (listener: Awaited<ReturnType<typeof Server.listen>>) =>
+      fetch(new URL("/agent/subagent-models", listener.url), { headers }).then((response) => response.json())
+
+    expect((await override({ agent: "shared-runtime", providerID: "test", modelID: "test-model" })).status).toBe(200)
+    const shared = await Server.listen({ hostname: "127.0.0.1", port: 0, ephemeral: true, sharedRuntime: true })
+    const isolated = await Server.listen({ hostname: "127.0.0.1", port: 0, ephemeral: true })
+    try {
+      expect(await overrides(shared)).toMatchObject({
+        "shared-runtime": { providerID: "test", modelID: "test-model" },
+      })
+      // Without sharedRuntime a listener builds its own services, which never saw the override.
+      expect(await overrides(isolated)).not.toHaveProperty("shared-runtime")
+    } finally {
+      await override({ agent: "shared-runtime" })
+      await stop(isolated, "timed out stopping the isolated listener")
+      await stop(shared, "timed out stopping the shared-runtime listener")
+    }
+    // Stopping a shared-runtime listener leaves the services it shared running.
+    expect((await Server.Default().app.request("/agent/subagent-models", { headers })).status).toBe(200)
   })
 
   test("port 0 prefers 4096 when free", async () => {

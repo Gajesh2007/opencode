@@ -88,6 +88,8 @@ import { DialogVariant } from "./component/dialog-variant"
 import { DialogServiceTier } from "./component/dialog-service-tier"
 import { DialogUpstream } from "./component/dialog-upstream"
 import { DialogSubagentModel } from "./component/dialog-subagent-model"
+import { DialogPair } from "./component/dialog-pair"
+import type { Pair } from "./util/pair"
 
 const appBindingCommands = [
   "command.palette.show",
@@ -123,6 +125,7 @@ const appBindingCommands = [
   "provider.connect",
   "console.org.switch",
   "opencode.status",
+  "server.pair",
   "theme.switch",
   "theme.switch_mode",
   "theme.mode.lock",
@@ -199,6 +202,8 @@ export function tui(input: {
   args: Args
   config: TuiConfig.Resolved
   onSnapshot?: () => Promise<string[]>
+  /** Starts a network listener for pairing devices, when the TUI's server has none. */
+  pairing?: () => Promise<Pair.Listener>
   directory?: string
   fetch?: typeof fetch
   headers?: RequestInit["headers"]
@@ -270,7 +275,7 @@ export function tui(input: {
                                           <PromptHistoryProvider>
                                             <PromptRefProvider>
                                               <EditorContextProvider>
-                                                <App onSnapshot={input.onSnapshot} />
+                                                <App onSnapshot={input.onSnapshot} pairing={input.pairing} />
                                               </EditorContextProvider>
                                             </PromptRefProvider>
                                           </PromptHistoryProvider>
@@ -297,7 +302,7 @@ export function tui(input: {
   })
 }
 
-export function App(props: { onSnapshot?: () => Promise<string[]> }) {
+export function App(props: { onSnapshot?: () => Promise<string[]>; pairing?: () => Promise<Pair.Listener> }) {
   const tuiConfig = useTuiConfig()
   const route = useRoute()
   const dimensions = useTerminalDimensions()
@@ -865,6 +870,15 @@ export function App(props: { onSnapshot?: () => Promise<string[]> }) {
         slashName: "status",
         run: () => {
           dialog.replace(() => <DialogStatus />)
+        },
+        category: "System",
+      },
+      {
+        name: "server.pair",
+        title: "Pair device",
+        slashName: "pair",
+        run: () => {
+          dialog.replace(() => <DialogPair listen={props.pairing} />)
         },
         category: "System",
       },

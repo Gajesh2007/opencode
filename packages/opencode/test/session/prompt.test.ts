@@ -1639,6 +1639,202 @@ it.instance(
   3_000,
 )
 
+// Interrupt semantics: the turn stops, its subagents keep running, and queued input may start a new turn.
+
+// The task tool part of the session's latest assistant message from `agent`.
+const taskTool = Effect.fn("test.taskTool")(function* (sessionID: SessionID, agent: string) {
+  const msgs = yield* MessageV2.filterCompactedEffect(sessionID)
+  const assistant = msgs.findLast((item) => item.info.role === "assistant" && item.info.agent === agent)
+  return assistant ? toolPart(assistant.parts) : undefined
+})
+
+// The subagent session of a running task tool call, once it exists.
+const runningTask = (sessionID: SessionID, agent: string) =>
+  pollWithTimeout(
+    taskTool(sessionID, agent).pipe(
+      Effect.map((tool) => {
+        const childID = tool?.state.status === "running" ? tool.state.metadata?.sessionId : undefined
+        return typeof childID === "string" ? SessionID.make(childID) : undefined
+      }),
+    ),
+    "timed out waiting for a running subagent",
+  )
+
+it.instance(
+  "interrupt stops the turn but leaves its foreground subagent running",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const status = yield* SessionStatus.Service
+      const jobs = yield* BackgroundJob.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* llm.tool("task", {
+        description: "inspect bug",
+        prompt: "look into the cache key path",
+        subagent_type: "general",
+      })
+      yield* llm.hang
+      yield* user(chat.id, "hello")
+
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      const childID = yield* runningTask(chat.id, "build")
+      yield* llm.wait(2)
+
+      expect(yield* prompt.interrupt({ sessionID: chat.id })).toEqual({ interrupted: true, resumed: false })
+      expect(Exit.isSuccess(yield* Fiber.await(fiber))).toBe(true)
+      expect((yield* status.get(chat.id)).type).toBe("idle")
+      expect((yield* jobs.get(childID))?.status).toBe("running")
+      expect((yield* status.get(childID)).type).toBe("busy")
+
+      // The call returned while the turn was stopping, so its result tells the model what happened.
+      const tool = yield* taskTool(chat.id, "build")
+      expect(tool?.state.status).toBe("completed")
+      if (tool?.state.status === "completed") {
+        expect(tool.state.metadata.background).toBe(true)
+        expect(tool.state.output).toContain("interrupted the main turn")
+      }
+
+      // Aborting the session still stops everything it spawned.
+      yield* prompt.cancel(chat.id)
+      expect((yield* jobs.get(childID))?.status).toBe("cancelled")
+      expect((yield* status.get(childID)).type).toBe("idle")
+    }),
+  10_000,
+)
+
+it.instance(
+  "interrupt leaves a slash command subtask's subagent running",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const status = yield* SessionStatus.Service
+      const jobs = yield* BackgroundJob.Service
+      const chat = yield* sessions.create({ title: "Pinned" })
+      yield* llm.hang
+      const msg = yield* user(chat.id, "hello")
+      yield* addSubtask(chat.id, msg.id)
+
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      const childID = yield* runningTask(chat.id, "general")
+      yield* llm.wait(1)
+
+      expect(yield* prompt.interrupt({ sessionID: chat.id })).toEqual({ interrupted: true, resumed: false })
+      expect(Exit.isSuccess(yield* Fiber.await(fiber))).toBe(true)
+      expect((yield* jobs.get(childID))?.status).toBe("running")
+      expect((yield* status.get(childID)).type).toBe("busy")
+      const tool = yield* taskTool(chat.id, "general")
+      expect(tool?.state.status).toBe("completed")
+      if (tool?.state.status === "completed") expect(tool.state.output).toContain("interrupted the main turn")
+
+      yield* prompt.cancel(chat.id)
+      expect((yield* jobs.get(childID))?.status).toBe("cancelled")
+    }),
+  10_000,
+)
+
+it.instance(
+  "interrupt with resume starts a new turn for input queued behind the interrupted one",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Pinned" })
+      yield* llm.hang
+      yield* llm.text("handled the queued message")
+      yield* user(chat.id, "first")
+
+      const first = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      yield* llm.wait(1)
+      const queuedID = MessageID.ascending()
+      const queued = yield* prompt
+        .prompt({
+          sessionID: chat.id,
+          messageID: queuedID,
+          agent: "build",
+          model: ref,
+          parts: [{ type: "text", text: "queued follow-up" }],
+        })
+        .pipe(Effect.forkChild)
+      yield* pollWithTimeout(
+        sessions
+          .messages({ sessionID: chat.id })
+          .pipe(Effect.map((msgs) => (msgs.some((msg) => msg.info.id === queuedID) ? true : undefined))),
+        "timed out waiting for the queued prompt to save",
+      )
+
+      expect(yield* prompt.interrupt({ sessionID: chat.id, resume: true })).toEqual({
+        interrupted: true,
+        resumed: true,
+      })
+      expect(Exit.isSuccess(yield* Fiber.await(first))).toBe(true)
+      expect(Exit.isSuccess(yield* Fiber.await(queued))).toBe(true)
+
+      const answer = yield* pollWithTimeout(
+        sessions
+          .messages({ sessionID: chat.id })
+          .pipe(
+            Effect.map((msgs) =>
+              msgs.find(
+                (msg) =>
+                  msg.info.role === "assistant" &&
+                  msg.info.parentID === queuedID &&
+                  msg.info.time.completed !== undefined,
+              ),
+            ),
+          ),
+        "the queued input never got a reply",
+      )
+      expect(answer.parts.some((part) => part.type === "text" && part.text === "handled the queued message")).toBe(true)
+      expect(yield* llm.calls).toBe(2)
+      expect(JSON.stringify((yield* llm.inputs).at(-1)?.messages)).toContain("queued follow-up")
+    }),
+  10_000,
+)
+
+it.instance(
+  "interrupt without queued input leaves the session stopped",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const run = yield* SessionRunState.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Pinned" })
+      yield* llm.hang
+      yield* user(chat.id, "first")
+
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      yield* llm.wait(1)
+      // Background completion notices are synthetic, not queued user input.
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "Background task completed", synthetic: true }],
+      })
+
+      expect(yield* prompt.interrupt({ sessionID: chat.id, resume: true })).toEqual({
+        interrupted: true,
+        resumed: false,
+      })
+      expect(Exit.isSuccess(yield* Fiber.await(fiber))).toBe(true)
+      yield* run.assertNotBusy(chat.id)
+      // Wakeups such as a finished background task cannot restart it either.
+      yield* prompt.loop({ sessionID: chat.id })
+      expect(yield* llm.calls).toBe(1)
+    }),
+  10_000,
+)
+
 // Queue semantics
 
 noLLMServer.instance("concurrent loop callers get same result", () =>

@@ -9,7 +9,12 @@ import { SessionStatus } from "./status"
 
 export interface Interface {
   readonly assertNotBusy: (sessionID: SessionID) => Effect.Effect<void, Session.BusyError>
+  /** Stops the session's turn and every subagent it spawned, recursively. */
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
+  /** Stops the session's turn like `cancel`, but leaves its subagents running. Returns whether a turn was running. */
+  readonly interrupt: (sessionID: SessionID) => Effect.Effect<boolean>
+  /** Stops the session's running subagents and their descendants, but not its own turn. Returns their session ids. */
+  readonly stopSubagents: (sessionID: SessionID) => Effect.Effect<SessionID[]>
   readonly continuation: (sessionID: SessionID) => Effect.Effect<AbortSignal>
   // New explicit work invalidates older callbacks; synthetic wakeups must not call this.
   readonly resume: (sessionID: SessionID) => Effect.Effect<AbortSignal>
@@ -81,27 +86,19 @@ export const layer = Layer.effect(
       if (existing?.busy) yield* busyError(sessionID)
     })
 
-    const cancel = Effect.fn("SessionRunState.cancel")(function* (sessionID: SessionID) {
-      // Stop automatic work before cancellation itself can publish an idle event.
-      // This is instance-local intent, not a completed/blocked goal status.
+    // Stops each session's turn and automatic work, unless an explicit prompt renewed its continuation since
+    // `generations` was taken: slow child cleanup must not cancel a newer, explicitly resumed turn.
+    const stopTurns = Effect.fnUntraced(function* (
+      ids: Iterable<SessionID>,
+      generations: ReadonlyMap<SessionID, AbortController>,
+    ) {
       const data = yield* InstanceState.get(state)
-      if (!data.continuations.has(sessionID)) data.continuations.set(sessionID, new AbortController())
-      data.continuations.get(sessionID)?.abort()
-      const generations = new Map(data.continuations)
-      // Cancelling a session must also cancel any subtask child sessions it spawned.
-      // cancelBackgroundJobs walks the job graph and returns every affected session id
-      // (the target + descendants via job metadata.sessionId). A child's run fiber is
-      // forked into the instance scope, so cancelling its background job alone leaves
-      // its runner "Running" (busy) — we must cancel each affected session's runner too.
-      const affected = yield* cancelBackgroundJobs(background, sessionID)
       yield* Effect.forEach(
-        affected,
+        ids,
         (id) =>
           Effect.gen(function* () {
-            // Slow child cleanup must not cancel a newer, explicitly resumed turn.
             if (data.continuations.get(id) !== generations.get(id)) return
-            if (!data.continuations.has(id)) data.continuations.set(id, new AbortController())
-            data.continuations.get(id)?.abort()
+            halt(data.continuations, id)
             const existing = data.runners.get(id)
             if (!existing || !existing.busy) {
               yield* status.set(id, { type: "idle" })
@@ -111,6 +108,39 @@ export const layer = Layer.effect(
           }),
         { discard: true },
       )
+    })
+
+    const cancel = Effect.fn("SessionRunState.cancel")(function* (sessionID: SessionID) {
+      // Stop automatic work before cancellation itself can publish an idle event.
+      // This is instance-local intent, not a completed/blocked goal status.
+      const data = yield* InstanceState.get(state)
+      halt(data.continuations, sessionID)
+      const generations = new Map(data.continuations)
+      // Cancelling a session must also cancel any subtask child sessions it spawned.
+      // A child's run fiber is forked into the instance scope, so cancelling its background
+      // job alone leaves its runner "Running" (busy) — we must cancel each affected session's runner too.
+      const affected = yield* cancelSubagentJobs(background, sessionID, true)
+      yield* stopTurns(new Set([sessionID, ...affected]), generations)
+    })
+
+    const interrupt = Effect.fn("SessionRunState.interrupt")(function* (sessionID: SessionID) {
+      const data = yield* InstanceState.get(state)
+      halt(data.continuations, sessionID)
+      const existing = data.runners.get(sessionID)
+      if (!existing?.busy) {
+        yield* status.set(sessionID, { type: "idle" })
+        return false
+      }
+      yield* existing.cancel
+      return true
+    })
+
+    const stopSubagents = Effect.fn("SessionRunState.stopSubagents")(function* (sessionID: SessionID) {
+      const data = yield* InstanceState.get(state)
+      const generations = new Map(data.continuations)
+      const affected = yield* cancelSubagentJobs(background, sessionID, false)
+      yield* stopTurns(affected, generations)
+      return Array.from(affected)
     })
 
     const continuation = Effect.fn("SessionRunState.continuation")(function* (sessionID: SessionID) {
@@ -162,7 +192,16 @@ export const layer = Layer.effect(
         .pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID))))
     })
 
-    return Service.of({ assertNotBusy, cancel, continuation, resume, ensureRunning, startShell })
+    return Service.of({
+      assertNotBusy,
+      cancel,
+      interrupt,
+      stopSubagents,
+      continuation,
+      resume,
+      ensureRunning,
+      startShell,
+    })
   }),
 )
 
@@ -171,22 +210,33 @@ export const defaultLayer = layer.pipe(
   Layer.provide(SessionStatus.defaultLayer),
 )
 
-const cancelBackgroundJobs = Effect.fn("SessionRunState.cancelBackgroundJobs")(function* (
+// Aborting the continuation keeps automatic work (goal mode, background completion wakeups) from restarting the
+// session; only explicit new work renews it.
+function halt(continuations: Map<SessionID, AbortController>, sessionID: SessionID) {
+  if (!continuations.has(sessionID)) continuations.set(sessionID, new AbortController())
+  continuations.get(sessionID)?.abort()
+}
+
+// Cancels the running subagent jobs the session spawned (with `self`, also the session's own job when it is a
+// subagent itself), then walks the job graph to cancel their descendants. Returns the descendant session ids,
+// whose runners the caller must still cancel: a child's run fiber lives in the instance scope, not in its job.
+// Shell jobs carry `ownerSessionID` instead of `sessionId`/`parentSessionId`, so they are never matched.
+const cancelSubagentJobs = Effect.fn("SessionRunState.cancelSubagentJobs")(function* (
   background: BackgroundJob.Interface,
   sessionID: SessionID,
+  self: boolean,
 ) {
   const jobs = yield* background.list({ includeOutput: false })
-  const pending = new Set<string>([sessionID])
-  // Every session id touched (the target + descendant subtask sessions), so the caller
-  // can cancel their runners too.
-  const sessions = new Set<SessionID>([sessionID])
+  const pending = new Set<string>(self ? [sessionID] : [])
+  const sessions = new Set<SessionID>()
   const cancelled = new Set<string>()
   const matches = (job: BackgroundJob.Info) => {
     if (job.status !== "running") return false
     if (cancelled.has(job.id)) return false
     if (pending.has(job.id)) return true
     if (typeof job.metadata?.sessionId === "string" && pending.has(job.metadata.sessionId)) return true
-    return typeof job.metadata?.parentSessionId === "string" && pending.has(job.metadata.parentSessionId)
+    if (typeof job.metadata?.parentSessionId !== "string") return false
+    return job.metadata.parentSessionId === sessionID || pending.has(job.metadata.parentSessionId)
   }
   let batch = jobs.filter(matches)
   while (batch.length > 0) {
@@ -200,7 +250,7 @@ const cancelBackgroundJobs = Effect.fn("SessionRunState.cancelBackgroundJobs")(f
               pending.add(job.id)
               if (typeof job.metadata?.sessionId === "string") {
                 pending.add(job.metadata.sessionId)
-                sessions.add(job.metadata.sessionId as SessionID)
+                sessions.add(SessionID.make(job.metadata.sessionId))
               }
             }),
           ),

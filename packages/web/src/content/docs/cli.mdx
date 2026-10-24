@@ -399,15 +399,66 @@ opencode serve
 
 This starts an HTTP server that provides API access to opencode functionality without the TUI interface. Set `OPENCODE_SERVER_PASSWORD` to enable HTTP basic auth (username defaults to `opencode`).
 
+With `--remote`, the server is also reachable from anywhere through an end-to-end encrypted [OpenTunnel](https://github.com/anomalyco/opentunnel) address, and prints it once connected. This exposes the server to the internet, so the first time remote access is turned on, OpenCode explains this and asks you to accept. Without an interactive terminal, pass `--yes` to accept. If `OPENCODE_SERVER_PASSWORD` is not set, the server uses the saved pairing password, which [`opencode pair`](#pair) reads automatically.
+
+```bash
+opencode serve --remote
+```
+
 #### Flags
 
-| Flag                                        | Description                                |
-| ------------------------------------------- | ------------------------------------------ |
-| <nobr><code>{"--port"}</code></nobr>        | Port to listen on                          |
-| <nobr><code>{"--hostname"}</code></nobr>    | Hostname to listen on                      |
-| <nobr><code>{"--mdns"}</code></nobr>        | Enable mDNS discovery                      |
-| <nobr><code>{"--mdns-domain"}</code></nobr> | Custom mDNS domain name                    |
-| <nobr><code>{"--cors"}</code></nobr>        | Additional browser origin(s) to allow CORS |
+| Flag                                        | Short | Description                                                                        |
+| ------------------------------------------- | ----- | ---------------------------------------------------------------------------------- |
+| <nobr><code>{"--port"}</code></nobr>        |       | Port to listen on                                                                  |
+| <nobr><code>{"--hostname"}</code></nobr>    |       | Hostname to listen on                                                              |
+| <nobr><code>{"--mdns"}</code></nobr>        |       | Enable mDNS discovery                                                              |
+| <nobr><code>{"--mdns-domain"}</code></nobr> |       | Custom mDNS domain name                                                            |
+| <nobr><code>{"--cors"}</code></nobr>        |       | Additional browser origin(s) to allow CORS                                         |
+| <nobr><code>{"--remote"}</code></nobr>      |       | Expose the server to the internet through an OpenTunnel address                    |
+| <nobr><code>{"--yes"}</code></nobr>         | `-y`  | Accept exposing the server the first time, without a prompt (needed without a TTY) |
+
+---
+
+### pair
+
+Print one-time links, plus a QR code for the OpenCode app, that sign a browser or device in to a running server. Links work once and expire after 5 minutes. The server must have a password.
+
+```bash
+opencode pair [server]
+```
+
+The server defaults to `http://127.0.0.1:4096`. The password defaults to `OPENCODE_SERVER_PASSWORD`, then to the saved pairing password that servers started with `--remote` use, so no flags are needed for those.
+
+Use an external URL, such as a reverse proxy, in the links instead of the server's own addresses.
+
+```bash
+opencode pair --url https://dev.example.com
+```
+
+Pair from anywhere through the server's OpenTunnel remote address. It turns remote access on if needed, which exposes the server to the internet: the first time, it explains this and asks you to accept.
+
+```bash
+opencode pair --remote
+```
+
+Accept without a prompt, for example in a script without a terminal.
+
+```bash
+opencode pair --remote --yes
+```
+
+#### Flags
+
+| Flag                                      | Short | Description                                                                                   |
+| ----------------------------------------- | ----- | --------------------------------------------------------------------------------------------- |
+| <nobr><code>{"--password"}</code></nobr>  | `-p`  | Basic auth password (defaults to `OPENCODE_SERVER_PASSWORD`, then the saved pairing password) |
+| <nobr><code>{"--username"}</code></nobr>  | `-u`  | Basic auth username (defaults to `OPENCODE_SERVER_USERNAME` or `opencode`)                    |
+| <nobr><code>{"--url"}</code></nobr>       |       | Use this external HTTP(S) URL in the links and QR code instead of the server's own            |
+| <nobr><code>{"--advertise"}</code></nobr> |       | Advertise an external URL in the links and QR code, ahead of the server's own                 |
+| <nobr><code>{"--remote"}</code></nobr>    |       | Pair through the OpenTunnel remote address, turning remote access on if needed                |
+| <nobr><code>{"--yes"}</code></nobr>       | `-y`  | Accept exposing the server the first time, without a prompt (needed without a TTY)            |
+
+`--remote` cannot be combined with `--url`.
 
 ---
 
@@ -512,15 +563,19 @@ opencode web
 
 This starts an HTTP server and opens a web browser to access OpenCode through a web interface. Set `OPENCODE_SERVER_PASSWORD` to enable HTTP basic auth (username defaults to `opencode`).
 
+`--remote` works as it does for [`serve`](#serve), and the browser is signed in with a one-time pairing link.
+
 #### Flags
 
-| Flag                                        | Description                                |
-| ------------------------------------------- | ------------------------------------------ |
-| <nobr><code>{"--port"}</code></nobr>        | Port to listen on                          |
-| <nobr><code>{"--hostname"}</code></nobr>    | Hostname to listen on                      |
-| <nobr><code>{"--mdns"}</code></nobr>        | Enable mDNS discovery                      |
-| <nobr><code>{"--mdns-domain"}</code></nobr> | Custom mDNS domain name                    |
-| <nobr><code>{"--cors"}</code></nobr>        | Additional browser origin(s) to allow CORS |
+| Flag                                        | Short | Description                                                                        |
+| ------------------------------------------- | ----- | ---------------------------------------------------------------------------------- |
+| <nobr><code>{"--port"}</code></nobr>        |       | Port to listen on                                                                  |
+| <nobr><code>{"--hostname"}</code></nobr>    |       | Hostname to listen on                                                              |
+| <nobr><code>{"--mdns"}</code></nobr>        |       | Enable mDNS discovery                                                              |
+| <nobr><code>{"--mdns-domain"}</code></nobr> |       | Custom mDNS domain name                                                            |
+| <nobr><code>{"--cors"}</code></nobr>        |       | Additional browser origin(s) to allow CORS                                         |
+| <nobr><code>{"--remote"}</code></nobr>      |       | Expose the server to the internet through an OpenTunnel address                    |
+| <nobr><code>{"--yes"}</code></nobr>         | `-y`  | Accept exposing the server the first time, without a prompt (needed without a TTY) |
 
 ---
 

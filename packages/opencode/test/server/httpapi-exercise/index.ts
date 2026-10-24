@@ -34,7 +34,7 @@ import { color, printHeader, printResults } from "./report"
 import { coverageResult, parseOptions, routeKey, routeKeys, selectedScenarios } from "./routing"
 import { runScenario } from "./runner"
 import { runtime } from "./runtime"
-import { type ScenarioContext, type Scenario } from "./types"
+import { type ScenarioContext, type Scenario, type SessionInfo } from "./types"
 
 void (await import("@opencode-ai/core/util/log")).init({ print: false })
 
@@ -124,6 +124,59 @@ function poll<A>(effect: Effect.Effect<A | undefined>, failure: string) {
   }).pipe(Effect.timeoutOrElse({ duration: "10 seconds", orElse: () => Effect.die(new Error(failure)) }))
 }
 
+const testModel = { providerID: "test", modelID: "test-model" }
+
+function promptAsync(ctx: ScenarioContext, sessionID: string, text: string) {
+  return ctx.request("POST", {
+    path: route("/session/{sessionID}/prompt_async", { sessionID }),
+    headers: ctx.headers(),
+    body: { agent: "build", model: testModel, parts: [{ type: "text", text }] },
+  })
+}
+
+// The text of the session's newest assistant reply, once it has finished without error.
+function finishedReply(ctx: ScenarioContext, sessionID: SessionInfo["id"]) {
+  return ctx.messages(sessionID).pipe(
+    Effect.map((messages) => {
+      const reply = messages.findLast((item) => item.info.role === "assistant")
+      if (reply?.info.role !== "assistant" || reply.info.time.completed === undefined || reply.info.error)
+        return undefined
+      return reply.parts.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("")
+    }),
+  )
+}
+
+// Starts a turn that delegates to a subagent whose model call never finishes, without waiting for the turn's
+// response. Resolves once the subagent runs. Once the subagent stops, the turn finishes with "parent done".
+function runningSubagent(ctx: ScenarioContext) {
+  return Effect.gen(function* () {
+    const session = yield* ctx.session({ title: "Subagent session" })
+    yield* ctx.llmTool("task", {
+      description: "inspect bug",
+      prompt: "look into the cache key path",
+      subagent_type: "general",
+    })
+    yield* ctx.llmHang()
+    yield* ctx.llmText("parent done")
+    const call = yield* ctx
+      .request("POST", {
+        path: route("/session/{sessionID}/message", { sessionID: session.id }),
+        headers: ctx.headers(),
+        body: { agent: "build", model: testModel, parts: [{ type: "text", text: "delegate the task" }] },
+      })
+      .pipe(Effect.forkDetach)
+    // The turn's task call, then the subagent's own model call.
+    yield* ctx.llmWait(2)
+    const children = yield* ctx.request("GET", {
+      path: route("/session/{sessionID}/children", { sessionID: session.id }),
+      headers: ctx.headers(),
+    })
+    const childID = Array.isArray(children.body) && isRecord(children.body[0]) ? children.body[0].id : undefined
+    check(typeof childID === "string", `subagent session should exist: ${children.text}`)
+    return { session, call, childID }
+  })
+}
+
 const scenarios: Scenario[] = [
   http.protected
     .get("/global/health", "global.health")
@@ -173,6 +226,43 @@ const scenarios: Scenario[] = [
           "an unknown pairing code should be rejected",
         )
       },
+      "status",
+    ),
+  http.protected
+    .get("/api/remote", "server.remote")
+    .global()
+    .json(
+      200,
+      (body) => {
+        object(body)
+        check(body.enabled === false && body.state === "off", `remote access should be off: ${JSON.stringify(body)}`)
+      },
+      "status",
+    ),
+  // Turning remote access on would expose this machine through a real tunnel, so nothing here may succeed at
+  // it: auth probes only turn it off, and the app under test has no password (nor a network listener).
+  http.protected
+    .post("/api/remote", "server.remoteUpdate")
+    .global()
+    .probe({ path: "/api/remote", body: { enabled: false } })
+    .at(() => ({ path: "/api/remote", body: { enabled: false } }))
+    .jsonEffect(
+      200,
+      (body, ctx) =>
+        Effect.gen(function* () {
+          object(body)
+          check(
+            body.enabled === false && body.state === "off",
+            `remote access should turn off: ${JSON.stringify(body)}`,
+          )
+          const enable = yield* ctx.request("POST", { path: "/api/remote", body: { enabled: true } })
+          check(enable.status === 400, `enabling without a server password should be rejected: ${enable.text}`)
+          object(enable.body)
+          check(
+            typeof enable.body.message === "string" && enable.body.message.includes("server password"),
+            `enabling without a server password should explain why: ${enable.text}`,
+          )
+        }),
       "status",
     ),
   http.protected
@@ -1298,6 +1388,161 @@ const scenarios: Scenario[] = [
     .post("/session/{sessionID}/abort", "session.abort.missing")
     .at((ctx) => ({
       path: route("/session/{sessionID}/abort", { sessionID: "ses_httpapi_missing" }),
+      headers: ctx.headers(),
+    }))
+    .json(404, object, "status"),
+  http.protected
+    .post("/session/{sessionID}/interrupt", "session.interrupt")
+    .inProject(shellProject)
+    .mutating()
+    .seeded((ctx) => runningShell(ctx))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/interrupt", { sessionID: ctx.state.session.id }),
+      headers: ctx.headers(),
+      body: { resume: true },
+    }))
+    .jsonEffect(
+      200,
+      (body, ctx) =>
+        Effect.gen(function* () {
+          check(
+            stable(body) === stable({ interrupted: true, resumed: false }),
+            `interrupt should stop the command, with nothing queued to resume: ${JSON.stringify(body)}`,
+          )
+          // Like abort, interrupting stops the foreground `!` command.
+          const call = yield* Fiber.join(ctx.state.call)
+          check(call.status === 200, `interrupted shell command should respond: ${call.text}`)
+          yield* poll(
+            ctx
+              .request("GET", {
+                path: route("/shell/{shellID}", { shellID: ctx.state.shellID }),
+                headers: ctx.headers(),
+              })
+              .pipe(
+                Effect.map((shell) => (isRecord(shell.body) && shell.body.status !== "running" ? true : undefined)),
+              ),
+            "interrupted command kept running",
+          )
+        }),
+      "status",
+    ),
+  http.protected
+    .post("/session/{sessionID}/interrupt", "session.interrupt.queued")
+    .withLlm()
+    .mutating()
+    .seeded((ctx) =>
+      Effect.gen(function* () {
+        const session = yield* ctx.session({ title: "Queued interrupt session" })
+        yield* ctx.llmHang()
+        yield* ctx.llmText("handled the queued prompt")
+        yield* promptAsync(ctx, session.id, "first prompt")
+        yield* ctx.llmWait(1)
+        yield* promptAsync(ctx, session.id, "queued prompt")
+        yield* poll(
+          ctx
+            .messages(session.id)
+            .pipe(
+              Effect.map((messages) =>
+                messages.some((item) =>
+                  item.parts.some((part) => part.type === "text" && part.text === "queued prompt"),
+                )
+                  ? true
+                  : undefined,
+              ),
+            ),
+          "queued prompt was never saved",
+        )
+        return session
+      }),
+    )
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/interrupt", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+      body: { resume: true },
+    }))
+    .jsonEffect(
+      200,
+      (body, ctx) =>
+        Effect.gen(function* () {
+          check(
+            stable(body) === stable({ interrupted: true, resumed: true }),
+            `interrupt should resume the queued prompt: ${JSON.stringify(body)}`,
+          )
+          const reply = yield* poll(finishedReply(ctx, ctx.state.id), "queued prompt never got a reply")
+          check(reply === "handled the queued prompt", `queued prompt should start a new turn: ${reply}`)
+        }),
+      "status",
+    ),
+  http.protected
+    .post("/session/{sessionID}/interrupt", "session.interrupt.idle")
+    .seeded((ctx) => ctx.session({ title: "Idle interrupt session" }))
+    // No body: resuming is optional.
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/interrupt", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+    }))
+    .json(200, (body) => {
+      check(stable(body) === stable({ interrupted: false, resumed: false }), "an idle session has nothing to interrupt")
+    }),
+  http.protected
+    .post("/session/{sessionID}/interrupt", "session.interrupt.invalid")
+    .seeded((ctx) => ctx.session({ title: "Invalid interrupt session" }))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/interrupt", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+      body: { resume: "yes" },
+    }))
+    .status(400),
+  http.protected
+    .post("/session/{sessionID}/interrupt", "session.interrupt.missing")
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/interrupt", { sessionID: "ses_httpapi_missing" }),
+      headers: ctx.headers(),
+    }))
+    .json(404, object, "status"),
+  http.protected
+    .post("/session/{sessionID}/subagents/stop", "session.stopSubagents")
+    .withLlm()
+    .mutating()
+    .seeded((ctx) => runningSubagent(ctx))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/subagents/stop", { sessionID: ctx.state.session.id }),
+      headers: ctx.headers(),
+    }))
+    .jsonEffect(
+      200,
+      (body, ctx) =>
+        Effect.gen(function* () {
+          check(
+            stable(body) === stable({ stopped: [ctx.state.childID] }),
+            `stop should report the running subagent: ${JSON.stringify(body)}`,
+          )
+          // The session's own turn keeps going: it gets the stopped subagent's result and finishes.
+          const call = yield* Fiber.join(ctx.state.call)
+          check(call.status === 200, `the turn should finish: ${call.text}`)
+          check(
+            isRecord(call.body) &&
+              Array.isArray(call.body.parts) &&
+              call.body.parts.some((part) => isRecord(part) && part.text === "parent done"),
+            `the turn should continue after its subagent stopped: ${call.text}`,
+          )
+        }),
+      "status",
+    ),
+  http.protected
+    .post("/session/{sessionID}/subagents/stop", "session.stopSubagents.idle")
+    .seeded((ctx) => ctx.session({ title: "No subagents session" }))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/subagents/stop", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+    }))
+    .json(200, (body) => {
+      check(stable(body) === stable({ stopped: [] }), "nothing should stop without running subagents")
+    }),
+  http.protected
+    .post("/session/{sessionID}/subagents/stop", "session.stopSubagents.missing")
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/subagents/stop", { sessionID: "ses_httpapi_missing" }),
       headers: ctx.headers(),
     }))
     .json(404, object, "status"),

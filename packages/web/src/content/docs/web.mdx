@@ -88,6 +88,16 @@ OPENCODE_SERVER_PASSWORD=secret opencode web
 
 The username defaults to `opencode` but can be changed with `OPENCODE_SERVER_USERNAME`.
 
+### Remote Access
+
+To reach the server from anywhere, expose it through an end-to-end encrypted [OpenTunnel](https://github.com/anomalyco/opentunnel) address:
+
+```bash
+opencode web --remote
+```
+
+The first time, OpenCode explains that this exposes the server to the internet and asks you to accept. Without an interactive terminal, pass `--yes` to accept. Without `OPENCODE_SERVER_PASSWORD`, the server uses a saved pairing password. To sign in another device, run `opencode pair --remote` (see [`pair`](/docs/cli#pair)).
+
 ---
 
 ## Using the Web Interface

@@ -168,6 +168,10 @@ import type {
   ServerConnectResponses,
   ServerPairErrors,
   ServerPairResponses,
+  ServerRemoteErrors,
+  ServerRemoteResponses,
+  ServerRemoteUpdateErrors,
+  ServerRemoteUpdateResponses,
   SessionAbortErrors,
   SessionAbortResponses,
   SessionBackgroundErrors,
@@ -193,6 +197,8 @@ import type {
   SessionGoalResponses,
   SessionInitErrors,
   SessionInitResponses,
+  SessionInterruptErrors,
+  SessionInterruptResponses,
   SessionListErrors,
   SessionListResponses,
   SessionMessageErrors,
@@ -213,6 +219,8 @@ import type {
   SessionShellResponses,
   SessionStatusErrors,
   SessionStatusResponses,
+  SessionStopSubagentsErrors,
+  SessionStopSubagentsResponses,
   SessionSummarizeErrors,
   SessionSummarizeResponses,
   SessionTodoErrors,
@@ -651,6 +659,42 @@ export class Server extends HeyApiClient {
     return (options?.client ?? this.client).post<ServerPairResponses, ServerPairErrors, ThrowOnError>({
       url: "/api/pair",
       ...options,
+    })
+  }
+
+  /**
+   * Get remote access status
+   *
+   * Whether this server is reachable from the internet through its OpenTunnel route, and at which URL.
+   */
+  public remote<ThrowOnError extends boolean = false>(options?: Options<never, ThrowOnError>) {
+    return (options?.client ?? this.client).get<ServerRemoteResponses, ServerRemoteErrors, ThrowOnError>({
+      url: "/api/remote",
+      ...options,
+    })
+  }
+
+  /**
+   * Turn remote access on or off
+   *
+   * Expose this server to the internet through an end-to-end encrypted OpenTunnel route, or stop. Requires a server password and a network listener. The tunnel attaches in the background; poll server.remote for its URL. Clients must ask the user before enabling it the first time.
+   */
+  public remoteUpdate<ThrowOnError extends boolean = false>(
+    parameters?: {
+      enabled?: boolean
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "body", key: "enabled" }] }])
+    return (options?.client ?? this.client).post<ServerRemoteUpdateResponses, ServerRemoteUpdateErrors, ThrowOnError>({
+      url: "/api/remote",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
     })
   }
 
@@ -3897,7 +3941,7 @@ export class Session2 extends HeyApiClient {
   /**
    * Abort session
    *
-   * Abort an active session and stop any ongoing AI processing or command execution.
+   * Abort an active session and stop any ongoing AI processing or command execution, including every subagent it spawned.
    */
   public abort<ThrowOnError extends boolean = false>(
     parameters: {
@@ -3921,6 +3965,81 @@ export class Session2 extends HeyApiClient {
     )
     return (options?.client ?? this.client).post<SessionAbortResponses, SessionAbortErrors, ThrowOnError>({
       url: "/session/{sessionID}/abort",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Interrupt session
+   *
+   * Stop the session's current turn and its foreground shell commands, but not its subagents: they keep running in the background and report back when they finish. With resume, user input queued behind the turn starts a new turn right away; otherwise the session stays stopped.
+   */
+  public interrupt<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+      resume?: boolean
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "body", key: "resume" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<SessionInterruptResponses, SessionInterruptErrors, ThrowOnError>({
+      url: "/session/{sessionID}/interrupt",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  /**
+   * Stop subagents
+   *
+   * Stop every running subagent of the session, including the subagents they spawned, without interrupting the session's own turn or its shell commands.
+   */
+  public stopSubagents<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<
+      SessionStopSubagentsResponses,
+      SessionStopSubagentsErrors,
+      ThrowOnError
+    >({
+      url: "/session/{sessionID}/subagents/stop",
       ...options,
       ...params,
     })

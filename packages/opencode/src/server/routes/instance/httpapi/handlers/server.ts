@@ -2,7 +2,9 @@ import { Duration, Effect } from "effect"
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import { ServerAuth } from "@/server/auth"
+import { ServerInfo } from "@/server/server-info"
 import { ServerPairing } from "@/server/pairing"
+import { RemoteAccess } from "@/server/remote"
 import { InvalidRequestError, UnauthorizedError } from "../errors"
 import { PairingConnectApi } from "../groups/server"
 import { RootHttpApi } from "../api"
@@ -11,16 +13,38 @@ export const serverHandlers = HttpApiBuilder.group(RootHttpApi, "server", (handl
   Effect.gen(function* () {
     const auth = yield* ServerAuth.Config
 
-    return handlers.handle(
-      "pair",
-      Effect.fn("ServerHttpApi.pair")(function* () {
-        if (!ServerAuth.required(auth))
-          return yield* new InvalidRequestError({
-            message: "Pairing requires a server password; set OPENCODE_SERVER_PASSWORD and restart the server",
-          })
-        return ServerPairing.issue()
-      }),
-    )
+    return handlers
+      .handle(
+        "pair",
+        Effect.fn("ServerHttpApi.pair")(function* () {
+          if (!ServerAuth.required(auth))
+            return yield* new InvalidRequestError({
+              message: "Pairing requires a server password; set OPENCODE_SERVER_PASSWORD and restart the server",
+            })
+          return ServerPairing.issue()
+        }),
+      )
+      .handle(
+        "remote",
+        Effect.fn("ServerHttpApi.remote")(function* () {
+          return RemoteAccess.status()
+        }),
+      )
+      .handle(
+        "remoteUpdate",
+        Effect.fn("ServerHttpApi.remoteUpdate")(function* (ctx) {
+          if (!ctx.payload.enabled) return RemoteAccess.disable()
+          // An open server must never be reachable from the internet.
+          if (!ServerAuth.required(auth))
+            return yield* new InvalidRequestError({
+              message: "Remote access requires a server password; set OPENCODE_SERVER_PASSWORD and restart the server",
+            })
+          const target = ServerInfo.target()
+          if (target === undefined)
+            return yield* new InvalidRequestError({ message: "Remote access requires a network listener" })
+          return RemoteAccess.enable({ target })
+        }),
+      )
   }),
 )
 

@@ -4,6 +4,58 @@ This file tracks customizations made to this personal fork of opencode on top of
 
 ## [Unreleased] — 2026-10-23
 
+### Changed — Esc interrupts only the current turn; subagents keep running
+
+**Esc** (double press) now calls `POST /session/:id/interrupt` with `{ resume: true }`. It stops the session's current turn as before: foreground shell commands are killed, and goal-mode and background wakeups can't restart it. It no longer cascades to subagents:
+- A foreground `task` (or `/command` subtask) the turn was waiting on is moved to the background. It keeps running and reports back when it finishes.
+- Background subagents and shells are untouched.
+- Real user input queued while the agent was working starts a new turn right away. Synthetic notices and the interrupted turn's own prompt don't count.
+- A toast points to the new stop key when subagents are still running.
+
+**Stopping subagents** is now a separate action. "Stop subagents" (`subagent_stop_all`, `<leader>k`) calls `POST /session/:id/subagents/stop`. It cascades through their descendants without touching the session's own turn or its shells. `session.abort` keeps its cascading behavior for other clients and the per-subagent stop actions in `/tasks`.
+
+**Notices.** Background completion notices for a session the user stopped are still recorded, but no longer show "Resuming the main thread" or wake it.
+
+### Added — Remote control: pairing and remote access (port of upstream v2)
+
+Pair a phone, browser or the OpenCode app with a running session, on the local network or from anywhere through remote access.
+
+**Remote access**
+- New isolated `@opencode-ai/tunnel` package wraps `@opentunnel/client`. It pins its own stable `effect@4.0.5` and exposes only promises, since the fork runs an Effect beta.
+- `RemoteAccess` (`src/server/remote.ts`) routes a random, persisted 16-hex subdomain to the server's listener. TLS is terminated in-process, so the relay only forwards ciphertext. It reconnects with backoff and stops on fatal errors.
+- The tunnel URL is added to `/global/info` URLs.
+- New endpoints `GET/POST /api/remote` (`server.remote` / `server.remoteUpdate`). Enabling requires a server password and a network listener.
+- `bunfig.toml` exempts `@opentunnel/*` from the release-age gate, as upstream does.
+
+**Saved pairing state**
+- `PairingState` (`~/.config/opencode/pairing.json`, mode 0600) holds a generated server password, the tunnel route and remote-access consent.
+- The saved password keeps paired devices signed in across restarts.
+
+**CLI**
+- `opencode pair --remote [--yes]` asks for consent the first time, with upstream's wording, then waits for the tunnel and prints the remote link and QR code.
+- `--url` replaces the advertised URLs.
+- The password falls back to the saved pairing password.
+- `opencode serve --remote` and `opencode web --remote`.
+
+**TUI**
+- `/pair` ("Pair device"; `server_pair` keybind, unbound by default) shows one-time links, a countdown that refreshes the code, and a QR code (OpenCode app payload, or a plain link via `tab`).
+- `r` toggles remote access, with consent the first time.
+- The in-process TUI starts a password-protected `127.0.0.1` listener on demand. It shares the worker's runtime (`Server.listen({ sharedRuntime })`), so paired devices drive the TUI's own live sessions.
+
+**Web app**
+- The add-server dialog redeems pasted pairing links or QR JSON, trying every address and preferring the first.
+- QR scanning with the camera on secure origins (`qr-scanner`).
+
+**Hardening**
+- The embedded-UI fallback proxy no longer forwards `cookie`, `authorization` or `referer` to app.opencode.ai.
+- Basic credentials split at the first colon.
+- No native auth dialog appears for browser fetches.
+- The pairing-code store is capped at 1000.
+- Pairing tokens are accepted under any username.
+- The server password is removed from the environment of bash/`!` commands, the terminal and MCP servers.
+- The UI's CSP allows the QR decoder worker.
+- Tests can never load the real tunnel (preload guard).
+
 ### Added — Background tasks, background shells, and Ctrl+B (port of upstream v2)
 
 Shell commands and subagents can now run in the background, either started that way by the model or moved there mid-flight with **Ctrl+B**. Each reports back to its session when it finishes.

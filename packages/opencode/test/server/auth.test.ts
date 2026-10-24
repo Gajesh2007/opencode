@@ -56,4 +56,13 @@ describe("ServerAuth", () => {
     expect(ServerAuth.authorized({ username: "alice", password: Redacted.make("secret") }, config)).toBe(true)
     expect(ServerAuth.authorized({ username: "opencode", password: Redacted.make("secret") }, config)).toBe(false)
   })
+
+  test("accepts a pairing session token under any username", () => {
+    const config = { password: Option.some("secret"), username: "alice" }
+    const token = ServerAuth.issueSession(config)
+    expect(token).toBeDefined()
+    // Paired clients send the default username; they can't know a custom one.
+    expect(ServerAuth.authorized({ username: "opencode", password: Redacted.make(token ?? "") }, config)).toBe(true)
+    expect(ServerAuth.authorized({ username: "opencode", password: Redacted.make("not-a-token") }, config)).toBe(false)
+  })
 })

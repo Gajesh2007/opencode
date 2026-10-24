@@ -24,7 +24,7 @@ function cacheKey(server: ServerConnection.HttpBase) {
   return `${server.url}\n${server.username ?? ""}\n${server.password ?? ""}`
 }
 
-function timeoutSignal(timeoutMs: number) {
+export function timeoutSignal(timeoutMs: number) {
   const timeout = (AbortSignal as unknown as { timeout?: (ms: number) => AbortSignal }).timeout
   if (timeout) {
     try {

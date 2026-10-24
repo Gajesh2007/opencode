@@ -80,6 +80,7 @@ export const Definitions = {
   sidebar_toggle: keybind("<leader>b", "Toggle sidebar"),
   scrollbar_toggle: keybind("none", "Toggle session scrollbar"),
   status_view: keybind("<leader>s", "View status"),
+  server_pair: keybind("none", "Pair a phone, browser, or the OpenCode app"),
 
   session_export: keybind("<leader>x", "Export session to editor"),
   session_copy: keybind("none", "Copy session transcript"),
@@ -130,6 +131,8 @@ export const Definitions = {
   shell_kill: keybind("ctrl+d", "Kill shell command"),
   subagent_steer: keybind("<leader>i", "Send a steering message to the open subagent"),
   subagent_stop: keybind("<leader>k", "Stop subagent or task"),
+  // Same default as the dialog-only subagent_stop: base bindings are inactive while a dialog is open.
+  subagent_stop_all: keybind("<leader>k", "Stop the session's running subagents"),
   tasks_list: keybind("none", "List tasks"),
   workflows_list: keybind("none", "List workflows"),
   teams_list: keybind("none", "List agent teams"),
@@ -300,6 +303,7 @@ export const CommandMap = {
   sidebar_toggle: "session.sidebar.toggle",
   scrollbar_toggle: "session.toggle.scrollbar",
   status_view: "opencode.status",
+  server_pair: "server.pair",
   session_export: "session.export",
   session_copy: "session.copy",
   session_new: "session.new",
@@ -348,6 +352,7 @@ export const CommandMap = {
   shell_kill: "shell.kill",
   subagent_steer: "subagent.steer",
   subagent_stop: "subagent.stop",
+  subagent_stop_all: "subagent.stop_all",
   tasks_list: "tasks.list",
   workflows_list: "workflows.list",
   teams_list: "teams.list",

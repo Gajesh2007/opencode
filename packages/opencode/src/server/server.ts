@@ -14,6 +14,7 @@ import { WebSocketTracker } from "./routes/instance/httpapi/websocket-tracker"
 import { PublicApi } from "./routes/instance/httpapi/public"
 import type { CorsOptions } from "./cors"
 import { lazy } from "@/util/lazy"
+import { memoMap } from "@opencode-ai/core/effect/memo-map"
 
 // @ts-ignore This global is needed to prevent ai-sdk from logging warnings to stdout https://github.com/vercel/ai/blob/2dc67e0ef538307f21368db32d5a12345d98831b/packages/ai/src/logger/log-warnings.ts#L85
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -37,6 +38,11 @@ type ListenOptions = CorsOptions & {
   hostname: string
   mdns?: boolean
   mdnsDomain?: string
+  /** Take any free port, instead of preferring 4096. */
+  ephemeral?: boolean
+  // A listener added to a process that already serves requests in-process (the TUI worker) must share its live
+  // services: session runners, permissions, and status. Its auth config is then the process's too.
+  sharedRuntime?: boolean
 }
 type ListenerState = {
   scope: Scope.Scope
@@ -120,6 +126,7 @@ function listenerLayer(opts: ListenOptions, port: number) {
 }
 
 function startWithPortFallback(opts: ListenOptions) {
+  if (opts.ephemeral) return startListener(opts, 0)
   if (opts.port !== 0) return startListener(opts, opts.port)
   // Match the legacy listener port-resolution behavior: explicit `0` prefers
   // 4096 first, then any free port.
@@ -128,7 +135,11 @@ function startWithPortFallback(opts: ListenOptions) {
 
 function startListener(opts: ListenOptions, port: number) {
   const scope = Scope.makeUnsafe()
-  return Layer.buildWithMemoMap(listenerLayer(opts, port), Layer.makeMemoMapUnsafe(), scope).pipe(
+  return Layer.buildWithMemoMap(
+    listenerLayer(opts, port),
+    opts.sharedRuntime ? memoMap : Layer.makeMemoMapUnsafe(),
+    scope,
+  ).pipe(
     Effect.provide(HttpApiApp.context),
     Effect.onError(() => Scope.close(scope, Exit.void).pipe(Effect.ignore)),
     Effect.map(

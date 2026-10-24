@@ -406,6 +406,50 @@ describe("HttpApi UI fallback", () => {
     }),
   )
 
+  it.live("keeps this server's credentials away from the upstream UI", () =>
+    Effect.gen(function* () {
+      const forwarded: Record<string, string>[] = []
+      const credentials = btoa("opencode:secret")
+
+      const response = yield* uiApp({
+        password: "secret",
+        username: "opencode",
+        disableEmbeddedWebUi: true,
+        client: httpClient(new Response("console.log('ok')"), (request) => {
+          forwarded.push(request.headers)
+        }),
+      }).request("/assets/app.js", {
+        headers: {
+          authorization: `Basic ${credentials}`,
+          cookie: "opencode_session_4096=session-token; theme=dark",
+          // Assets of a page opened with an auth_token query carry it in their referer.
+          referer: `http://localhost:4096/?auth_token=${credentials}`,
+          accept: "text/javascript",
+        },
+      })
+
+      expect(response.status).toBe(200)
+      expect(forwarded).toHaveLength(1)
+      expect(forwarded[0].authorization).toBeUndefined()
+      expect(forwarded[0].cookie).toBeUndefined()
+      expect(forwarded[0].referer).toBeUndefined()
+      expect(forwarded[0].accept).toBe("text/javascript")
+    }),
+  )
+
+  it.live("challenges page navigations but not browser fetches for the web UI", () =>
+    Effect.gen(function* () {
+      const app = uiApp({ password: "secret", username: "opencode", disableEmbeddedWebUi: true })
+      const navigation = yield* app.request("/", { headers: { "sec-fetch-mode": "navigate" } })
+      const fetch = yield* app.request("/", { headers: { "sec-fetch-mode": "cors" } })
+
+      expect(navigation.status).toBe(401)
+      expect(navigation.headers.get("www-authenticate")).toBe('Basic realm="Secure Area"')
+      expect(fetch.status).toBe(401)
+      expect(fetch.headers.get("www-authenticate")).toBeNull()
+    }),
+  )
+
   // Regression for #25698 (Ope): the browser fetches the PWA manifest and
   // its icons via flows that don't carry app-managed credentials (the
   // `<link rel="manifest">` request is not under page-auth control), so the

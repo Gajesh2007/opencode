@@ -30,6 +30,7 @@ import {
   DiffQuery,
   ForkPayload,
   InitPayload,
+  InterruptPayload,
   ListQuery,
   SearchQuery,
   MessagesQuery,
@@ -273,6 +274,29 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       return true
     })
 
+    // The body is optional: clients may post nothing to interrupt without resuming.
+    const interruptRaw = Effect.fn("SessionHttpApi.interruptRaw")(function* (ctx: {
+      params: { sessionID: SessionID }
+      request: HttpServerRequest.HttpServerRequest
+    }) {
+      yield* requireSession(ctx.params.sessionID)
+      const body = yield* Effect.orDie(ctx.request.text)
+      const payload = body.trim()
+        ? yield* Schema.decodeUnknownEffect(InterruptPayload)(yield* tryParseJson(body)).pipe(
+            Effect.mapError(() => new HttpApiError.BadRequest({})),
+          )
+        : {}
+      yield* llm.cancelWarm?.(ctx.params.sessionID) ?? Effect.void
+      return yield* promptSvc.interrupt({ sessionID: ctx.params.sessionID, resume: payload.resume })
+    })
+
+    const stopSubagents = Effect.fn("SessionHttpApi.stopSubagents")(function* (ctx: {
+      params: { sessionID: SessionID }
+    }) {
+      yield* requireSession(ctx.params.sessionID)
+      return { stopped: yield* promptSvc.stopSubagents(ctx.params.sessionID) }
+    })
+
     const background = Effect.fn("SessionHttpApi.background")(function* (ctx: { params: { sessionID: SessionID } }) {
       yield* requireSession(ctx.params.sessionID)
       const moved = yield* jobs.backgroundAll({ sessionID: ctx.params.sessionID })
@@ -491,6 +515,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("update", update)
       .handleRaw("fork", forkRaw)
       .handle("abort", abort)
+      .handleRaw("interrupt", interruptRaw)
+      .handle("stopSubagents", stopSubagents)
       .handle("background", background)
       .handle("init", init)
       .handle("share", share)

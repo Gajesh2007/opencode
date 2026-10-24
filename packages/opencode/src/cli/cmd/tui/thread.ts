@@ -13,6 +13,7 @@ import type { GlobalEvent } from "@opencode-ai/sdk/v2"
 import type { EventSource } from "./context/sdk"
 import { win32DisableProcessedInput, win32InstallCtrlCGuard } from "./win32"
 import { writeHeapSnapshot } from "v8"
+import { randomBytes } from "crypto"
 import { TuiConfig } from "./config/tui"
 import {
   OPENCODE_PROCESS_ROLE,
@@ -23,6 +24,8 @@ import {
 import { validateSession } from "./validate-session"
 import { withYoloForever } from "@/cli/yolo-forever"
 import { createWorkerFetch } from "./worker-fetch"
+import { PairingState } from "@/server/pairing-state"
+import { ServerAuth } from "@/server/auth"
 
 declare global {
   const OPENCODE_WORKER_PATH: string
@@ -52,6 +55,16 @@ async function input(value?: string) {
   if (!value) return piped
   if (!piped) return value
   return piped + "\n" + value
+}
+
+// Pairing is optional, so an unusable config dir must not stop the TUI; the password then lasts one session.
+function pairingPassword() {
+  try {
+    return PairingState.password()
+  } catch (error) {
+    Log.Default.warn("saved pairing password unavailable", { error: errorMessage(error) })
+    return randomBytes(32).toString("base64url")
+  }
 }
 
 export function resolveThreadDirectory(project?: string, envPWD = process.env.PWD, cwd = process.cwd()) {
@@ -139,9 +152,25 @@ export const TuiThreadCommand = cmd({
         return
       }
       const cwd = Filesystem.resolve(process.cwd())
+      const network = resolveNetworkOptionsNoConfig(args)
+      const external =
+        process.argv.includes("--port") ||
+        process.argv.includes("--hostname") ||
+        process.argv.includes("--mdns") ||
+        network.mdns ||
+        network.port !== 0 ||
+        network.hostname !== "127.0.0.1"
       const env = sanitizedProcessEnv({
         [OPENCODE_PROCESS_ROLE]: "worker",
         [OPENCODE_RUN_ID]: ensureRunID(),
+        // The in-process server needs a password before it can pair devices, and reads it at startup. The saved
+        // one keeps paired devices signed in across restarts. Only the worker's env gets it, never this process's.
+        ...(external
+          ? {}
+          : {
+              OPENCODE_SERVER_PASSWORD: process.env.OPENCODE_SERVER_PASSWORD || pairingPassword(),
+              OPENCODE_SERVER_USERNAME: process.env.OPENCODE_SERVER_USERNAME || "opencode",
+            }),
       })
 
       const worker = new Worker(file, {
@@ -190,25 +219,19 @@ export const TuiThreadCommand = cmd({
       const prompt = await input(args.prompt)
       const config = await TuiConfig.get()
 
-      const network = resolveNetworkOptionsNoConfig(args)
-      const external =
-        process.argv.includes("--port") ||
-        process.argv.includes("--hostname") ||
-        process.argv.includes("--mdns") ||
-        network.mdns ||
-        network.port !== 0 ||
-        network.hostname !== "127.0.0.1"
-
       const transport = external
         ? {
             url: (await client.call("server", network)).url,
             fetch: undefined,
             events: undefined,
+            // The worker's listener reads its password from the env it shares with this process.
+            headers: ServerAuth.headers(),
           }
         : {
             url: "http://opencode.internal",
             fetch: createWorkerFetch(client),
             events: createEventSource(client),
+            headers: undefined,
           }
 
       try {
@@ -217,10 +240,12 @@ export const TuiThreadCommand = cmd({
           sessionID: args.session,
           directory: cwd,
           fetch: transport.fetch,
+          headers: transport.headers,
         })
       } catch (error) {
         UI.error(errorMessage(error))
         process.exitCode = 1
+        await stop()
         return
       }
 
@@ -237,9 +262,12 @@ export const TuiThreadCommand = cmd({
             const server = await client.call("snapshot", undefined)
             return [tui, server]
           },
+          // An external listener already serves the TUI's own client; the in-process server starts one on demand.
+          pairing: external ? undefined : async () => await client.call("pairListen", undefined),
           config,
           directory: cwd,
           fetch: transport.fetch,
+          headers: transport.headers,
           events: transport.events,
           args: {
             continue: args.continue,

@@ -17,7 +17,7 @@ import { Plugin } from "@/plugin"
 import { Provider } from "@/provider/provider"
 import { SessionStatus } from "@/session/status"
 import { Config } from "@/config/config"
-import { Cause, Effect, Option, Schema, Scope } from "effect"
+import { Cause, Effect, Option, References, Schema, Scope } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { Global } from "@opencode-ai/core/global"
 import { spawnSync } from "node:child_process"
@@ -106,11 +106,22 @@ function output(sessionID: SessionID, text: string) {
   ].join("\n")
 }
 
+// Why a task runs in the background: launched there, moved there by the user (Ctrl+B), or left running when the
+// user interrupted the turn that was waiting for it.
+const BACKGROUND_NOTE = {
+  started:
+    "Background task started. Continue your current work and call task_status when you need the result, or wait for the auto-injected completion message.",
+  moved:
+    "The user moved this task to the background so you can keep working; it is still running. Continue with other work, and do not report it as complete until its result arrives. The result is auto-injected as a message when it finishes, or call task_status if you need it sooner.",
+  interrupted:
+    "The user interrupted the main turn, which does not stop subagents: this one keeps running in the background. Do not report it as complete until its result arrives. The result is auto-injected as a message when it finishes, or call task_status if you need it sooner.",
+}
+
 function backgroundOutput(
   sessionID: SessionID,
   selection: { model: MessageV2.User["model"]; variant: string },
   worktreeDir?: string,
-  movedByUser?: boolean,
+  reason: keyof typeof BACKGROUND_NOTE = "started",
 ) {
   const worktreeLine = worktreeDir ? `worktree: ${worktreeDir}\n` : ""
   return [
@@ -120,9 +131,19 @@ function backgroundOutput(
     `variant: ${selection.variant}`,
     worktreeLine + "",
     "<task_result>",
-    movedByUser
-      ? "The user moved this task to the background so you can keep working; it is still running. Continue with other work, and do not report it as complete until its result arrives. The result is auto-injected as a message when it finishes, or call task_status if you need it sooner."
-      : "Background task started. Continue your current work and call task_status when you need the result, or wait for the auto-injected completion message.",
+    BACKGROUND_NOTE[reason],
+    "</task_result>",
+  ].join("\n")
+}
+
+/** Output for a subagent that keeps running in the background after the turn waiting for it was interrupted. */
+export function interruptedOutput(sessionID: string) {
+  return [
+    `task_id: ${sessionID} (for polling this task with task_status)`,
+    "state: running",
+    "",
+    "<task_result>",
+    BACKGROUND_NOTE.interrupted,
     "</task_result>",
   ].join("\n")
 }
@@ -400,7 +421,7 @@ export const TaskTool = Tool.define(
       }
       const worktreeDir = worktreeInfo?.directory
 
-      const runCancel = yield* EffectBridge.make()
+      const bridge = yield* EffectBridge.make()
 
       const runTask = Effect.fn("TaskTool.runTask")(function* () {
         const teamPreamble = params.team
@@ -430,6 +451,7 @@ export const TaskTool = Tool.define(
       //   - LLM-initiated background (params.background === true)
       //   - User-initiated background (Ctrl+B → POST /session/:id/background,
       //     which releases this call's `background.block`)
+      //   - An interrupted parent turn, which leaves the subagent running
       // Sync mode that completes normally returns the result inline and
       // does NOT fork a watcher (the parent tool's response carries the
       // result, no synthetic user message needed).
@@ -496,7 +518,7 @@ export const TaskTool = Tool.define(
       })
 
       if (runInBackground) {
-        yield* reportOnComplete().pipe(Effect.forkIn(scope, { startImmediately: true }))
+        yield* reportOnComplete().pipe(Effect.forkIn(scope, { startImmediately: true }), detach)
         return {
           title: params.description,
           metadata: { ...metadata, jobId: job.id },
@@ -504,34 +526,35 @@ export const TaskTool = Tool.define(
         }
       }
 
-      // Sync mode: bridge ctx.abort (DOM AbortSignal) → Effect so parent
-      // interrupt cancels the subagent fiber, matching the prior behavior.
-      const cancel = ops.cancel(nextSession.id)
+      // Sync mode blocks until the subagent finishes, or until it moves to the background, which releases the block
+      // without stopping it: when the user moves the session's running work there (Ctrl+B), or when the parent turn
+      // is interrupted (ctx.abort fires, or this call itself is interrupted, as for a /command subtask). Stopping a
+      // subagent takes an explicit cancel (session.abort, stopping subagents), which finishes its job instead.
+      const moveToBackground = background.background(job.id)
       function onAbort() {
-        runCancel.fork(cancel)
+        bridge.fork(moveToBackground)
       }
-
-      // Blocks until the subagent finishes, or until the user moves this
-      // session's running work to the background (Ctrl+B), which releases the
-      // block without interrupting the subagent.
       const result = yield* Effect.acquireUseRelease(
-        Effect.sync(() => ctx.abort.addEventListener("abort", onAbort)),
+        Effect.sync(() => {
+          ctx.abort.addEventListener("abort", onAbort)
+          if (ctx.abort.aborted) onAbort()
+        }),
         () => background.block({ id: nextSession.id, sessionID: ctx.sessionID }),
         (_acquired, exit) =>
           Effect.gen(function* () {
             ctx.abort.removeEventListener("abort", onAbort)
-            if (exit._tag === "Failure" && Cause.hasInterrupts(exit.cause)) {
-              yield* cancel.pipe(Effect.ignore)
-            }
+            if (exit._tag === "Success" || !Cause.hasInterrupts(exit.cause)) return
+            if ((yield* moveToBackground)?.status !== "running") return
+            yield* reportOnComplete().pipe(Effect.forkIn(scope, { startImmediately: true }), detach)
           }),
       )
 
       if (result?.type === "backgrounded") {
-        yield* reportOnComplete().pipe(Effect.forkIn(scope, { startImmediately: true }))
+        yield* reportOnComplete().pipe(Effect.forkIn(scope, { startImmediately: true }), detach)
         return {
           title: params.description,
           metadata: { ...metadata, background: true, jobId: job.id },
-          output: backgroundOutput(nextSession.id, selection, worktreeDir, true),
+          output: backgroundOutput(nextSession.id, selection, worktreeDir, ctx.abort.aborted ? "interrupted" : "moved"),
         }
       }
 
@@ -560,3 +583,9 @@ export const TaskTool = Tool.define(
     }
   }),
 )
+
+// The reporter outlives the call by as long as the subagent runs. Drop the caller's lazy stack frames, which retain
+// its arguments (including the whole conversation).
+function detach<A, E, R>(effect: Effect.Effect<A, E, R>) {
+  return effect.pipe(Effect.provideService(References.CurrentStackFrame, undefined))
+}

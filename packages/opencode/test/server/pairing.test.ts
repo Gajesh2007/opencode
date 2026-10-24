@@ -38,6 +38,14 @@ describe("ServerPairing codes", () => {
     expect(a.code).toMatch(/^[A-Za-z0-9_-]+$/)
     expect(a.code).not.toBe(b.code)
   })
+
+  test("keeps at most 1000 live codes, evicting the oldest", () => {
+    const oldest = ServerPairing.issue()
+    const newer = Array.from({ length: 1000 }, () => ServerPairing.issue())
+
+    expect(ServerPairing.consume(oldest.code)).toBe(false)
+    expect(newer.filter((issued) => !ServerPairing.consume(issued.code))).toEqual([])
+  })
 })
 
 describe("ServerAuth sessions", () => {

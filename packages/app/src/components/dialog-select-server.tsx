@@ -9,13 +9,18 @@ import { TextField } from "@opencode-ai/ui/text-field"
 import { useMutation } from "@tanstack/solid-query"
 import { showToast } from "@opencode-ai/ui/toast"
 import { useNavigate } from "@solidjs/router"
-import { createEffect, createMemo, createResource, onCleanup, Show } from "solid-js"
+import { createEffect, createMemo, createResource, lazy, onCleanup, Show, Suspense } from "solid-js"
 import { createStore, reconcile } from "solid-js/store"
 import { ServerHealthIndicator, ServerRow } from "@/components/server/server-row"
 import { useLanguage } from "@/context/language"
 import { usePlatform } from "@/context/platform"
 import { normalizeServerUrl, ServerConnection, useServer } from "@/context/server"
+import { isMixedContent, type Pairing, pairingLink, useRedeemPairing } from "@/utils/pairing"
 import { type ServerHealth, useCheckServerHealth } from "@/utils/server-health"
+
+const PairingScanner = lazy(() =>
+  import("@/components/server/pairing-scanner").then((module) => ({ default: module.PairingScanner })),
+)
 
 const DEFAULT_USERNAME = "opencode"
 
@@ -28,6 +33,7 @@ interface ServerFormProps {
   busy: boolean
   error: string
   status: boolean | undefined
+  pairing: boolean
   onChange: (value: string) => void
   onNameChange: (value: string) => void
   onUsernameChange: (value: string) => void
@@ -93,7 +99,8 @@ function useServerPreview() {
     setStatus: (value: boolean | undefined) => void,
   ) => {
     setStatus(undefined)
-    if (!looksComplete(value)) return
+    // A pairing link is not a server address until it is redeemed, and only submitting may spend its code.
+    if (pairingLink(value) || !looksComplete(value)) return
     const normalized = normalizeServerUrl(value)
     if (!normalized) return
     const http: ServerConnection.HttpBase = { url: normalized }
@@ -104,6 +111,29 @@ function useServerPreview() {
   }
 
   return { previewStatus }
+}
+
+// Browsers only expose the camera to secure pages, and the desktop app has no camera permission flow.
+function usePairingCamera() {
+  const platform = usePlatform()
+  const [available, actions] = createResource(
+    async () => {
+      if (platform.platform !== "web" || !window.isSecureContext) return false
+      if (!navigator.mediaDevices?.getUserMedia || !navigator.mediaDevices.enumerateDevices) return false
+      const denied = await navigator.permissions?.query({ name: "camera" }).then(
+        (permission) => permission.state === "denied",
+        () => false,
+      )
+      if (denied) return false
+      return navigator.mediaDevices.enumerateDevices().then(
+        (devices) => devices.some((device) => device.kind === "videoinput"),
+        () => false,
+      )
+    },
+    { initialValue: false },
+  )
+
+  return { available, refetch: actions.refetch }
 }
 
 function ServerForm(props: ServerFormProps) {
@@ -123,19 +153,27 @@ function ServerForm(props: ServerFormProps) {
   return (
     <div class="px-5">
       <div class="bg-surface-base rounded-md p-5 flex flex-col gap-3">
-        <div class="flex-1 min-w-0 [&_[data-slot=input-wrapper]]:relative">
+        <div class="flex-1 min-w-0 flex flex-col gap-2 [&_[data-slot=input-wrapper]]:relative">
           <TextField
             type="text"
             label={language.t("dialog.server.add.url")}
             placeholder={props.placeholder}
             value={props.value}
             autofocus
+            spellcheck={false}
+            autocapitalize="off"
             validationState={props.error ? "invalid" : "valid"}
             error={props.error}
             disabled={props.busy}
+            aria-describedby="dialog-server-url-hint"
             onChange={props.onChange}
             onKeyDown={keyDown}
           />
+          <Show when={!props.error}>
+            <span id="dialog-server-url-hint" class="text-12-regular text-text-weak">
+              {language.t(props.pairing ? "dialog.server.add.pairing.detected" : "dialog.server.add.pairing.hint")}
+            </span>
+          </Show>
         </div>
         <TextField
           type="text"
@@ -146,26 +184,29 @@ function ServerForm(props: ServerFormProps) {
           onChange={props.onNameChange}
           onKeyDown={keyDown}
         />
-        <div class="grid grid-cols-2 gap-2 min-w-0">
-          <TextField
-            type="text"
-            label={language.t("dialog.server.add.username")}
-            placeholder={language.t("dialog.server.add.usernamePlaceholder")}
-            value={props.username}
-            disabled={props.busy}
-            onChange={props.onUsernameChange}
-            onKeyDown={keyDown}
-          />
-          <TextField
-            type="password"
-            label={language.t("dialog.server.add.password")}
-            placeholder={language.t("dialog.server.add.passwordPlaceholder")}
-            value={props.password}
-            disabled={props.busy}
-            onChange={props.onPasswordChange}
-            onKeyDown={keyDown}
-          />
-        </div>
+        {/* A pairing link signs in with a session token, so typed credentials would be ignored. */}
+        <Show when={!props.pairing}>
+          <div class="grid grid-cols-2 gap-2 min-w-0">
+            <TextField
+              type="text"
+              label={language.t("dialog.server.add.username")}
+              placeholder={language.t("dialog.server.add.usernamePlaceholder")}
+              value={props.username}
+              disabled={props.busy}
+              onChange={props.onUsernameChange}
+              onKeyDown={keyDown}
+            />
+            <TextField
+              type="password"
+              label={language.t("dialog.server.add.password")}
+              placeholder={language.t("dialog.server.add.passwordPlaceholder")}
+              value={props.password}
+              disabled={props.busy}
+              onChange={props.onPasswordChange}
+              onKeyDown={keyDown}
+            />
+          </div>
+        </Show>
       </div>
     </div>
   )
@@ -180,8 +221,11 @@ export function DialogSelectServer() {
   const { defaultKey, canDefault, setDefault } = useDefaultServer()
   const { previewStatus } = useServerPreview()
   const checkServerHealth = useCheckServerHealth()
+  const redeem = useRedeemPairing()
+  const camera = usePairingCamera()
   const [store, setStore] = createStore({
     status: {} as Record<ServerConnection.Key, ServerHealth | undefined>,
+    scanning: false,
     addServer: {
       url: "",
       name: "",
@@ -225,9 +269,31 @@ export function DialogSelectServer() {
     })
   }
 
+  // Browsers block plain HTTP requests from HTTPS pages without saying why, so explain it instead of a generic failure.
+  const connectionError = (url: string) =>
+    language.t(
+      platform.platform === "web" && isMixedContent(location.href, url)
+        ? "server.connect.mixedContent"
+        : "dialog.server.add.error",
+    )
+
+  // A pairing token works on every address of its server. Signing in again to the edited server keeps its address
+  // (e.g. localhost) even when the link names another one (e.g. 127.0.0.1 from opencode pair).
+  const keepAddress = async (original: ServerConnection.HttpBase, pairing: Pairing) => {
+    if (original.url === pairing.url) return pairing
+    const http = { ...pairing, url: original.url }
+    return (await checkServerHealth(http)).healthy ? http : pairing
+  }
+
   const addMutation = useMutation(() => ({
     mutationFn: async (value: string) => {
-      const normalized = normalizeServerUrl(value)
+      const redeemed = await redeem(value)
+      if (redeemed && "error" in redeemed) {
+        setStore("addServer", { error: redeemed.error })
+        return
+      }
+
+      const normalized = normalizeServerUrl(redeemed?.pairing.url ?? value)
       if (!normalized) {
         resetAdd()
         return
@@ -238,11 +304,14 @@ export function DialogSelectServer() {
         http: { url: normalized },
       }
       if (store.addServer.name.trim()) conn.displayName = store.addServer.name.trim()
-      if (store.addServer.password) conn.http.password = store.addServer.password
-      if (store.addServer.password && store.addServer.username) conn.http.username = store.addServer.username
+      // A redeemed pairing link signs in with its session token instead of the typed credentials.
+      const username = redeemed?.pairing.username ?? store.addServer.username
+      const password = redeemed?.pairing.password ?? store.addServer.password
+      if (password) conn.http.password = password
+      if (password && username) conn.http.username = username
       const result = await checkServerHealth(conn.http)
       if (!result.healthy) {
-        setStore("addServer", { error: language.t("dialog.server.add.error") })
+        setStore("addServer", { error: connectionError(normalized) })
         return
       }
 
@@ -254,15 +323,22 @@ export function DialogSelectServer() {
   const editMutation = useMutation(() => ({
     mutationFn: async (input: { original: ServerConnection.Any; value: string }) => {
       if (input.original.type !== "http") return
-      const normalized = normalizeServerUrl(input.value)
+      const redeemed = await redeem(input.value)
+      if (redeemed && "error" in redeemed) {
+        setStore("editServer", { error: redeemed.error })
+        return
+      }
+
+      const pairing = redeemed ? await keepAddress(input.original.http, redeemed.pairing) : undefined
+      const normalized = normalizeServerUrl(pairing?.url ?? input.value)
       if (!normalized) {
         resetEdit()
         return
       }
 
       const name = store.editServer.name.trim() || undefined
-      const username = store.editServer.username || undefined
-      const password = store.editServer.password || undefined
+      const username = (pairing?.username ?? store.editServer.username) || undefined
+      const password = (pairing?.password ?? store.editServer.password) || undefined
       const existingName = input.original.displayName
       if (
         normalized === input.original.http.url &&
@@ -281,7 +357,7 @@ export function DialogSelectServer() {
       }
       const result = await checkServerHealth(conn.http)
       if (!result.healthy) {
-        setStore("editServer", { error: language.t("dialog.server.add.error") })
+        setStore("editServer", { error: connectionError(normalized) })
         return
       }
       if (normalized === input.original.http.url) {
@@ -433,10 +509,12 @@ export function DialogSelectServer() {
   const resetForm = () => {
     resetAdd()
     resetEdit()
+    setStore("scanning", false)
   }
 
   const startAdd = () => {
     resetEdit()
+    setStore("scanning", false)
     setStore("addServer", {
       showForm: true,
       url: "",
@@ -450,6 +528,7 @@ export function DialogSelectServer() {
 
   const startEdit = (conn: ServerConnection.Http) => {
     resetAdd()
+    setStore("scanning", false)
     setStore("editServer", {
       id: conn.http.url,
       value: conn.http.url,
@@ -478,6 +557,21 @@ export function DialogSelectServer() {
   const isFormMode = createMemo(() => mode() !== "list")
   const isAddMode = createMemo(() => mode() === "add")
   const formBusy = createMemo(() => (isAddMode() ? addMutation.isPending : editMutation.isPending))
+  const formPairing = createMemo(() => !!pairingLink(isAddMode() ? store.addServer.url : store.editServer.value))
+
+  const stopScan = () => {
+    setStore("scanning", false)
+    // Camera access may have been denied while scanning, which hides the scan button.
+    void camera.refetch()
+  }
+
+  // The scanner already redeemed the code, so submitting the link it found reuses that token.
+  const completeScan = (link: string) => {
+    setStore("scanning", false)
+    if (mode() === "add") setStore("addServer", { url: link, error: "", status: undefined })
+    if (mode() === "edit") setStore("editServer", { value: link, error: "", status: undefined })
+    submitForm()
+  }
 
   const formTitle = createMemo(() => {
     if (!isFormMode()) return language.t("dialog.server.title")
@@ -508,22 +602,40 @@ export function DialogSelectServer() {
         <Show
           when={!isFormMode()}
           fallback={
-            <ServerForm
-              value={isAddMode() ? store.addServer.url : store.editServer.value}
-              name={isAddMode() ? store.addServer.name : store.editServer.name}
-              username={isAddMode() ? store.addServer.username : store.editServer.username}
-              password={isAddMode() ? store.addServer.password : store.editServer.password}
-              placeholder={language.t("dialog.server.add.placeholder")}
-              busy={formBusy()}
-              error={isAddMode() ? store.addServer.error : store.editServer.error}
-              status={isAddMode() ? store.addServer.status : store.editServer.status}
-              onChange={isAddMode() ? handleAddChange : handleEditChange}
-              onNameChange={isAddMode() ? handleAddNameChange : handleEditNameChange}
-              onUsernameChange={isAddMode() ? handleAddUsernameChange : handleEditUsernameChange}
-              onPasswordChange={isAddMode() ? handleAddPasswordChange : handleEditPasswordChange}
-              onSubmit={submitForm}
-              onBack={resetForm}
-            />
+            <Show
+              when={store.scanning}
+              fallback={
+                <ServerForm
+                  value={isAddMode() ? store.addServer.url : store.editServer.value}
+                  name={isAddMode() ? store.addServer.name : store.editServer.name}
+                  username={isAddMode() ? store.addServer.username : store.editServer.username}
+                  password={isAddMode() ? store.addServer.password : store.editServer.password}
+                  placeholder={language.t("dialog.server.add.placeholder")}
+                  busy={formBusy()}
+                  error={isAddMode() ? store.addServer.error : store.editServer.error}
+                  status={isAddMode() ? store.addServer.status : store.editServer.status}
+                  pairing={formPairing()}
+                  onChange={isAddMode() ? handleAddChange : handleEditChange}
+                  onNameChange={isAddMode() ? handleAddNameChange : handleEditNameChange}
+                  onUsernameChange={isAddMode() ? handleAddUsernameChange : handleEditUsernameChange}
+                  onPasswordChange={isAddMode() ? handleAddPasswordChange : handleEditPasswordChange}
+                  onSubmit={submitForm}
+                  onBack={resetForm}
+                />
+              }
+            >
+              <div class="px-5 pb-5 min-h-0 overflow-y-auto">
+                <Suspense
+                  fallback={
+                    <p role="status" class="text-14-regular text-text-weak">
+                      {language.t("server.connect.camera.starting")}
+                    </p>
+                  }
+                >
+                  <PairingScanner redeem={redeem} onScan={completeScan} onCancel={stopScan} />
+                </Suspense>
+              </div>
+            </Show>
           }
         >
           <List
@@ -619,30 +731,46 @@ export function DialogSelectServer() {
           </List>
         </Show>
 
-        <div class="shrink-0 px-5 pb-5">
-          <Show
-            when={isFormMode()}
-            fallback={
-              <Button
-                variant="secondary"
-                icon="plus-small"
-                size="large"
-                onClick={startAdd}
-                class="py-1.5 pl-1.5 pr-3 flex items-center gap-1.5"
-              >
-                {language.t("dialog.server.add.button")}
-              </Button>
-            }
-          >
-            <Button variant="primary" size="large" onClick={submitForm} disabled={formBusy()} class="px-3 py-1.5">
-              {formBusy()
-                ? language.t("dialog.server.add.checking")
-                : isAddMode()
-                  ? language.t("dialog.server.add.button")
-                  : language.t("common.save")}
-            </Button>
-          </Show>
-        </div>
+        {/* The scanner has its own cancel button, and submits the form once it reads a pairing code. */}
+        <Show when={!(isFormMode() && store.scanning)}>
+          <div class="shrink-0 px-5 pb-5">
+            <Show
+              when={isFormMode()}
+              fallback={
+                <Button
+                  variant="secondary"
+                  icon="plus-small"
+                  size="large"
+                  onClick={startAdd}
+                  class="py-1.5 pl-1.5 pr-3 flex items-center gap-1.5"
+                >
+                  {language.t("dialog.server.add.button")}
+                </Button>
+              }
+            >
+              <div class="flex items-center gap-2">
+                <Button variant="primary" size="large" onClick={submitForm} disabled={formBusy()} class="px-3 py-1.5">
+                  {formBusy()
+                    ? language.t("dialog.server.add.checking")
+                    : isAddMode()
+                      ? language.t("dialog.server.add.button")
+                      : language.t("common.save")}
+                </Button>
+                <Show when={camera.available.latest}>
+                  <Button
+                    variant="secondary"
+                    size="large"
+                    onClick={() => setStore("scanning", true)}
+                    disabled={formBusy()}
+                    class="px-3 py-1.5"
+                  >
+                    {language.t("server.connect.scan")}
+                  </Button>
+                </Show>
+              </div>
+            </Show>
+          </div>
+        </Show>
       </div>
     </Dialog>
   )

@@ -43,13 +43,25 @@ function validateCredential<A, E, R>(
   return Effect.gen(function* () {
     if (!ServerAuth.required(config)) return yield* effect
     if (!ServerAuth.authorized(credential, config) && !authorizedSessionCookie(request, config)) {
-      yield* HttpEffect.appendPreResponseHandler((_request, response) =>
-        Effect.succeed(HttpServerResponse.setHeader(response, "www-authenticate", WWW_AUTHENTICATE)),
-      )
+      yield* challenge(request)
       return yield* new HttpApiError.Unauthorized({})
     }
     return yield* effect
   })
+}
+
+// Browsers show a native credentials prompt for a Basic challenge even on fetch, which would stall the web app
+// before it can show its own sign-in screen. Only non-browser clients and page navigations get the challenge.
+function challengeRequest(request: HttpServerRequest.HttpServerRequest) {
+  const mode = request.headers["sec-fetch-mode"]
+  return mode === undefined || mode === "navigate"
+}
+
+function challenge(request: HttpServerRequest.HttpServerRequest) {
+  if (!challengeRequest(request)) return Effect.void
+  return HttpEffect.appendPreResponseHandler((_request, response) =>
+    Effect.succeed(HttpServerResponse.setHeader(response, "www-authenticate", WWW_AUTHENTICATE)),
+  )
 }
 
 function decodeCredential(input: string) {
@@ -57,11 +69,12 @@ function decodeCredential(input: string) {
     Effect.match({
       onFailure: emptyCredential,
       onSuccess: (header) => {
-        const parts = header.split(":")
-        if (parts.length !== 2) return emptyCredential()
+        // The user-id cannot contain a colon but the password can (RFC 7617), so split at the first one.
+        const separator = header.indexOf(":")
+        if (separator === -1) return emptyCredential()
         return {
-          username: parts[0],
-          password: Redacted.make(parts[1]),
+          username: header.slice(0, separator),
+          password: Redacted.make(header.slice(separator + 1)),
         }
       },
     }),
@@ -101,7 +114,7 @@ function validateRawCredential<A, E, R>(
     return Effect.succeed(
       HttpServerResponse.empty({
         status: UNAUTHORIZED,
-        headers: { "www-authenticate": WWW_AUTHENTICATE },
+        headers: challengeRequest(request) ? { "www-authenticate": WWW_AUTHENTICATE } : undefined,
       }),
     )
   return effect
@@ -154,9 +167,7 @@ export const v2AuthorizationLayer = Layer.effect(
             Effect.gen(function* () {
               if (ServerAuth.authorized(credential, config) || authorizedSessionCookie(request, config))
                 return yield* effect
-              yield* HttpEffect.appendPreResponseHandler((_request, response) =>
-                Effect.succeed(HttpServerResponse.setHeader(response, "www-authenticate", WWW_AUTHENTICATE)),
-              )
+              yield* challenge(request)
               return yield* new UnauthorizedError({ message: "Authentication required" })
             }),
           ),
