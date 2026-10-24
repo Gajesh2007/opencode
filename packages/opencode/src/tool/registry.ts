@@ -71,6 +71,7 @@ import { Permission } from "@/permission"
 import { Reference } from "@/reference/reference"
 import { BackgroundJob } from "@/background/job"
 import { SessionStatus } from "@/session/status"
+import { ShellProcess } from "@/shell/process"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 
 const log = Log.create({ service: "tool.registry" })
@@ -112,6 +113,7 @@ export const layer: Layer.Layer<
   | Session.Service
   | SessionStatus.Service
   | BackgroundJob.Service
+  | ShellProcess.Service
   | Provider.Service
   | Git.Service
   | RepositoryCache.Service
@@ -452,7 +454,7 @@ export const defaultLayer = Layer.suspend(() =>
       Layer.provide(Skill.defaultLayer),
       Layer.provide(Agent.defaultLayer),
       Layer.provide(Session.defaultLayer),
-      Layer.provide(Layer.mergeAll(SessionStatus.defaultLayer, BackgroundJob.defaultLayer)),
+      Layer.provide(Layer.mergeAll(SessionStatus.defaultLayer, BackgroundJob.defaultLayer, ShellProcess.defaultLayer)),
       Layer.provide(Provider.defaultLayer),
       Layer.provide(Layer.mergeAll(Git.defaultLayer, RepositoryCache.defaultLayer)),
       Layer.provide(Reference.defaultLayer),

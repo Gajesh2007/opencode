@@ -20,6 +20,10 @@ exports[`tool parameters JSON Schema (wire shape) bash 1`] = `
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
+    "background": {
+      "description": "Run the command in the background and return immediately (useful for dev servers, watchers, and long builds). Do not append '&' to the command. You will be notified with its output when it finishes; do not poll for completion.",
+      "type": "boolean",
+    },
     "command": {
       "description": "The command to execute",
       "type": "string",
@@ -42,7 +46,7 @@ Output: Creates directory 'foo'"
       "type": "string",
     },
     "timeout": {
-      "description": "Optional timeout in milliseconds",
+      "description": "Optional timeout in milliseconds. Background commands have no timeout unless one is given.",
       "exclusiveMinimum": 0,
       "maximum": 9007199254740991,
       "minimum": -9007199254740991,
@@ -115,6 +119,12 @@ exports[`tool parameters JSON Schema (wire shape) grep 1`] = `
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
+    "context": {
+      "description": "Lines of context before and after each match (0-10). Defaults to 0; positive values enable bounded search.",
+      "maximum": 10,
+      "minimum": 0,
+      "type": "integer",
+    },
     "include": {
       "description": "File pattern to include in the search (e.g. "*.js", "*.{ts,tsx}")",
       "type": "string",
@@ -335,6 +345,10 @@ exports[`tool parameters JSON Schema (wire shape) task 1`] = `
       "description": "When true, spawn a fork that inherits this session's full conversation context instead of starting fresh. Omit subagent_type to fork your own agent. A fork cannot fork again.",
       "type": "boolean",
     },
+    "model": {
+      "description": "Model for this child only, in provider/model format. Omit on creation to use the selected agent's model or the parent model; omit on resume to keep the child's latest selection. Only the direct parent can change a child's selection.",
+      "type": "string",
+    },
     "name": {
       "description": "Name for this teammate within the team, so others can address it with send_message. Defaults to the subagent type. Only meaningful with \`team\`.",
       "type": "string",
@@ -342,6 +356,10 @@ exports[`tool parameters JSON Schema (wire shape) task 1`] = `
     "prompt": {
       "description": "The task for the agent to perform",
       "type": "string",
+    },
+    "reset_model": {
+      "description": "When true, reselect the current agent/parent model defaults for this child. Cannot be combined with model or variant. Resuming a child requires it to be idle.",
+      "type": "boolean",
     },
     "subagent_type": {
       "description": "The type of specialized agent to use for this task. Omit it together with fork=true to fork yourself (inherit your own agent + full context).",
@@ -353,6 +371,10 @@ exports[`tool parameters JSON Schema (wire shape) task 1`] = `
     },
     "team": {
       "description": "Spawn this subagent as a member of the named team, sharing a task list and mailbox with other teammates so they can coordinate via send_message/inbox/team_tasks.",
+      "type": "string",
+    },
+    "variant": {
+      "description": "Model-specific reasoning effort/variant for this child. Use a supported variant, or 'default' to clear named effort. Omit on resume to preserve it when the model is unchanged; a model change uses the destination agent default or 'default'.",
       "type": "string",
     },
     "worktree": {

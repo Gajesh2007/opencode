@@ -10,6 +10,12 @@ IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO N
 
 ${commandSection}
 
+# Background commands
+- Set `background` to true for commands that keep running or take a long time, such as dev servers, watchers, and long builds. Do not append `&` to the command.
+- A background command returns immediately with its shell ID, PID, and output file. It has no timeout unless `timeout` is given.
+- You will be notified with its output when it finishes. Do not poll for completion: keep working on anything that does not depend on the result, or end your response if nothing else is left; you will be resumed automatically.
+- ${backgroundStop}
+
 # Git and GitHub
 - Only commit, amend, push, or create PRs when explicitly requested.
 - Before committing, inspect `git status`, `git diff`, and `git log --oneline -10`; stage only intended files and never commit secrets.

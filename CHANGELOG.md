@@ -2,6 +2,55 @@
 
 This file tracks customizations made to this personal fork of opencode on top of upstream `dev`. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased] — 2026-10-23
+
+### Added — Background tasks, background shells, and Ctrl+B (port of upstream v2)
+
+Shell commands and subagents can now run in the background, either started that way by the model or moved there mid-flight with **Ctrl+B**. Each reports back to its session when it finishes.
+
+**Shell processes** — new `ShellProcess` service (`src/shell/process.ts`):
+- Every shell command, from the model's `bash` tool or a user `!` command, is an instance-owned process that outlives the call that started it.
+- Combined stdout/stderr is captured to a file in the truncation dir, so agents can read it without a prompt and the 7-day sweep cleans it up.
+- Supports live listeners, re-armable timeouts, and process-group kill with SIGKILL escalation. If a descendant escapes into its own session and holds the pipe open, the capture is released after the grace period.
+- Output is paged on UTF-8 character boundaries.
+- The 50 most recently exited commands per instance are kept.
+- Events: `shell.updated` and `shell.deleted`.
+
+**Blocking and backgrounding** — `BackgroundJob` gained `block`, `background`, `backgroundAll` and `start({ background })`:
+- Ctrl+B calls `POST /session/:id/background`, which releases everything that session is blocked on without interrupting it.
+- Subagent demotion now uses the same mechanism; it previously raced a bus event. The legacy `tui.subagent.demote` publish maps onto it.
+- Finished jobs are capped at 100 per type.
+
+**Model `bash` tool**:
+- New `background: true` parameter: returns immediately with the shell ID, PID and output file. Background commands have no timeout unless one is given.
+- Foreground commands stream live output as before and can be moved to the background with Ctrl+B, which also clears their timeout.
+- Completion arrives as a synthetic notice:
+  - Format: `<shell id state command>…</shell>`, with metadata `source: "shell"`.
+  - It resumes an idle session with a toast. It does not resume for user kills or signal stops, for subagent sessions, or while an /undo is staged.
+
+**User `!` commands**:
+- Now run through `ShellProcess`. Ctrl+B frees the session while the command keeps running.
+- Their completion is recorded without waking the agent.
+
+**Background work and session lifecycle**:
+- Backgrounded work survives Esc.
+- Deleting a session kills its shells (`metadata.ownerSessionID`).
+
+**HTTP API** (SDK regenerated):
+- `GET /shell?sessionID=`
+- `GET /shell/:id`
+- `GET /shell/:id/output?cursor&limit`
+- `POST /shell/:id/kill`
+- `POST /session/:id/background`
+
+**TUI**:
+- `session_background` (ctrl+b) replaces `subagent_background`; the old name is still accepted as an alias.
+- A "Press ctrl+b to move running work to the background" hint appears after 3 s.
+- `/tasks` lists running and recent background shells, with a live output viewer and a kill action (`shell_kill`, ctrl+d).
+- A footer chip shows running shells and subagents.
+- Background shell parts show a live status.
+- Completion notices appear as one-line rows, e.g. `↳ Shell finished · npm test`.
+
 ## [Unreleased] — 2026-05-29
 
 ### Added — TUI for the multi-agent tools (Claude-Code-style)

@@ -155,6 +155,7 @@ export function Prompt(props: PromptProps) {
   const keymap = useOpencodeKeymap()
   const agentShortcut = useCommandShortcut("agent.cycle")
   const paletteShortcut = useCommandShortcut("command.palette.show")
+  const tasksShortcut = useCommandShortcut("tasks.list")
   const renderer = useRenderer()
   const dimensions = useTerminalDimensions()
   const { theme, syntax } = useTheme()
@@ -351,6 +352,24 @@ export function Prompt(props: PromptProps) {
       context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
       cost: cost > 0 ? money.format(cost) : undefined,
     }
+  })
+
+  // Work that keeps running outside the transcript, e.g. "2 shells · 1 subagent". Opens /tasks.
+  const [workHover, setWorkHover] = createSignal(false)
+  const work = createMemo(() => {
+    const sessionID = props.sessionID
+    if (!sessionID) return
+    const shells = sync.shell.list(sessionID).filter((shell) => shell.status === "running").length
+    const subagents = sync.data.session.filter((session) => {
+      const type = sync.data.session_status[session.id]?.type
+      return session.parentID === sessionID && (type === "busy" || type === "retry")
+    }).length
+    return [
+      shells ? `${shells} shell${shells === 1 ? "" : "s"}` : undefined,
+      subagents ? `${subagents} subagent${subagents === 1 ? "" : "s"}` : undefined,
+    ]
+      .filter(Boolean)
+      .join(" · ")
   })
 
   const [store, setStore] = createStore<{
@@ -1875,6 +1894,23 @@ export function Prompt(props: PromptProps) {
           </Switch>
           <Show when={status().type !== "retry"}>
             <box gap={2} flexDirection="row">
+              <Show when={work()}>
+                {(label) => (
+                  <box
+                    flexShrink={0}
+                    onMouseOver={() => setWorkHover(true)}
+                    onMouseOut={() => setWorkHover(false)}
+                    onMouseUp={() => keymap.dispatchCommand("tasks.list")}
+                  >
+                    <text fg={workHover() ? theme.text : theme.textMuted} wrapMode="none">
+                      <Show when={tasksShortcut()}>
+                        {(shortcut) => <span style={{ fg: theme.text }}>{shortcut()} </span>}
+                      </Show>
+                      {label()}
+                    </text>
+                  </box>
+                )}
+              </Show>
               <Show when={editorContextLabelState() !== "none" ? editorFileLabelDisplay() : undefined}>
                 {(file) => (
                   <text fg={editorContextLabelState() === "pending" ? theme.secondary : theme.textMuted}>{file()}</text>

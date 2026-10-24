@@ -11,7 +11,7 @@ import { SessionStatus } from "@/session/status"
 import { Storage } from "@/storage/storage"
 import { SyncEvent } from "@/sync"
 import { withTmpdirInstance } from "../fixture/fixture"
-import { testEffect } from "../lib/effect"
+import { pollWithTimeout, testEffect } from "../lib/effect"
 
 const it = testEffect(BackgroundJob.defaultLayer)
 
@@ -325,6 +325,111 @@ describe("background.job", () => {
       for (let frame = result.frame; frame; frame = frame.parent) frames.push(frame)
       expect(frames.find((frame) => frame.name === "fixture caller")?.stack()).toBe("fixture diagnostic text")
       expect(result.span).toBe("BackgroundJob.start")
+    }),
+  )
+
+  it.instance("blocks until a job finishes", () =>
+    Effect.gen(function* () {
+      const jobs = yield* BackgroundJob.Service
+      const latch = yield* Deferred.make<void>()
+      const job = yield* jobs.start({ type: "test", run: Deferred.await(latch).pipe(Effect.as("done")) })
+      const blocked = yield* jobs.block({ id: job.id, sessionID: "ses_a" }).pipe(Effect.forkChild)
+      yield* Deferred.succeed(latch, undefined)
+      const result = yield* Fiber.join(blocked)
+      expect(result?.type).toBe("finished")
+      expect(result?.info.output).toBe("done")
+      expect(yield* jobs.block({ id: "job_missing", sessionID: "ses_a" })).toBeUndefined()
+      expect((yield* jobs.block({ id: job.id, sessionID: "ses_a" }))?.type).toBe("finished")
+    }),
+  )
+
+  it.instance("releases blockers when a job moves to the background without stopping it", () =>
+    Effect.gen(function* () {
+      const jobs = yield* BackgroundJob.Service
+      const latch = yield* Deferred.make<void>()
+      const job = yield* jobs.start({ type: "test", run: Deferred.await(latch).pipe(Effect.as("late")) })
+      const blocked = yield* jobs.block({ id: job.id, sessionID: "ses_a" }).pipe(Effect.forkChild)
+      yield* pollWithTimeout(
+        jobs.backgroundAll({ sessionID: "ses_a" }).pipe(Effect.map((moved) => (moved.length ? moved : undefined))),
+        "job never became blocked",
+      )
+      const result = yield* Fiber.join(blocked)
+      expect(result?.type).toBe("backgrounded")
+      expect(result?.info.status).toBe("running")
+      expect(result?.info.background).toBe(true)
+      // Backgrounded jobs return immediately and are not backgrounded twice.
+      expect((yield* jobs.block({ id: job.id, sessionID: "ses_a" }))?.type).toBe("backgrounded")
+      expect(yield* jobs.backgroundAll({ sessionID: "ses_a" })).toEqual([])
+
+      yield* Deferred.succeed(latch, undefined)
+      const done = yield* jobs.wait({ id: job.id })
+      expect(done.info?.status).toBe("completed")
+      expect(done.info?.output).toBe("late")
+      expect(done.info?.background).toBe(true)
+    }),
+  )
+
+  it.instance("backgrounds only the jobs the session is blocked on", () =>
+    Effect.gen(function* () {
+      const jobs = yield* BackgroundJob.Service
+      const mine = yield* jobs.start({ type: "shell", run: Effect.never })
+      const other = yield* jobs.start({ type: "shell", run: Effect.never })
+      const subagent = yield* jobs.start({ type: "task", run: Effect.never })
+      const unblocked = yield* jobs.start({ type: "shell", run: Effect.never })
+      const now = Effect.forkChild({ startImmediately: true })
+      yield* jobs.block({ id: mine.id, sessionID: "ses_a" }).pipe(now)
+      yield* jobs.block({ id: other.id, sessionID: "ses_b" }).pipe(now)
+      yield* jobs.block({ id: subagent.id, sessionID: "ses_a" }).pipe(now)
+
+      const shells = yield* jobs.backgroundAll({ sessionID: "ses_a", type: "shell" })
+      expect(shells.map((item) => item.id)).toEqual([mine.id])
+      expect((yield* jobs.backgroundAll({ sessionID: "ses_a" })).map((item) => item.id)).toEqual([subagent.id])
+      expect((yield* jobs.get(other.id))?.background).toBeUndefined()
+      expect((yield* jobs.get(unblocked.id))?.background).toBeUndefined()
+    }),
+  )
+
+  it.instance("stops counting an interrupted blocker", () =>
+    Effect.gen(function* () {
+      const jobs = yield* BackgroundJob.Service
+      const kept = yield* jobs.start({ type: "test", run: Effect.never })
+      const dropped = yield* jobs.start({ type: "test", run: Effect.never })
+      const now = Effect.forkChild({ startImmediately: true })
+      yield* jobs.block({ id: kept.id, sessionID: "ses_a" }).pipe(now)
+      const blocked = yield* jobs.block({ id: dropped.id, sessionID: "ses_a" }).pipe(now)
+      yield* Fiber.interrupt(blocked)
+      expect((yield* jobs.backgroundAll({ sessionID: "ses_a" })).map((item) => item.id)).toEqual([kept.id])
+      expect((yield* jobs.get(dropped.id))?.status).toBe("running")
+    }),
+  )
+
+  it.instance("caps retained finished jobs per type", () =>
+    Effect.gen(function* () {
+      const jobs = yield* BackgroundJob.Service
+      const task = yield* jobs.start({ type: "task", run: Effect.succeed("kept") })
+      yield* jobs.wait({ id: task.id })
+      const shells = yield* Effect.forEach(Array.from({ length: 105 }), () =>
+        jobs.start({ type: "shell", run: Effect.succeed("out") }).pipe(
+          Effect.tap((job) => jobs.wait({ id: job.id })),
+        ),
+      )
+      const listed = yield* jobs.list({ includeOutput: false })
+      expect(listed.filter((job) => job.type === "shell")).toHaveLength(100)
+      expect(yield* jobs.get(shells[0].id)).toBeUndefined()
+      expect(yield* jobs.get(shells[4].id)).toBeUndefined()
+      expect((yield* jobs.get(shells[5].id))?.output).toBe("out")
+      // Other types are retained independently.
+      expect((yield* jobs.get(task.id))?.output).toBe("kept")
+    }),
+  )
+
+  it.instance("starts jobs already in the background", () =>
+    Effect.gen(function* () {
+      const jobs = yield* BackgroundJob.Service
+      const job = yield* jobs.start({ type: "test", background: true, run: Effect.never })
+      expect(job.background).toBe(true)
+      expect((yield* jobs.block({ id: job.id, sessionID: "ses_a" }))?.type).toBe("backgrounded")
+      expect((yield* jobs.background(job.id))?.background).toBe(true)
     }),
   )
 })

@@ -1,6 +1,14 @@
 import { describe, expect, test } from "bun:test"
-import type { AssistantMessage, Message, Session, TextPart, ToolPart, UserMessage } from "@opencode-ai/sdk/v2"
-import { taskEntries } from "../../../../src/cli/cmd/tui/component/task-entries"
+import type {
+  AssistantMessage,
+  Message,
+  Session,
+  ShellProcess,
+  TextPart,
+  ToolPart,
+  UserMessage,
+} from "@opencode-ai/sdk/v2"
+import { backgroundEntries, taskEntries } from "../../../../src/cli/cmd/tui/component/task-entries"
 
 type Data = Parameters<typeof taskEntries>[0]
 
@@ -310,5 +318,69 @@ describe("task entries", () => {
     expect(taskEntries(input)[0].category).toBe("Completed")
     input.session_status.child = { type: "busy" }
     expect(taskEntries(input)[0].category).toBe("Running")
+  })
+})
+
+function shell(id: string, input: Partial<ShellProcess> = {}): ShellProcess {
+  return {
+    id,
+    sessionID: "parent",
+    source: "tool",
+    command: `echo ${id}`,
+    cwd: "/project",
+    shell: "/bin/bash",
+    file: `/tmp/${id}`,
+    status: "running",
+    background: false,
+    time: { started: 1 },
+    ...input,
+  }
+}
+
+function list(entries: ReturnType<typeof backgroundEntries>) {
+  return entries.map((entry) => [entry.type === "shell" ? entry.shell.id : entry.session.id, entry.category])
+}
+
+describe("background entries", () => {
+  test("lists the session's running shells, then its exited background shells, newest first", () => {
+    const shells = [
+      shell("sh_old", { time: { started: 1 } }),
+      shell("sh_new", { background: true, time: { started: 5 } }),
+      shell("sh_done", { background: true, status: "exited", exit: 0, time: { started: 2, completed: 3 } }),
+      shell("sh_killed", { background: true, status: "killed", time: { started: 2, completed: 8 } }),
+      shell("sh_foreground", { status: "exited", exit: 1, time: { started: 2, completed: 9 } }),
+      shell("sh_other", { sessionID: "other", time: { started: 9 } }),
+      shell("sh_global", { sessionID: undefined, time: { started: 9 } }),
+    ]
+    const input = { ...data({ session: [] }), shell: Object.fromEntries(shells.map((item) => [item.id, item])) }
+
+    expect(list(backgroundEntries(input, "parent"))).toEqual([
+      ["sh_new", "Running"],
+      ["sh_old", "Running"],
+      ["sh_killed", "Recent shells"],
+      ["sh_done", "Recent shells"],
+    ])
+    expect(backgroundEntries(input)).toEqual([])
+  })
+
+  test("groups running shells and subagents before finished ones", () => {
+    const input = {
+      ...data({
+        session: [session("running"), session("finished", 5)],
+        session_status: { running: { type: "busy" } },
+        message: { finished: [user(), assistant()] },
+      }),
+      shell: {
+        sh_running: shell("sh_running"),
+        sh_done: shell("sh_done", { background: true, status: "timeout", time: { started: 1, completed: 2 } }),
+      },
+    }
+
+    expect(list(backgroundEntries(input, "parent"))).toEqual([
+      ["sh_running", "Running"],
+      ["running", "Running"],
+      ["sh_done", "Recent shells"],
+      ["finished", "Completed"],
+    ])
   })
 })

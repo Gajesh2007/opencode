@@ -64,6 +64,11 @@ export type ScenarioContext = {
   llmText: (value: string) => Effect.Effect<void>
   llmWait: (count: number) => Effect.Effect<void>
   tuiRequest: (request: { path: string; body: unknown }) => Effect.Effect<void>
+  /**
+   * Sends a request through the app under test. Seeds state that only lives in its services, such as
+   * running shell commands, which `session(...)`-style helpers cannot reach.
+   */
+  request: (method: Method, spec: RequestSpec) => Effect.Effect<CallResult>
 }
 
 /** Scenario context after `.seeded(...)`; `state` preserves the seed return type in the DSL. */

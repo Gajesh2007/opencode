@@ -18,6 +18,7 @@ import { PairingConnectApi } from "./groups/server"
 import { QuestionApi } from "./groups/question"
 import { ServerApi } from "./groups/server"
 import { SessionApi } from "./groups/session"
+import { ShellApi } from "./groups/shell"
 import { SyncApi } from "./groups/sync"
 import { TuiApi } from "./groups/tui"
 import { WorkspaceApi } from "./groups/workspace"
@@ -48,6 +49,7 @@ export const InstanceHttpApi = HttpApi.make("opencode-instance")
   .addHttpApi(PermissionApi)
   .addHttpApi(ProviderApi)
   .addHttpApi(SessionApi)
+  .addHttpApi(ShellApi)
   .addHttpApi(SyncApi)
   .addHttpApi(V2Api)
   .addHttpApi(TuiApi)

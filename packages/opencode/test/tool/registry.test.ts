@@ -25,6 +25,7 @@ import { Memory } from "@/memory/memory"
 import { BackgroundJob } from "@/background/job"
 import { Session } from "@/session/session"
 import { SessionStatus } from "@/session/status"
+import { ShellProcess } from "@/shell/process"
 import { Provider } from "@/provider/provider"
 import { Git } from "@/git"
 import { LSP } from "@/lsp/lsp"
@@ -64,7 +65,7 @@ const registryLayer = (opts: RegistryLayerOptions = {}) =>
       Layer.provide(Skill.defaultLayer),
       Layer.provide(Agent.defaultLayer),
       Layer.provide(Session.defaultLayer),
-      Layer.provide(Layer.mergeAll(SessionStatus.defaultLayer, BackgroundJob.defaultLayer)),
+      Layer.provide(Layer.mergeAll(SessionStatus.defaultLayer, BackgroundJob.defaultLayer, ShellProcess.defaultLayer)),
       Layer.provide(Provider.defaultLayer),
       Layer.provide(Layer.mergeAll(Git.defaultLayer, RepositoryCache.defaultLayer)),
       Layer.provide(Reference.defaultLayer),

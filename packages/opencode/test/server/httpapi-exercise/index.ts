@@ -17,7 +17,7 @@
  * - `.json(...)` / `.jsonEffect(...)` assert response shape and optional side effects.
  * - `.mutating()` tells the runner to reset isolated state after destructive routes.
  */
-import { Effect } from "effect"
+import { Effect, Fiber } from "effect"
 import { OpenApi } from "effect/unstable/httpapi"
 import { TestLLMServer } from "../../lib/llm-server"
 import path from "path"
@@ -34,12 +34,94 @@ import { color, printHeader, printResults } from "./report"
 import { coverageResult, parseOptions, routeKey, routeKeys, selectedScenarios } from "./routing"
 import { runScenario } from "./runner"
 import { runtime } from "./runtime"
-import { type Scenario } from "./types"
+import { type ScenarioContext, type Scenario } from "./types"
 
 void (await import("@opencode-ai/core/util/log")).init({ print: false })
 
+// Auth probes run against a password-protected app, where an unused code redeems for a session token.
+// Codes are single use and short-lived, so each run issues its own.
+const pairing = (await import("../../../src/server/pairing")).ServerPairing.issue()
+
 function cursor(input: Record<string, unknown>) {
   return Buffer.from(JSON.stringify(input)).toString("base64url")
+}
+
+// Auth probes carry no project directory, so the server falls back to its own working directory (the
+// developer's checkout). Probes for routes that write there must fail validation once authorized.
+const invalidConfigProbe = { path: "/config", body: { username: 1 } }
+const invalidWorktreeProbe = { path: "/experimental/worktree", body: { name: 1 } }
+
+// `!` commands run on plain sh: login shells source user profiles, which is slow and machine-specific.
+const shellProject = { git: true, config: { shell: "/bin/sh" } }
+
+function userShell(ctx: ScenarioContext, sessionID: string, command: string) {
+  return ctx.request("POST", {
+    path: route("/session/{sessionID}/shell", { sessionID }),
+    headers: ctx.headers(),
+    body: { agent: "build", model: { providerID: "test", modelID: "test-model" }, command },
+  })
+}
+
+// The bash part's metadata in a `!` command's response.
+function shellMetadata(body: unknown) {
+  object(body)
+  const part = Array.isArray(body.parts) ? body.parts.find((item) => isRecord(item) && item.type === "tool") : undefined
+  check(isRecord(part) && isRecord(part.state) && isRecord(part.state.metadata), "shell should return a tool part")
+  return part.state.metadata
+}
+
+// Runs a `!` command to completion through the API, so its shell lives in the app under test.
+function finishedShell(ctx: ScenarioContext, command: string) {
+  return Effect.gen(function* () {
+    const session = yield* ctx.session({ title: "Shell session" })
+    const result = yield* userShell(ctx, session.id, command)
+    check(result.status === 200, `shell command should finish: ${result.text}`)
+    const shellID = shellMetadata(result.body).shellID
+    check(typeof shellID === "string", "shell part should carry its shell id")
+    return { session, shellID }
+  })
+}
+
+// Starts a long-running `!` command without waiting for its response. Resolves once the command runs
+// and blocks its session, so it can be killed or moved to the background.
+function runningShell(ctx: ScenarioContext) {
+  return Effect.gen(function* () {
+    const session = yield* ctx.session({ title: "Running shell session" })
+    const call = yield* userShell(ctx, session.id, "sleep 30").pipe(Effect.forkDetach)
+    const shellID = yield* poll(
+      ctx
+        .request("GET", {
+          path: route("/session/{sessionID}/message", { sessionID: session.id }),
+          headers: ctx.headers(),
+        })
+        .pipe(Effect.map((result) => runningShellID(result.body))),
+      "shell command never started",
+    )
+    return { session, call, shellID }
+  })
+}
+
+function runningShellID(messages: unknown) {
+  if (!Array.isArray(messages)) return
+  const id = messages
+    .flatMap((item) => (isRecord(item) && Array.isArray(item.parts) ? item.parts : []))
+    .map((part) =>
+      isRecord(part) && isRecord(part.state) && part.state.status === "running" && isRecord(part.state.metadata)
+        ? part.state.metadata.shellID
+        : undefined,
+    )
+    .find((value) => typeof value === "string")
+  return typeof id === "string" ? id : undefined
+}
+
+function poll<A>(effect: Effect.Effect<A | undefined>, failure: string) {
+  return Effect.gen(function* () {
+    while (true) {
+      const value = yield* effect
+      if (value !== undefined) return value
+      yield* Effect.sleep("20 millis")
+    }
+  }).pipe(Effect.timeoutOrElse({ duration: "10 seconds", orElse: () => Effect.die(new Error(failure)) }))
 }
 
 const scenarios: Scenario[] = [
@@ -50,6 +132,49 @@ const scenarios: Scenario[] = [
       object(body)
       check(body.healthy === true, "server should report healthy")
     }),
+  http.protected
+    .get("/global/info", "global.info")
+    .global()
+    .json(
+      200,
+      (body) => {
+        object(body)
+        check(typeof body.version === "string" && typeof body.pid === "number", "info should identify the server")
+        array(body.urls)
+        check(isRecord(body.paths) && typeof body.paths.tmp === "string", "info should report the temp path")
+      },
+      "status",
+    ),
+  http.protected
+    .post("/api/pair", "server.pair")
+    .global()
+    .json(
+      400,
+      (body) => {
+        object(body)
+        check(
+          typeof body.message === "string" && body.message.includes("server password"),
+          `pairing without a server password should be rejected: ${JSON.stringify(body)}`,
+        )
+      },
+      "status",
+    ),
+  http.public
+    .get("/auth/connect/{code}", "server.connect")
+    .global()
+    .probe({ path: route("/auth/connect/{code}", { code: pairing.code }) })
+    .at(() => ({ path: route("/auth/connect/{code}", { code: "httpapi-expired" }) }))
+    .json(
+      401,
+      (body) => {
+        object(body)
+        check(
+          typeof body.message === "string" && body.message.includes("expired"),
+          "an unknown pairing code should be rejected",
+        )
+      },
+      "status",
+    ),
   http.protected
     .get("/global/event", "global.event")
     .global()
@@ -126,6 +251,60 @@ const scenarios: Scenario[] = [
     .status(400, undefined, "status"),
   http.protected.get("/command", "command.list").json(200, array, "status"),
   http.protected.get("/agent", "app.agents").json(200, array, "status"),
+  // Overrides live in the app-wide Agent service, so each scenario clears what it sets.
+  http.protected
+    .post("/agent/subagent-model", "agent.setSubagentModel")
+    .at((ctx) => ({
+      path: "/agent/subagent-model",
+      headers: ctx.headers(),
+      body: { agent: "httpapi-set", providerID: "test", modelID: "test-model" },
+    }))
+    .jsonEffect(200, (body, ctx) =>
+      Effect.gen(function* () {
+        check(body === true, "setting a subagent model should return true")
+        const listed = yield* ctx.request("GET", { path: "/agent/subagent-models", headers: ctx.headers() })
+        const entry = isRecord(listed.body) ? listed.body["httpapi-set"] : undefined
+        check(
+          isRecord(entry) && entry.providerID === "test" && entry.modelID === "test-model",
+          `override should be listed: ${listed.text}`,
+        )
+        yield* ctx.request("POST", {
+          path: "/agent/subagent-model",
+          headers: ctx.headers(),
+          body: { agent: "httpapi-set" },
+        })
+      }),
+    ),
+  http.protected
+    .get("/agent/subagent-models", "agent.listSubagentModels")
+    .seeded((ctx) =>
+      ctx.request("POST", {
+        path: "/agent/subagent-model",
+        headers: ctx.headers(),
+        body: { agent: "httpapi-list", providerID: "test", modelID: "test-model", variant: "high" },
+      }),
+    )
+    .jsonEffect(
+      200,
+      (body, ctx) =>
+        Effect.gen(function* () {
+          object(body)
+          const entry = body["httpapi-list"]
+          check(
+            isRecord(entry) &&
+              entry.providerID === "test" &&
+              entry.modelID === "test-model" &&
+              entry.variant === "high",
+            `seeded override should be listed: ${JSON.stringify(body)}`,
+          )
+          yield* ctx.request("POST", {
+            path: "/agent/subagent-model",
+            headers: ctx.headers(),
+            body: { agent: "httpapi-list" },
+          })
+        }),
+      "status",
+    ),
   http.protected.get("/skill", "app.skills").json(200, array, "status"),
   http.protected.get("/lsp", "lsp.status").json(200, array),
   http.protected.get("/formatter", "formatter.status").json(200, array),
@@ -133,6 +312,7 @@ const scenarios: Scenario[] = [
   http.protected
     .patch("/config", "config.update")
     .mutating()
+    .probe(invalidConfigProbe)
     .at((ctx) => ({ path: "/config", headers: ctx.headers(), body: { username: "httpapi-local" } }))
     .json(
       200,
@@ -144,6 +324,7 @@ const scenarios: Scenario[] = [
     ),
   http.protected
     .patch("/config", "config.update.invalid")
+    .probe(invalidConfigProbe)
     .at((ctx) => ({ path: "/config", headers: ctx.headers(), body: { username: 1 } }))
     .status(400),
   http.protected.get("/config/providers", "config.providers").json(),
@@ -418,6 +599,95 @@ const scenarios: Scenario[] = [
     .get("/pty/{ptyID}/connect", "pty.connect")
     .at((ctx) => ({ path: route("/pty/{ptyID}/connect", { ptyID: "pty_httpapi_missing" }), headers: ctx.headers() }))
     .status(404, undefined, "none"),
+  http.protected
+    .get("/shell", "shell.list")
+    .inProject(shellProject)
+    .seeded((ctx) => finishedShell(ctx, "printf shell-list"))
+    .at((ctx) => ({
+      path: `/shell?${new URLSearchParams({ sessionID: ctx.state.session.id })}`,
+      headers: ctx.headers(),
+    }))
+    .json(
+      200,
+      (body, ctx) => {
+        array(body)
+        check(
+          body.length === 1 && isRecord(body[0]) && body[0].id === ctx.state.shellID && body[0].status === "exited",
+          `session filter should list only the session's shell: ${JSON.stringify(body)}`,
+        )
+      },
+      "status",
+    ),
+  http.protected
+    .get("/shell/{shellID}", "shell.get")
+    .inProject(shellProject)
+    .seeded((ctx) => finishedShell(ctx, "printf shell-get"))
+    .at((ctx) => ({ path: route("/shell/{shellID}", { shellID: ctx.state.shellID }), headers: ctx.headers() }))
+    .json(
+      200,
+      (body, ctx) => {
+        object(body)
+        check(body.id === ctx.state.shellID && body.sessionID === ctx.state.session.id, "should return the shell")
+        check(body.source === "user" && body.command === "printf shell-get", "should describe the user command")
+        check(body.status === "exited" && body.exit === 0, `should report the exit: ${JSON.stringify(body)}`)
+      },
+      "status",
+    ),
+  http.protected
+    .get("/shell/{shellID}", "shell.get.missing")
+    .at((ctx) => ({ path: route("/shell/{shellID}", { shellID: "sh_httpapi_missing" }), headers: ctx.headers() }))
+    .json(404, (body) => {
+      object(body)
+      check(body.shellID === "sh_httpapi_missing", "missing shell error should name the shell")
+    }),
+  http.protected
+    .get("/shell/{shellID}/output", "shell.output")
+    .inProject(shellProject)
+    .seeded((ctx) => finishedShell(ctx, "printf shell-output"))
+    .at((ctx) => ({
+      path: `${route("/shell/{shellID}/output", { shellID: ctx.state.shellID })}?${new URLSearchParams({ cursor: "6", limit: "64" })}`,
+      headers: ctx.headers(),
+    }))
+    .json(200, (body) => {
+      check(
+        stable(body) === stable({ output: "output", cursor: 12, size: 12 }),
+        `output should page from the cursor: ${JSON.stringify(body)}`,
+      )
+    }),
+  http.protected
+    .get("/shell/{shellID}/output", "shell.output.missing")
+    .at((ctx) => ({
+      path: route("/shell/{shellID}/output", { shellID: "sh_httpapi_missing" }),
+      headers: ctx.headers(),
+    }))
+    .json(404, object, "status"),
+  http.protected
+    .post("/shell/{shellID}/kill", "shell.kill")
+    .inProject(shellProject)
+    .mutating()
+    .seeded((ctx) => runningShell(ctx))
+    .at((ctx) => ({ path: route("/shell/{shellID}/kill", { shellID: ctx.state.shellID }), headers: ctx.headers() }))
+    .jsonEffect(
+      200,
+      (body, ctx) =>
+        Effect.gen(function* () {
+          object(body)
+          check(
+            body.id === ctx.state.shellID && body.status === "killed",
+            `kill should settle: ${JSON.stringify(body)}`,
+          )
+          // The `!` call that was blocked on the command returns once it is killed.
+          const call = yield* Fiber.join(ctx.state.call)
+          check(call.status === 200, `killed shell command should still respond: ${call.text}`)
+          check(shellMetadata(call.body).shellID === ctx.state.shellID, "response should describe the killed shell")
+        }),
+      "status",
+    ),
+  http.protected
+    .post("/shell/{shellID}/kill", "shell.kill.missing")
+    .mutating()
+    .at((ctx) => ({ path: route("/shell/{shellID}/kill", { shellID: "sh_httpapi_missing" }), headers: ctx.headers() }))
+    .json(404, object, "status"),
   http.protected.get("/experimental/console", "experimental.console.get").json(),
   http.protected.get("/experimental/console/orgs", "experimental.console.listOrgs").json(),
   http.protected
@@ -466,6 +736,7 @@ const scenarios: Scenario[] = [
   http.protected
     .post("/experimental/worktree", "worktree.create")
     .mutating()
+    .probe(invalidWorktreeProbe)
     .at((ctx) => ({ path: "/experimental/worktree", headers: ctx.headers(), body: { name: "api-dsl" } }))
     .jsonEffect(
       200,
@@ -479,6 +750,7 @@ const scenarios: Scenario[] = [
     ),
   http.protected
     .post("/experimental/worktree", "worktree.create.invalid")
+    .probe(invalidWorktreeProbe)
     .at((ctx) => ({ path: "/experimental/worktree", headers: ctx.headers(), body: { name: 1 } }))
     .status(400),
   http.protected
@@ -847,6 +1119,45 @@ const scenarios: Scenario[] = [
       check(stable(body) === stable(ctx.state.todos), "todos should match seeded state")
     }),
   http.protected
+    .get("/session/{sessionID}/goal", "session.goal")
+    .seeded((ctx) => ctx.session({ title: "Goal session" }))
+    .at((ctx) => ({ path: route("/session/{sessionID}/goal", { sessionID: ctx.state.id }), headers: ctx.headers() }))
+    .json(200, (body) => {
+      check(body === null, "a session without a goal should return null")
+    }),
+  http.protected
+    .get("/session/{sessionID}/usage", "session.usage")
+    .seeded((ctx) => ctx.session({ title: "Usage session" }))
+    .at((ctx) => ({ path: route("/session/{sessionID}/usage", { sessionID: ctx.state.id }), headers: ctx.headers() }))
+    .json(200, (body) => {
+      object(body)
+      check(body.attempts === 0 && body.tokens === 0 && body.cost === 0, "a new session should have no usage")
+    }),
+  http.protected
+    .post("/session/{sessionID}/warm", "session.warm")
+    .seeded((ctx) => ctx.session({ title: "Warm session" }))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/warm", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+      // An unknown model fails before any network IO; warming is best effort and still succeeds.
+      body: { providerID: "httpapi-missing", modelID: "missing" },
+    }))
+    .json(200, (body) => {
+      check(
+        stable(body) === stable({ connection: "failed", context: "skipped" }),
+        `warming an unknown model should report failure: ${JSON.stringify(body)}`,
+      )
+    }),
+  http.protected
+    .post("/session/{sessionID}/warm", "session.warm.invalid")
+    .seeded((ctx) => ctx.session({ title: "Warm session" }))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/warm", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+      body: { providerID: "test", modelID: "test-model", draft: "not allowed" },
+    }))
+    .status(400),
+  http.protected
     .get("/session/{sessionID}/diff", "session.diff")
     .seeded((ctx) => ctx.session({ title: "Diff session" }))
     .at((ctx) => ({ path: route("/session/{sessionID}/diff", { sessionID: ctx.state.id }), headers: ctx.headers() }))
@@ -989,9 +1300,56 @@ const scenarios: Scenario[] = [
       path: route("/session/{sessionID}/abort", { sessionID: "ses_httpapi_missing" }),
       headers: ctx.headers(),
     }))
+    .json(404, object, "status"),
+  http.protected
+    .post("/session/{sessionID}/background", "session.background")
+    .inProject(shellProject)
+    .mutating()
+    .seeded((ctx) => runningShell(ctx))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/background", { sessionID: ctx.state.session.id }),
+      headers: ctx.headers(),
+    }))
+    .jsonEffect(
+      200,
+      (body, ctx) =>
+        Effect.gen(function* () {
+          check(
+            stable(body) === stable([{ id: ctx.state.shellID, type: "shell", title: "sleep 30" }]),
+            `background should move the blocking shell command: ${JSON.stringify(body)}`,
+          )
+          // The `!` call returns as soon as its command moves to the background; the command keeps running.
+          const call = yield* Fiber.join(ctx.state.call)
+          check(call.status === 200, `backgrounded shell command should respond: ${call.text}`)
+          const metadata = shellMetadata(call.body)
+          check(metadata.background === true && metadata.shellID === ctx.state.shellID, "part should be backgrounded")
+          const path = route("/shell/{shellID}", { shellID: ctx.state.shellID })
+          const shell = yield* ctx.request("GET", { path, headers: ctx.headers() })
+          check(
+            isRecord(shell.body) && shell.body.status === "running" && shell.body.background === true,
+            `backgrounded shell should keep running: ${shell.text}`,
+          )
+          yield* ctx.request("POST", { path: `${path}/kill`, headers: ctx.headers() })
+        }),
+      "status",
+    ),
+  http.protected
+    .post("/session/{sessionID}/background", "session.background.idle")
+    .seeded((ctx) => ctx.session({ title: "Idle background session" }))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/background", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+    }))
     .json(200, (body) => {
-      check(body === true, "missing session abort should remain a no-op success")
+      check(stable(body) === stable([]), "nothing should move when nothing blocks the session")
     }),
+  http.protected
+    .post("/session/{sessionID}/background", "session.background.missing")
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/background", { sessionID: "ses_httpapi_missing" }),
+      headers: ctx.headers(),
+    }))
+    .json(404, object, "status"),
   http.protected
     .post("/session/{sessionID}/init", "session.init")
     .preserveDatabase()

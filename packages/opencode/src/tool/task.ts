@@ -1,9 +1,10 @@
 import * as Tool from "./tool"
 import DESCRIPTION from "./task.txt"
 import { BackgroundJob } from "@/background/job"
+import { BackgroundNotify } from "@/background/notify"
 import { Bus } from "@/bus"
 import { Session } from "@/session/session"
-import { SessionID, MessageID } from "../session/schema"
+import { SessionID } from "../session/schema"
 import { MessageV2 } from "../session/message-v2"
 import { Agent } from "../agent/agent"
 import { ChildModel } from "../agent/child-model"
@@ -16,8 +17,7 @@ import { Plugin } from "@/plugin"
 import { Provider } from "@/provider/provider"
 import { SessionStatus } from "@/session/status"
 import { Config } from "@/config/config"
-import { TuiEvent } from "@/cli/cmd/tui/event"
-import { Cause, Deferred, Effect, Option, Schema, Scope, Stream } from "effect"
+import { Cause, Effect, Option, Schema, Scope } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { Global } from "@opencode-ai/core/global"
 import { spawnSync } from "node:child_process"
@@ -110,6 +110,7 @@ function backgroundOutput(
   sessionID: SessionID,
   selection: { model: MessageV2.User["model"]; variant: string },
   worktreeDir?: string,
+  movedByUser?: boolean,
 ) {
   const worktreeLine = worktreeDir ? `worktree: ${worktreeDir}\n` : ""
   return [
@@ -119,7 +120,9 @@ function backgroundOutput(
     `variant: ${selection.variant}`,
     worktreeLine + "",
     "<task_result>",
-    "Background task started. Continue your current work and call task_status when you need the result, or wait for the auto-injected completion message.",
+    movedByUser
+      ? "The user moved this task to the background so you can keep working; it is still running. Continue with other work, and do not report it as complete until its result arrives. The result is auto-injected as a message when it finishes, or call task_status if you need it sooner."
+      : "Background task started. Continue your current work and call task_status when you need the result, or wait for the auto-injected completion message.",
     "</task_result>",
   ].join("\n")
 }
@@ -234,6 +237,7 @@ export const TaskTool = Tool.define(
     const team = yield* Team.Service
     const plugin = yield* Plugin.Service
     const collaboration = yield* Effect.serviceOption(Collaboration.Service)
+    const notify: BackgroundNotify.Deps = { sessions, status, bus, scope }
 
     const run = Effect.fn("TaskTool.execute")(function* (
       params: Schema.Schema.Type<typeof Parameters>,
@@ -418,79 +422,14 @@ export const TaskTool = Tool.define(
         })
       })
 
-      const resumeWhenIdle: (input: { userID: MessageID; state: "completed" | "error" }) => Effect.Effect<void> =
-        Effect.fn("TaskTool.resumeWhenIdle")(function* (input: { userID: MessageID; state: "completed" | "error" }) {
-          const latest = yield* sessions
-            .findMessage(ctx.sessionID, (item) => item.info.role === "user")
-            .pipe(Effect.orDie)
-          if (Option.isNone(latest)) return
-          if (latest.value.info.id !== input.userID) return
-          if ((yield* status.get(ctx.sessionID)).type !== "idle") {
-            yield* Effect.sleep("300 millis")
-            return yield* resumeWhenIdle(input)
-          }
-          yield* bus.publish(TuiEvent.ToastShow, {
-            title: input.state === "completed" ? "Background task complete" : "Background task failed",
-            message:
-              input.state === "completed"
-                ? `Background task "${params.description}" finished. Resuming the main thread.`
-                : `Background task "${params.description}" failed. Resuming the main thread.`,
-            variant: input.state === "completed" ? "success" : "error",
-            duration: 5000,
-          })
-          yield* ops
-            .loop({ sessionID: ctx.sessionID })
-            .pipe(Effect.ignore, Effect.forkIn(scope, { startImmediately: true }))
-        })
-
-      const continueIfIdle = Effect.fn("TaskTool.continueIfIdle")(function* (input: {
-        userID: MessageID
-        state: "completed" | "error"
-      }) {
-        yield* resumeWhenIdle(input).pipe(Effect.ignore, Effect.forkIn(scope, { startImmediately: true }))
-      })
-
-      const inject = Effect.fn("TaskTool.injectBackgroundResult")(function* (
-        state: "completed" | "error",
-        text: string,
-      ) {
-        const currentParent = yield* sessions.get(ctx.sessionID)
-        const latest = yield* sessions.findMessage(ctx.sessionID, (item) => item.info.role === "user")
-        const currentModel =
-          Option.isSome(latest) && latest.value.info.role === "user" ? latest.value.info.model : parentUserModel
-        // A background child must not undo a parent selection changed after launch.
-        const message = yield* ops.prompt({
-          sessionID: ctx.sessionID,
-          noReply: true,
-          agent: currentParent.agent ?? ctx.agent,
-          model: currentModel ? { providerID: currentModel.providerID, modelID: currentModel.modelID } : undefined,
-          variant: currentModel?.variant ?? "default",
-          reasoningMode: currentModel?.reasoningMode,
-          serviceTier: currentModel?.serviceTier,
-          upstream: currentModel?.upstream,
-          parts: [
-            {
-              type: "text",
-              synthetic: true,
-              text: backgroundMessage({
-                sessionID: nextSession.id,
-                description: params.description,
-                state,
-                text,
-              }),
-            },
-          ],
-        })
-        yield* continueIfIdle({ userID: message.info.id, state })
-      })
-
       // Unified flow: ALWAYS register the subagent run as a BackgroundJob.
       // The job's `run` is just `runTask()` — no extra pipeline. We decide
-      // whether to inject the result back into the parent session by FORKING
-      // a separate watcher that awaits `background.wait` and calls inject()
-      // when the job finishes. Forking happens for:
+      // whether to report the result back to the parent session by FORKING
+      // a watcher that awaits `background.wait` and delivers a completion
+      // notice when the job finishes. Forking happens for:
       //   - LLM-initiated background (params.background === true)
-      //   - User-initiated demote (Ctrl+B → TuiEvent.SubagentDemote)
+      //   - User-initiated background (Ctrl+B → POST /session/:id/background,
+      //     which releases this call's `background.block`)
       // Sync mode that completes normally returns the result inline and
       // does NOT fork a watcher (the parent tool's response carries the
       // result, no synthetic user message needed).
@@ -500,6 +439,7 @@ export const TaskTool = Tool.define(
         title: params.description,
         metadata,
         rejectRunning: true,
+        background: runInBackground,
         beforeStart: Effect.gen(function* () {
           const member = Option.isSome(collaboration) ? yield* collaboration.value.member(nextSession.id) : undefined
           if (
@@ -522,20 +462,41 @@ export const TaskTool = Tool.define(
         run: limit.withPermit(runTask()),
       })
 
-      const injectOnComplete = Effect.fn("TaskTool.injectOnComplete")(function* () {
-        const waited = yield* background.wait({ id: nextSession.id })
-        const info = waited.info
-        if (!info) return
-        if (info.status === "completed") {
-          yield* inject("completed", info.output ?? "").pipe(Effect.ignore)
-        } else if (info.status === "error") {
-          yield* inject("error", info.error ?? "Subagent failed").pipe(Effect.ignore)
-        }
-        // "cancelled" → silently skip; parent (or whoever cancelled) already knows.
+      const parentSessionID = ctx.sessionID
+      const callerAgent = ctx.agent
+      const reportOnComplete = Effect.fn("TaskTool.reportOnComplete")(function* () {
+        const info = (yield* background.wait({ id: nextSession.id })).info
+        // A cancelled task needs no report: whoever cancelled it already knows.
+        if (!info || (info.status !== "completed" && info.status !== "error")) return
+        const state = info.status
+        yield* BackgroundNotify.deliver(notify, {
+          ops,
+          sessionID: parentSessionID,
+          agent: callerAgent,
+          model: parentUserModel,
+          text: backgroundMessage({
+            sessionID: nextSession.id,
+            description: params.description,
+            state,
+            text: state === "completed" ? (info.output ?? "") : (info.error ?? "Subagent failed"),
+          }),
+          metadata: {
+            source: "subagent",
+            sessionID: nextSession.id,
+            agent: next.name,
+            description: params.description,
+            state,
+          },
+          wake: {
+            title: state === "completed" ? "Background task complete" : "Background task failed",
+            message: `Background task "${params.description}" ${state === "completed" ? "finished" : "failed"}. Resuming the main thread.`,
+            variant: state === "completed" ? "success" : "error",
+          },
+        }).pipe(Effect.ignore)
       })
 
       if (runInBackground) {
-        yield* injectOnComplete().pipe(Effect.forkIn(scope, { startImmediately: true }))
+        yield* reportOnComplete().pipe(Effect.forkIn(scope, { startImmediately: true }))
         return {
           title: params.description,
           metadata: { ...metadata, jobId: job.id },
@@ -550,27 +511,12 @@ export const TaskTool = Tool.define(
         runCancel.fork(cancel)
       }
 
-      // Demote signal: the first SubagentDemote event keyed on this parent
-      // session. Effect.scoped + Stream.runHead auto-cleans the subscription
-      // whether we win or lose the race.
-      const demoteSignal = Effect.scoped(
-        Effect.gen(function* () {
-          const stream = yield* bus.subscribe(TuiEvent.SubagentDemote)
-          return yield* stream.pipe(
-            Stream.filter((event) => event.properties.sessionID === ctx.sessionID),
-            Stream.runHead,
-          )
-        }),
-      )
-
-      type WaitOutcome = { kind: "done"; info: { info?: BackgroundJob.Info; timedOut: boolean } } | { kind: "demoted" }
-      const result: WaitOutcome = yield* Effect.acquireUseRelease(
+      // Blocks until the subagent finishes, or until the user moves this
+      // session's running work to the background (Ctrl+B), which releases the
+      // block without interrupting the subagent.
+      const result = yield* Effect.acquireUseRelease(
         Effect.sync(() => ctx.abort.addEventListener("abort", onAbort)),
-        (): Effect.Effect<WaitOutcome, never, never> =>
-          Effect.race(
-            background.wait({ id: nextSession.id }).pipe(Effect.map((info): WaitOutcome => ({ kind: "done", info }))),
-            demoteSignal.pipe(Effect.map((): WaitOutcome => ({ kind: "demoted" }))),
-          ),
+        () => background.block({ id: nextSession.id, sessionID: ctx.sessionID }),
         (_acquired, exit) =>
           Effect.gen(function* () {
             ctx.abort.removeEventListener("abort", onAbort)
@@ -580,34 +526,16 @@ export const TaskTool = Tool.define(
           }),
       )
 
-      if (result.kind === "demoted") {
-        // Tight race: the user may have pressed Ctrl+B at the exact moment
-        // the job finished. If background.get says the job is already done,
-        // return the actual result inline instead of forking a watcher that
-        // would inject a duplicate.
-        const status = yield* background.get(nextSession.id)
-        if (status && status.status !== "running") {
-          if (status.status === "completed") {
-            return {
-              title: params.description,
-              metadata: { ...metadata, jobId: job.id },
-              output: syncOutput(nextSession.id, status.output ?? "", selection, worktreeDir),
-            }
-          }
-          if (status.status === "error") {
-            return yield* Effect.fail(new Error(status.error ?? "Subagent failed"))
-          }
-          // "cancelled" — fall through to background path; nothing to inject.
-        }
-        yield* injectOnComplete().pipe(Effect.forkIn(scope, { startImmediately: true }))
+      if (result?.type === "backgrounded") {
+        yield* reportOnComplete().pipe(Effect.forkIn(scope, { startImmediately: true }))
         return {
           title: params.description,
-          metadata: { ...metadata, jobId: job.id },
-          output: backgroundOutput(nextSession.id, selection, worktreeDir),
+          metadata: { ...metadata, background: true, jobId: job.id },
+          output: backgroundOutput(nextSession.id, selection, worktreeDir, true),
         }
       }
 
-      const info = result.info.info
+      const info = result?.info
       if (!info) {
         return yield* Effect.fail(new Error("Subagent finished but produced no result"))
       }

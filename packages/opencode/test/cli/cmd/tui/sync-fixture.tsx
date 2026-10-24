@@ -87,6 +87,7 @@ export function createFetch(override?: FetchHandler) {
       case "/provider":
         return json({ all: [], default: {}, connected: [] })
       case "/session":
+      case "/shell":
         return json([])
       case "/vcs":
         return json({ branch: "main" })

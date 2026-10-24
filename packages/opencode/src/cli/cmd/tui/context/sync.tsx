@@ -16,6 +16,7 @@ import type {
   SessionStatus,
   ProviderListResponse,
   ProviderAuthMethod,
+  ShellProcess,
   VcsInfo,
 } from "@opencode-ai/sdk/v2"
 import { createStore, produce, reconcile } from "solid-js/store"
@@ -69,6 +70,9 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       part: {
         [messageID: string]: Part[]
       }
+      shell: {
+        [shellID: string]: ShellProcess
+      }
       lsp: LspStatus[]
       mcp: {
         [key: string]: McpStatus
@@ -100,6 +104,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       todo: {},
       message: {},
       part: {},
+      shell: {},
       lsp: [],
       mcp: {},
       mcp_resource: {},
@@ -388,6 +393,19 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           break
         }
 
+        case "shell.updated":
+          setStore("shell", event.properties.info.id, reconcile(event.properties.info))
+          break
+
+        case "shell.deleted":
+          setStore(
+            "shell",
+            produce((draft) => {
+              delete draft[event.properties.id]
+            }),
+          )
+          break
+
         case "lsp.updated": {
           const workspace = project.workspace.current()
           void sdk.client.lsp.status({ workspace }).then((x) => setStore("lsp", x.data ?? []))
@@ -488,6 +506,20 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
             sdk.client.session.status({ workspace }).then((x) => {
               setStore("session_status", reconcile(x.data ?? {}))
             }),
+            ((known) =>
+              sdk.client.shell.list({ workspace }).then((x) => {
+                const shells = x.data ?? []
+                const listed = new Set(shells.map((shell) => shell.id))
+                setStore(
+                  "shell",
+                  produce((draft) => {
+                    // Only drop shells known before the request: ones created since arrived by event.
+                    for (const id of known) if (!listed.has(id)) delete draft[id]
+                    // An exit event can arrive before this response; never regress a finished shell to running.
+                    for (const shell of shells) if (!draft[shell.id]?.time.completed) draft[shell.id] = shell
+                  }),
+                )
+              }))(new Set(Object.keys(store.shell))),
             sdk.client.provider.auth({ workspace }).then((x) => setStore("provider_auth", reconcile(x.data ?? {}))),
             sdk.client.vcs.get({ workspace }).then((x) => setStore("vcs", reconcile(x.data))),
             project.workspace.sync(),
@@ -581,6 +613,17 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
             }),
           )
           fullSyncedSessions.add(sessionID)
+        },
+      },
+      shell: {
+        get(shellID: string): ShellProcess | undefined {
+          return store.shell[shellID]
+        },
+        /** Running and recently exited shell commands of a session, oldest first. */
+        list(sessionID: string) {
+          return Object.values(store.shell)
+            .filter((shell) => shell.sessionID === sessionID)
+            .toSorted((a, b) => a.time.started - b.time.started)
         },
       },
       bootstrap,

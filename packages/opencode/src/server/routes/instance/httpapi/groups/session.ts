@@ -96,6 +96,12 @@ export const UnrevertQuery = Schema.Struct({
 export const PermissionResponsePayload = Schema.Struct({
   response: Permission.Reply,
 })
+export const BackgroundItem = Schema.Struct({
+  id: Schema.String,
+  // "shell" for shell commands, "task" for subagents.
+  type: Schema.String,
+  title: Schema.optional(Schema.String),
+}).annotate({ identifier: "SessionBackgroundItem" })
 
 export const SessionPaths = {
   list: root,
@@ -114,6 +120,7 @@ export const SessionPaths = {
   update: `${root}/:sessionID`,
   fork: `${root}/:sessionID/fork`,
   abort: `${root}/:sessionID/abort`,
+  background: `${root}/:sessionID/background`,
   share: `${root}/:sessionID/share`,
   init: `${root}/:sessionID/init`,
   warm: `${root}/:sessionID/warm`,
@@ -336,6 +343,19 @@ export const SessionApi = HttpApi.make("session")
             identifier: "session.abort",
             summary: "Abort session",
             description: "Abort an active session and stop any ongoing AI processing or command execution.",
+          }),
+        ),
+        HttpApiEndpoint.post("background", SessionPaths.background, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          success: described(Schema.Array(BackgroundItem), "Work moved to the background"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.background",
+            summary: "Move running work to the background",
+            description:
+              "Move the session's in-flight blocking work (shell commands and subagents) to the background so the turn can continue. Each item keeps running and reports its result to the session when it finishes. Returns an empty list when nothing is blocking.",
           }),
         ),
         HttpApiEndpoint.post("init", SessionPaths.init, {

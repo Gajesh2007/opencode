@@ -1,10 +1,37 @@
-import type { AssistantMessage, Message, Part, Session, SessionStatus } from "@opencode-ai/sdk/v2"
+import type { AssistantMessage, Message, Part, Session, SessionStatus, ShellProcess } from "@opencode-ai/sdk/v2"
 
 type Data = {
   session: Session[]
   session_status: Record<string, SessionStatus | undefined>
   message: Record<string, Message[] | undefined>
   part: Record<string, Part[] | undefined>
+}
+
+/**
+ * Everything the tasks dialog lists: the session's running shells and all running subagents first, then the
+ * session's recently exited background shells, then the remaining subagents. Exited foreground shells are left
+ * out because the timeline already shows their output.
+ */
+export function backgroundEntries(
+  data: Data & { shell: Record<string, ShellProcess | undefined> },
+  sessionID?: string,
+) {
+  const shells = Object.values(data.shell).filter(
+    (shell): shell is ShellProcess => sessionID !== undefined && shell?.sessionID === sessionID,
+  )
+  const tasks = taskEntries(data)
+  return [
+    ...shells
+      .filter((shell) => shell.status === "running")
+      .toSorted((a, b) => b.time.started - a.time.started)
+      .map((shell) => ({ type: "shell" as const, shell, category: "Running" })),
+    ...tasks.filter((entry) => entry.category === "Running"),
+    ...shells
+      .filter((shell) => shell.status !== "running" && shell.background)
+      .toSorted((a, b) => (b.time.completed ?? b.time.started) - (a.time.completed ?? a.time.started))
+      .map((shell) => ({ type: "shell" as const, shell, category: "Recent shells" })),
+    ...tasks.filter((entry) => entry.category !== "Running"),
+  ]
 }
 
 export function taskEntries(data: Data) {
@@ -42,6 +69,7 @@ export function taskEntries(data: Data) {
   return data.session
     .filter((session) => session.parentID !== undefined)
     .map((session) => ({
+      type: "subagent" as const,
       session,
       category: taskCategory(data, session, started.get(session.id), results.get(session.id)),
       background: background.has(session.id),

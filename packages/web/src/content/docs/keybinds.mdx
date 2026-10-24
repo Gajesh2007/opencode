@@ -50,8 +50,10 @@ OpenCode has a list of keybinds that you can customize through `tui.json`.
     "session_child_cycle": "right",
     "session_child_cycle_reverse": "left",
     "session_parent": "up",
+    "session_background": "ctrl+b",
 
     "stash_delete": "ctrl+d",
+    "shell_kill": "ctrl+d",
     "model_provider_list": "ctrl+a",
     "model_favorite_toggle": "ctrl+f",
     "model_list": "<leader>m",
@@ -101,7 +103,7 @@ OpenCode has a list of keybinds that you can customize through `tui.json`.
     },
     "input_submit": "return",
     "input_newline": "shift+return,ctrl+return,alt+return,ctrl+j",
-    "input_move_left": "left,ctrl+b",
+    "input_move_left": "left",
     "input_move_right": "right,ctrl+f",
     "input_move_up": "up",
     "input_move_down": "down",
@@ -197,6 +199,14 @@ You don't need to use a leader key for your keybinds but we recommend doing so.
 Some navigation keybinds intentionally do not use the leader key by default. For subagent sessions, the defaults are `session_child_first` = `<leader>down`, `session_child_cycle` = `right`, `session_child_cycle_reverse` = `left`, and `session_parent` = `up`.
 
 `leader_timeout` controls how long OpenCode waits for the next key after the leader key. It defaults to `2000` milliseconds.
+
+---
+
+## Background Work
+
+`session_background` (`ctrl+b`) moves whatever the session is waiting on to the background: running shell commands, subagents, and `!` commands. They keep running, and their results are reported back to the session when they finish. `/tasks` lists them, and `shell_kill` (`ctrl+d`) stops a running shell command from the task list or its output view.
+
+`session_background` was previously named `subagent_background`. The old name still works.
 
 ---
 

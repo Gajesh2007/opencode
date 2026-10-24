@@ -1051,7 +1051,10 @@ const cancelBackgroundJobs = Effect.fn("Session.cancelBackgroundJobs")(function*
       if (job.status !== "running") return false
       if (job.id === sessionID) return true
       if (job.metadata?.sessionId === sessionID) return true
-      return job.metadata?.parentSessionId === sessionID
+      if (job.metadata?.parentSessionId === sessionID) return true
+      // Shell commands, including ones moved to the background. Cancelling the job kills the process.
+      // Esc (SessionRunState.cancel) deliberately does not match these, so backgrounded shells survive it.
+      return job.metadata?.ownerSessionID === sessionID
     }),
     (job) => background.cancel(job.id),
     { concurrency: "unbounded", discard: true },

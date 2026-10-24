@@ -20,8 +20,7 @@ import { ToolRegistry } from "@/tool/registry"
 import { MCP } from "../mcp"
 import { LSP } from "@/lsp/lsp"
 import { ulid } from "ulid"
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
-import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { ChildProcess } from "effect/unstable/process"
 import * as Stream from "effect/Stream"
 import { Command } from "../command"
 import { pathToFileURL, fileURLToPath } from "url"
@@ -35,6 +34,9 @@ import { Permission } from "@/permission"
 import { SessionStatus } from "./status"
 import { LLM } from "./llm"
 import { Shell } from "@/shell/shell"
+import { ShellProcess } from "@/shell/process"
+import { BackgroundJob } from "@/background/job"
+import { BackgroundNotify } from "@/background/notify"
 import { ShellID } from "@/tool/shell/id"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { Truncate } from "@/tool/truncate"
@@ -129,7 +131,8 @@ export const layer = Layer.effect(
     const registry = yield* ToolRegistry.Service
     const truncate = yield* Truncate.Service
     const image = yield* Image.Service
-    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
+    const shells = yield* ShellProcess.Service
+    const jobs = yield* BackgroundJob.Service
     const scope = yield* Scope.Scope
     const instruction = yield* Instruction.Service
     const state = yield* SessionRunState.Service
@@ -145,6 +148,7 @@ export const layer = Layer.effect(
     const reviewer = yield* ReasoningReviewer.Service
     const memory = yield* Memory.Service
     const collaborationMailbox = yield* Collaboration.Service
+    const notify: BackgroundNotify.Deps = { sessions, status, bus, scope }
     const ops = Effect.fn("SessionPrompt.ops")(function* () {
       return {
         cancel: (sessionID: SessionID) => cancel(sessionID),
@@ -542,11 +546,58 @@ export const layer = Layer.effect(
       } satisfies MessageV2.TextPart)
     })
 
+    // Shell jobs and their reporters outlive the `!` call: they must capture only the shell id, never
+    // the caller's transcript state.
+    const awaitShell = (id: ShellProcess.ID) =>
+      shells.wait(id).pipe(
+        Effect.map(shellExit),
+        Effect.onInterrupt(() => shells.kill(id).pipe(Effect.ignore)),
+      )
+
+    // The end of a command's captured output, within the configured tool output limits.
+    const shellTail = Effect.fnUntraced(function* (id: ShellProcess.ID) {
+      const limits = yield* truncate.limits()
+      const page = yield* shells.tail(id, limits.maxBytes).pipe(Effect.option)
+      if (Option.isNone(page)) return { text: "", truncated: false }
+      const lines = lastLines(page.value.output, limits.maxLines)
+      return { text: lines.text, truncated: page.value.truncated || lines.truncated }
+    })
+
+    // Like upstream, a user command finishing in the background never wakes the agent: the notice
+    // is recorded for the session's next turn.
+    const reportUserShell = Effect.fn("SessionPrompt.reportUserShell")(function* (input: {
+      shellID: ShellProcess.ID
+      sessionID: SessionID
+      agent: string
+      model: MessageV2.User["model"]
+    }) {
+      const job = (yield* jobs.wait({ id: input.shellID })).info
+      // Cancelled along with its session or instance: nobody is left to tell.
+      if (!job || job.status === "cancelled") return
+      const info = yield* shells.get(input.shellID)
+      yield* BackgroundNotify.deliver(notify, {
+        ops: yield* ops(),
+        sessionID: input.sessionID,
+        agent: input.agent,
+        model: input.model,
+        text: userShellNotice(info, yield* shellTail(info.id)),
+        metadata: {
+          source: "shell",
+          user: true,
+          shellID: info.id,
+          command: info.command,
+          state: info.status,
+          ...(info.exit !== undefined ? { exit: info.exit } : {}),
+          ...(info.signal !== undefined ? { signal: info.signal } : {}),
+        },
+      })
+    })
+
     const shellImpl = Effect.fn("SessionPrompt.shellImpl")(function* (input: ShellInput, ready?: Latch.Latch) {
       return yield* Effect.uninterruptibleMask((restore) =>
         Effect.gen(function* () {
           const markReady = ready ? ready.open.pipe(Effect.asVoid) : Effect.void
-          const { msg, part, cwd } = yield* Effect.gen(function* () {
+          const { msg, part, cwd, model } = yield* Effect.gen(function* () {
             const ctx = yield* InstanceState.context
             const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
             if (session.revert) {
@@ -618,7 +669,7 @@ export const layer = Layer.effect(
                 command: input.command,
               })
             }
-            return { msg, part, cwd: ctx.directory }
+            return { msg, part, cwd: ctx.directory, model: userMsg.model }
           }).pipe(Effect.ensuring(markReady))
 
           const timing = SessionTiming.start(
@@ -637,100 +688,171 @@ export const layer = Layer.effect(
           const sh = Shell.preferred(cfg.shell)
           const args = Shell.args(sh, input.command, cwd)
           let output = ""
-          let aborted = false
-          let commandExit: number | undefined
-
-          const finish = Effect.uninterruptible(
-            Effect.gen(function* () {
-              if (aborted) {
-                output += "\n\n" + ["<metadata>", "User aborted the command", "</metadata>"].join("\n")
-              }
-              const completed = Date.now()
-              if (flags.experimentalEventSystem) {
-                yield* events.publish(SessionEvent.Shell.Ended, {
-                  sessionID: input.sessionID,
-                  timestamp: DateTime.makeUnsafe(completed),
-                  callID: part.callID,
-                  output,
-                })
-              }
-              if (!msg.time.completed) {
-                msg.time.completed = completed
-                yield* sessions.updateMessage(msg)
-              }
-              if (part.state.status === "running") {
-                part.state = {
-                  status: "completed",
-                  time: { ...part.state.time, end: completed },
-                  input: part.state.input,
-                  title: "",
-                  metadata: { output, description: "" },
-                  output,
-                }
-                yield* sessions.updatePart(part)
-              }
-            }),
-          )
-
-          const exit = yield* restore(
-            Effect.gen(function* () {
-              const shellEnv = yield* plugin.trigger(
-                "shell.env",
-                { cwd, sessionID: input.sessionID, callID: part.callID },
-                { env: {} },
-              )
-              const cmd = ChildProcess.make(sh, args, {
-                cwd,
-                extendEnv: true,
-                env: { ...shellEnv.env, TERM: "dumb" },
-                stdin: "ignore",
-                forceKillAfter: "3 seconds",
-              })
-              command.start()
-              const handle = yield* spawner.spawn(cmd)
-              const result = yield* Effect.all(
-                [
-                  handle.all.pipe(
-                    Stream.tap((chunk) =>
-                      Effect.sync(() => {
-                        if (chunk.byteLength) command.firstOutput()
-                      }),
-                    ),
-                    Stream.decodeText,
-                    Stream.runForEach((chunk) =>
-                      Effect.gen(function* () {
-                        output += chunk
-                        if (part.state.status === "running") {
-                          part.state.metadata = { output, description: "" }
-                          yield* sessions.updatePart(part)
-                        }
-                      }),
-                    ),
-                  ),
-                  handle.exitCode,
-                ],
-                { concurrency: 2 },
-              )
-              commandExit = result[1]
-            }).pipe(Effect.scoped, Effect.orDie),
-          ).pipe(Effect.exit)
-
-          if (Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause) && !Cause.hasDies(exit.cause)) {
-            aborted = true
+          // Opened by every chunk; the running part is rewritten at most every 50ms, not per chunk.
+          const pending = yield* Latch.make()
+          const listener: ShellProcess.Listener = {
+            chunk: (text) => {
+              command.firstOutput()
+              output += text
+              pending.openUnsafe()
+            },
           }
-          command.end({
-            exitCode: commandExit,
-            status: aborted ? "interrupted" : Exit.isFailure(exit) || commandExit !== 0 ? "error" : "completed",
+
+          const updateRunning = Effect.fnUntraced(function* (shellID: ShellProcess.ID) {
+            if (part.state.status !== "running") return
+            part.state.metadata = { output, description: "", shellID }
+            yield* sessions.updatePart(part)
           })
-          yield* finish
-          timing.toolEnd(part.callID, aborted ? "interrupted" : Exit.isFailure(exit) ? "error" : "completed")
-          timing.finish(aborted ? "interrupted" : Exit.isFailure(exit) ? "error" : "completed")
 
-          if (Exit.isFailure(exit) && !aborted && !Cause.hasInterruptsOnly(exit.cause)) {
-            return yield* Effect.failCause(exit.cause)
+          const finish = Effect.fnUntraced(function* (result: { output: string; metadata: Record<string, unknown> }) {
+            const completed = Date.now()
+            if (flags.experimentalEventSystem) {
+              yield* events.publish(SessionEvent.Shell.Ended, {
+                sessionID: input.sessionID,
+                timestamp: DateTime.makeUnsafe(completed),
+                callID: part.callID,
+                output: result.output,
+              })
+            }
+            if (!msg.time.completed) {
+              msg.time.completed = completed
+              yield* sessions.updateMessage(msg)
+            }
+            if (part.state.status !== "running") return
+            part.state = {
+              status: "completed",
+              time: { ...part.state.time, end: completed },
+              input: part.state.input,
+              title: "",
+              metadata: result.metadata,
+              output: result.output,
+            }
+            yield* sessions.updatePart(part)
+          })
+
+          // Finishes a command that ran to completion, was aborted, or never started.
+          const settle = Effect.fnUntraced(function* (exit: Exit.Exit<unknown>, shell?: ShellProcess.Info) {
+            const aborted = Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause) && !Cause.hasDies(exit.cause)
+            const failed = Exit.isFailure(exit) && !aborted
+            const info = shell ? Option.getOrUndefined(yield* shells.get(shell.id).pipe(Effect.option)) : undefined
+            command.end({
+              exitCode: aborted ? undefined : info?.exit,
+              status:
+                aborted || info?.status === "killed"
+                  ? "interrupted"
+                  : info?.status === "timeout"
+                    ? "timeout"
+                    : failed || info?.exit !== 0
+                      ? "error"
+                      : "completed",
+            })
+            const text = aborted
+              ? output + "\n\n" + ["<metadata>", "User aborted the command", "</metadata>"].join("\n")
+              : output
+            yield* finish({
+              output: text,
+              metadata: { output: text, description: "", ...(shell ? { shellID: shell.id } : {}) },
+            })
+            timing.toolEnd(part.callID, aborted ? "interrupted" : failed ? "error" : "completed")
+            timing.finish(aborted ? "interrupted" : failed ? "error" : "completed")
+            if (Exit.isFailure(exit) && !aborted) return yield* Effect.failCause(exit.cause)
+            return { info: msg, parts: [part] }
+          })
+
+          const started = yield* restore(
+            plugin.trigger("shell.env", { cwd, sessionID: input.sessionID, callID: part.callID }, { env: {} }),
+          ).pipe(
+            // Starting the command and registering its job are uninterruptible, so an abort always
+            // knows which process to kill.
+            Effect.flatMap((shellEnv) =>
+              Effect.gen(function* () {
+                command.start()
+                const info = yield* shells.create({
+                  source: "user",
+                  command: input.command,
+                  cwd,
+                  shell: sh,
+                  sessionID: input.sessionID,
+                  callID: part.callID,
+                  spawn: ChildProcess.make(sh, args, {
+                    cwd,
+                    extendEnv: true,
+                    env: { ...shellEnv.env, TERM: "dumb" },
+                    stdin: "ignore",
+                    // Signals then reach the command's whole process group.
+                    detached: process.platform !== "win32",
+                    forceKillAfter: "3 seconds",
+                  }),
+                  listener,
+                })
+                yield* jobs.start({
+                  id: info.id,
+                  type: "shell",
+                  title: input.command,
+                  // Esc cancels jobs carrying `sessionId`/`parentSessionId`; a backgrounded command
+                  // must survive it, so ownership uses its own key.
+                  metadata: {
+                    shellID: info.id,
+                    ownerSessionID: input.sessionID,
+                    command: input.command,
+                    source: "user",
+                  },
+                  run: awaitShell(info.id),
+                })
+                return info
+              }),
+            ),
+            Effect.orDie,
+            Effect.exit,
+          )
+          if (Exit.isFailure(started)) return yield* settle(started)
+          const shell = started.value
+
+          const blocked = yield* Effect.gen(function* () {
+            yield* updateRunning(shell.id)
+            yield* pending.await.pipe(
+              Effect.andThen(pending.close),
+              Effect.andThen(updateRunning(shell.id)),
+              Effect.andThen(Effect.sleep("50 millis")),
+              Effect.forever,
+              Effect.forkScoped,
+            )
+            // Released early when the user moves the session's running work to the background (Ctrl+B).
+            return yield* restore(jobs.block({ id: shell.id, sessionID: input.sessionID }))
+          }).pipe(Effect.scoped, Effect.exit)
+
+          if (Exit.isSuccess(blocked) && blocked.value?.type === "backgrounded") {
+            yield* shells.unlisten(shell.id, listener)
+            yield* shells.background(shell.id).pipe(Effect.ignore)
+            const tail = yield* shellTail(shell.id)
+            const preview = (tail.truncated ? "...\n" : "") + tail.text.trimEnd()
+            // The command keeps running, but this call is over: the session goes idle or runs what was queued.
+            command.end({ status: "running" })
+            yield* finish({
+              output: backgroundedShellOutput(shell, preview),
+              metadata: {
+                output: preview,
+                description: "",
+                shellID: shell.id,
+                background: true,
+                outputPath: shell.file,
+              },
+            })
+            timing.toolEnd(part.callID, "completed")
+            timing.finish("completed")
+            yield* reportUserShell({ shellID: shell.id, sessionID: input.sessionID, agent: input.agent, model }).pipe(
+              Effect.ignore,
+              Effect.forkIn(scope, { startImmediately: true }),
+            )
+            return { info: msg, parts: [part] }
           }
 
-          return { info: msg, parts: [part] }
+          if (Exit.isFailure(blocked)) {
+            // Output produced while the kill settles is not part of the transcript.
+            yield* shells.unlisten(shell.id, listener)
+            yield* jobs.cancel(shell.id)
+          }
+          return yield* settle(blocked, shell)
         }),
       )
     })
@@ -1936,7 +2058,8 @@ export const defaultLayer = Layer.suspend(() =>
         LLM.defaultLayer,
         Reference.defaultLayer,
         Bus.layer,
-        CrossSpawnSpawner.defaultLayer,
+        BackgroundJob.defaultLayer,
+        ShellProcess.defaultLayer,
         RuntimeFlags.defaultLayer,
       ),
     ),
@@ -2094,6 +2217,47 @@ function reasoningOf(parts: readonly MessageV2.Part[]): string {
     .map((p) => p.text)
     .join("\n")
     .trim()
+}
+
+function shellExit(info: ShellProcess.Info) {
+  if (info.status === "killed") return "Killed by the user"
+  if (info.status === "timeout") return "Timed out before completion"
+  if (info.signal) return `Killed by ${info.signal}`
+  return `Exited with code ${info.exit ?? "unknown"}`
+}
+
+function backgroundedShellOutput(info: ShellProcess.Info, preview: string) {
+  return [
+    `The user moved this command to the background (shell ID: ${info.id}). It is still running; output is streaming to: ${info.file}`,
+    "",
+    "Output so far:",
+    preview || "(no output yet)",
+  ].join("\n")
+}
+
+function userShellNotice(info: ShellProcess.Info, tail: { text: string; truncated: boolean }) {
+  const output = tail.text.trimEnd()
+  return [
+    "The following shell command was executed by the user and finished in the background:",
+    `<shell id="${info.id}" state="${info.status}" command="${info.command}">`,
+    tail.truncated
+      ? `...output truncated...\n\nFull output saved to: ${info.file}\n\n${output}`
+      : output || "(no output)",
+    "",
+    shellExit(info),
+    "</shell>",
+  ].join("\n")
+}
+
+// The last `max` lines of `text`. A trailing newline does not start another line.
+function lastLines(text: string, max: number) {
+  let start = text.endsWith("\n") ? text.length - 1 : text.length
+  for (let count = 0; count < max; count++) {
+    if (start <= 0) return { text, truncated: false }
+    start = text.lastIndexOf("\n", start - 1)
+    if (start === -1) return { text, truncated: false }
+  }
+  return { text: text.slice(start + 1), truncated: true }
 }
 
 export * as SessionPrompt from "./prompt"

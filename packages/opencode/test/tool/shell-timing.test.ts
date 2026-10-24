@@ -1,20 +1,24 @@
 import { describe, expect } from "bun:test"
 import { Effect, Exit, Fiber, Latch, Layer } from "effect"
-import { ChildProcessSpawner, make as makeSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import path from "path"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { Agent } from "@/agent/agent"
+import { BackgroundJob } from "@/background/job"
+import { Bus } from "@/bus"
 import { Config } from "@/config/config"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Plugin } from "@/plugin"
 import { MessageID, SessionID } from "@/session/schema"
+import { Session } from "@/session/session"
+import { SessionStatus } from "@/session/status"
+import { ShellProcess } from "@/shell/process"
 import { Shell } from "@/shell/shell"
 import { ShellTool } from "@/tool/shell"
 import { Tool } from "@/tool/tool"
 import { Truncate } from "@/tool/truncate"
 import { TestInstance } from "../fixture/fixture"
-import { awaitWithTimeout, testEffect } from "../lib/effect"
+import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
 
 const it = testEffect(
   Layer.mergeAll(
@@ -25,6 +29,11 @@ const it = testEffect(
     Config.defaultLayer,
     Agent.defaultLayer,
     RuntimeFlags.defaultLayer,
+    ShellProcess.defaultLayer,
+    BackgroundJob.defaultLayer,
+    Session.defaultLayer,
+    SessionStatus.defaultLayer,
+    Bus.layer,
   ),
 )
 
@@ -77,7 +86,8 @@ describe("tool.shell timing", () => {
           ask: () => waiting.open.pipe(Effect.andThen(allow.await)),
           metadata: (input) =>
             Effect.sync(() => {
-              if (!input.metadata?.output) expect(trace.events).toEqual([])
+              // Only the update published before spawning has no shell ID yet.
+              if (input.metadata?.shellID === undefined) expect(trace.events).toEqual([])
             }),
         },
       ).pipe(Effect.forkScoped)
@@ -126,41 +136,31 @@ describe("tool.shell timing", () => {
     }),
   )
 
-  it.instance("ends only after output drain and process scope cleanup", () =>
+  it.instance("ends only after the command is captured and its final output is published", () =>
     Effect.gen(function* () {
       const trace = capture()
-      const spawner = yield* ChildProcessSpawner
+      const shells = yield* ShellProcess.Service
       const draining = yield* Latch.make()
       const drain = yield* Latch.make()
-      const cleaning = yield* Latch.make()
-      const clean = yield* Latch.make()
       const task = yield* run(
-        { command: command("console.log(123)"), description: "Drain and cleanup" },
+        { command: command("console.log(123)"), description: "Drain" },
         {
           ...trace.ctx,
           metadata: (input) => (input.metadata?.output ? draining.open.pipe(Effect.andThen(drain.await)) : Effect.void),
         },
-      ).pipe(
-        Effect.provideService(
-          ChildProcessSpawner,
-          makeSpawner((cmd) =>
-            Effect.gen(function* () {
-              expect(trace.events).toEqual(["start"])
-              yield* Effect.addFinalizer(() => cleaning.open.pipe(Effect.andThen(clean.await)))
-              return yield* spawner.spawn(cmd)
-            }),
-          ),
-        ),
-        Effect.forkScoped,
+      ).pipe(Effect.forkScoped)
+      yield* Effect.addFinalizer(() => drain.open.pipe(Effect.asVoid))
+      yield* awaitWithTimeout(draining.await, "shell output was not published")
+      const shell = yield* pollWithTimeout(
+        shells.list().pipe(Effect.map((list) => list[0])),
+        "shell process was not registered",
       )
-      yield* Effect.addFinalizer(() => drain.open.pipe(Effect.andThen(clean.open), Effect.asVoid))
-      yield* awaitWithTimeout(draining.await, "shell output was not drained")
+      // The command has exited and been fully captured, but its output is still being published.
+      expect((yield* awaitWithTimeout(shells.wait(shell.id), "shell did not exit")).status).toBe("exited")
       expect(trace.events).toEqual(["start", "firstOutput"])
       yield* drain.open
-      yield* awaitWithTimeout(cleaning.await, "process scope did not close")
-      expect(trace.events).toEqual(["start", "firstOutput"])
-      yield* clean.open
-      yield* awaitWithTimeout(Fiber.join(task), "shell cleanup did not finish")
+      const result = yield* awaitWithTimeout(Fiber.join(task), "shell did not finish")
+      expect(result.output).toBe("123\n")
       expect(trace.events).toEqual(["start", "firstOutput", { exitCode: 0, status: "completed" }])
     }),
   )

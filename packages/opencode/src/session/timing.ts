@@ -271,7 +271,11 @@ export function start(
           span.output = true
           record("command_first_output", span.start, span.context)
         },
-        end(result: { exitCode?: number | null; status: "completed" | "error" | "interrupted" | "timeout" }) {
+        // "running": the call stopped waiting while the command kept going (moved to the background).
+        end(result: {
+          exitCode?: number | null
+          status: "completed" | "error" | "interrupted" | "timeout" | "running"
+        }) {
           if (finished) return
           pending = false
           const span = commands.get(commandID)

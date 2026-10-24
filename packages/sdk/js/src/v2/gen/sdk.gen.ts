@@ -170,6 +170,8 @@ import type {
   ServerPairResponses,
   SessionAbortErrors,
   SessionAbortResponses,
+  SessionBackgroundErrors,
+  SessionBackgroundResponses,
   SessionChildrenErrors,
   SessionChildrenResponses,
   SessionCommandErrors,
@@ -225,6 +227,14 @@ import type {
   SessionUsageResponses,
   SessionWarmErrors,
   SessionWarmResponses,
+  ShellGetErrors,
+  ShellGetResponses,
+  ShellKillErrors,
+  ShellKillResponses,
+  ShellListErrors,
+  ShellListResponses,
+  ShellOutputErrors,
+  ShellOutputResponses,
   SubtaskPartInput,
   SyncHistoryListErrors,
   SyncHistoryListResponses,
@@ -3917,6 +3927,38 @@ export class Session2 extends HeyApiClient {
   }
 
   /**
+   * Move running work to the background
+   *
+   * Move the session's in-flight blocking work (shell commands and subagents) to the background so the turn can continue. Each item keeps running and reports its result to the session when it finishes. Returns an empty list when nothing is blocking.
+   */
+  public background<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<SessionBackgroundResponses, SessionBackgroundErrors, ThrowOnError>({
+      url: "/session/{sessionID}/background",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
    * Initialize session
    *
    * Analyze the current application and create an AGENTS.md file with project-specific agent configurations.
@@ -4393,6 +4435,140 @@ export class Part extends HeyApiClient {
         ...options?.headers,
         ...params.headers,
       },
+    })
+  }
+}
+
+export class Shell extends HeyApiClient {
+  /**
+   * List shell commands
+   *
+   * List running and recently exited shell commands started by agents or users, optionally for one session.
+   */
+  public list<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+      sessionID?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "query", key: "sessionID" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<ShellListResponses, ShellListErrors, ThrowOnError>({
+      url: "/shell",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Get shell command
+   *
+   * Get the status of a running or recently exited shell command.
+   */
+  public get<ThrowOnError extends boolean = false>(
+    parameters: {
+      shellID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "shellID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<ShellGetResponses, ShellGetErrors, ThrowOnError>({
+      url: "/shell/{shellID}",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Read shell output
+   *
+   * Read captured combined stdout/stderr from a byte cursor. Pages end on character boundaries; keep reading while cursor is less than size.
+   */
+  public output<ThrowOnError extends boolean = false>(
+    parameters: {
+      shellID: string
+      directory?: string
+      workspace?: string
+      cursor?: string
+      limit?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "shellID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "query", key: "cursor" },
+            { in: "query", key: "limit" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<ShellOutputResponses, ShellOutputErrors, ThrowOnError>({
+      url: "/shell/{shellID}/output",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Kill shell command
+   *
+   * Kill a running shell command and its process group. Its output stays readable. Killing an exited command is a no-op.
+   */
+  public kill<ThrowOnError extends boolean = false>(
+    parameters: {
+      shellID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "shellID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<ShellKillResponses, ShellKillErrors, ThrowOnError>({
+      url: "/shell/{shellID}/kill",
+      ...options,
+      ...params,
     })
   }
 }
@@ -5474,6 +5650,11 @@ export class OpencodeClient extends HeyApiClient {
   private _part?: Part
   get part(): Part {
     return (this._part ??= new Part({ client: this.client }))
+  }
+
+  private _shell?: Shell
+  get shell(): Shell {
+    return (this._shell ??= new Shell({ client: this.client }))
   }
 
   private _sync?: Sync

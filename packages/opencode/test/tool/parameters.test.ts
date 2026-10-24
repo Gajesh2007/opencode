@@ -117,6 +117,12 @@ describe("tool parameters", () => {
       expect(parsed.timeout).toBe(5000)
       expect(parsed.workdir).toBe("/tmp")
     })
+    test("accepts optional background flag", () => {
+      expect(parse(Shell, { command: "bun dev", description: "dev server", background: true }).background).toBe(true)
+    })
+    test("rejects non-boolean background", () => {
+      expect(accepts(Shell, { command: "ls", description: "list", background: "yes" })).toBe(false)
+    })
     test("rejects missing description", () => {
       expect(accepts(Shell, { command: "ls" })).toBe(false)
     })

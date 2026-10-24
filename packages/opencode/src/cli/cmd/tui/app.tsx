@@ -72,6 +72,7 @@ import { createTuiApi } from "@/cli/cmd/tui/plugin/api"
 import type { RouteMap } from "@/cli/cmd/tui/plugin/api"
 import { createTuiAttention } from "@/cli/cmd/tui/attention"
 import { FormatError, FormatUnknownError } from "@/cli/error"
+import { Locale } from "@/util/locale"
 import { CommandPaletteDialog } from "./component/command-palette"
 import {
   COMMAND_PALETTE_COMMAND,
@@ -112,7 +113,7 @@ const appBindingCommands = [
   "agent.cycle.reverse",
   "variant.cycle",
   "variant.list",
-  "subagent.background",
+  "session.background",
   "subagent.steer",
   "service_tier.cycle",
   "service_tier.list",
@@ -696,23 +697,26 @@ export function App(props: { onSnapshot?: () => Promise<string[]> }) {
         },
       },
       {
-        name: "subagent.background",
-        title: "Move subagent to background",
-        category: "Agent",
-        run: () => {
-          const sessionID = route.data.type === "session" ? route.data.sessionID : undefined
-          if (!sessionID) {
-            toast.show({ message: "Open a session first", variant: "warning", duration: 3000 })
+        name: "session.background",
+        title: "Move running work to background",
+        category: "Session",
+        enabled: route.data.type === "session",
+        run: async () => {
+          if (route.data.type !== "session") return
+          const result = await sdk.client.session.background({ sessionID: route.data.sessionID })
+          if (!result.data) {
+            toast.show({ message: errorMessage(result.error), variant: "error" })
             return
           }
-          void sdk.client.tui.publish({
-            body: {
-              type: TuiEvent.SubagentDemote.type,
-              properties: { sessionID },
-            } as any,
-          })
+          const [first, ...rest] = result.data
+          if (!first) {
+            toast.show({ message: "Nothing running to move to the background", variant: "warning", duration: 3000 })
+            return
+          }
+          const title =
+            first.title?.replace(/\s+/g, " ").trim() || (first.type === "task" ? "subagent" : "shell command")
           toast.show({
-            message: "Subagent moved to background — you'll get the result when it finishes",
+            message: `Moved to background: ${Locale.truncate(title, 60)}${rest.length ? ` (+${rest.length} more)` : ""}`,
             variant: "info",
             duration: 4000,
           })

@@ -18,6 +18,11 @@ import { Plugin } from "../../src/plugin"
 import { testEffect } from "../lib/effect"
 import { Tool } from "@/tool/tool"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { BackgroundJob } from "@/background/job"
+import { Bus } from "@/bus"
+import { Session } from "@/session/session"
+import { SessionStatus } from "@/session/status"
+import { ShellProcess } from "@/shell/process"
 
 const shellLayer = Layer.mergeAll(
   CrossSpawnSpawner.defaultLayer,
@@ -27,6 +32,11 @@ const shellLayer = Layer.mergeAll(
   Config.defaultLayer,
   Agent.defaultLayer,
   RuntimeFlags.defaultLayer,
+  ShellProcess.defaultLayer,
+  BackgroundJob.defaultLayer,
+  Session.defaultLayer,
+  SessionStatus.defaultLayer,
+  Bus.layer,
 )
 const it = testEffect(shellLayer)
 type ShellTestServices =

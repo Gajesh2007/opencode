@@ -7,6 +7,7 @@ import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { LLMClient, RequestExecutor, WebSocketExecutor } from "@opencode-ai/llm/route"
 import { Agent } from "@/agent/agent"
 import { Collaboration } from "@/agent/collaboration"
+import { BackgroundJob } from "@/background/job"
 import { Auth } from "@/auth"
 import { Bus } from "@/bus"
 import { Command } from "@/command"
@@ -41,6 +42,7 @@ import { SystemPrompt } from "@/session/system"
 import { SessionTimingStore } from "@/session/timing-store"
 import { TimingTable } from "@/session/timing.sql"
 import { SessionTools } from "@/session/tools"
+import { ShellProcess } from "@/shell/process"
 import { Snapshot } from "@/snapshot"
 import { Database } from "@/storage/db"
 import { ToolRegistry } from "@/tool/registry"
@@ -595,7 +597,7 @@ const shellFixture = Effect.fn("TimingPersistence.shellFixture")(function* () {
   const gates = {
     exited: yield* Latch.make(),
     output: yield* Latch.make(),
-    cleaning: yield* Latch.make(),
+    killing: yield* Latch.make(),
     cleanup: yield* Latch.make(),
     saving: yield* Latch.make(),
     save: yield* Latch.make(),
@@ -608,6 +610,9 @@ const shellFixture = Effect.fn("TimingPersistence.shellFixture")(function* () {
           Layer.mergeAll(
             AppFileSystem.defaultLayer,
             SessionRunState.defaultLayer,
+            BackgroundJob.defaultLayer,
+            // Built here so the shell process spawns through the gated spawner below.
+            ShellProcess.layer,
             Layer.mock(Command.Service, {}),
             Layer.mock(Goal.Service, {}),
             Layer.mock(Instruction.Service, {}),
@@ -634,7 +639,8 @@ const shellFixture = Effect.fn("TimingPersistence.shellFixture")(function* () {
         ChildProcessSpawner,
         makeSpawner((command) =>
           Effect.gen(function* () {
-            yield* Effect.addFinalizer(() => gates.cleaning.open.pipe(Effect.andThen(gates.cleanup.await)))
+            // Process cleanup runs in the shell's owner fiber, after the command's exit is reported.
+            yield* Effect.addFinalizer(() => gates.cleanup.await)
             const handle = yield* spawner.spawn(command)
             return makeHandle({
               ...handle,
@@ -644,6 +650,7 @@ const shellFixture = Effect.fn("TimingPersistence.shellFixture")(function* () {
                   handle.exitCode.pipe(Effect.andThen(gates.exited.open), Effect.andThen(gates.output.await)),
                 ),
               ),
+              kill: (options) => gates.killing.open.pipe(Effect.andThen(handle.kill(options))),
             })
           }),
         ),
@@ -676,7 +683,7 @@ const shellFixture = Effect.fn("TimingPersistence.shellFixture")(function* () {
 
 const shellTest = process.platform === "win32" ? it.live.skip : it.live
 
-shellTest("direct shell timing separates process cleanup from transcript finalization", () =>
+shellTest("direct shell timing ends the command once its output is captured, before the transcript", () =>
   provideTmpdirServer(
     () =>
       Effect.gen(function* () {
@@ -688,13 +695,11 @@ shellTest("direct shell timing separates process cleanup from transcript finaliz
           0,
         )
         yield* f.gates.output.open
-        yield* awaitWithTimeout(f.gates.cleaning.await, "shell did not reach process cleanup")
+        // Process cleanup stays blocked: the shell process owns it, and the transcript must not wait for it.
+        yield* awaitWithTimeout(f.gates.saving.await, "shell did not finalize its transcript")
         const first = f.rows().filter((row) => row.phase === "command_first_output")
         expect(first).toHaveLength(1)
         expect(first[0].data.commandID).toBe(start?.data.commandID)
-        expect(f.rows().filter((row) => row.phase === "command")).toHaveLength(0)
-        yield* f.gates.cleanup.open
-        yield* awaitWithTimeout(f.gates.saving.await, "shell did not finalize its transcript")
         expect(f.rows().filter((row) => row.phase === "command")).toMatchObject([
           { data: { exitCode: 0, status: "completed" } },
         ])
@@ -727,12 +732,13 @@ shellTest("cancelling direct shell during output drain never persists completed 
         const f = yield* shellFixture()
         yield* awaitWithTimeout(f.gates.exited.await, "shell process did not exit")
         const cancel = yield* f.prompt.cancel(f.session.id).pipe(Effect.forkScoped)
-        yield* Effect.addFinalizer(() => f.gates.cleanup.open.pipe(Effect.andThen(f.gates.save.open), Effect.asVoid))
-        yield* awaitWithTimeout(f.gates.cleaning.await, "cancel did not reach process cleanup")
+        yield* Effect.addFinalizer(() => f.gates.output.open.pipe(Effect.andThen(f.gates.save.open), Effect.asVoid))
+        yield* awaitWithTimeout(f.gates.killing.await, "cancel did not kill the shell")
         expect(f.rows().filter((row) => row.phase === "command" || row.phase === "command_first_output")).toHaveLength(
           0,
         )
-        yield* f.gates.cleanup.open
+        // The kill settles once the drain completes; output captured after the abort is not reported.
+        yield* f.gates.output.open
         yield* awaitWithTimeout(f.gates.saving.await, "cancel did not finalize its transcript")
         expect(f.rows().filter((row) => row.phase === "command")).toMatchObject([{ data: { status: "interrupted" } }])
         expect(f.rows().filter((row) => row.phase === "overall")).toHaveLength(0)

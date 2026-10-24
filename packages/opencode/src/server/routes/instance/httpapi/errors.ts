@@ -158,6 +158,15 @@ export class PtyNotFoundError extends Schema.TaggedErrorClass<PtyNotFoundError>(
   { httpApiStatus: 404 },
 ) {}
 
+export class ShellNotFoundError extends Schema.TaggedErrorClass<ShellNotFoundError>()(
+  "ShellNotFoundError",
+  {
+    shellID: Schema.String,
+    message: Schema.String,
+  },
+  { httpApiStatus: 404 },
+) {}
+
 export class PtyForbiddenError extends Schema.TaggedErrorClass<PtyForbiddenError>()(
   "PtyForbiddenError",
   {

@@ -2,8 +2,8 @@
 import { describe, expect, test } from "bun:test"
 import { Global } from "@opencode-ai/core/global"
 import { tmpdir } from "../../../fixture/fixture"
-import { mount, wait } from "./sync-fixture"
-import type { GlobalEvent, ToolPart } from "@opencode-ai/sdk/v2"
+import { json, mount, wait } from "./sync-fixture"
+import type { GlobalEvent, ShellProcess, ToolPart } from "@opencode-ai/sdk/v2"
 
 function branchEvent(branch: string, workspace?: string): GlobalEvent {
   return {
@@ -106,6 +106,54 @@ describe("tui sync", () => {
 
       expect(session.at(-1)?.searchParams.get("scope")).toBe("project")
       expect(session.at(-1)?.searchParams.get("path")).toBeNull()
+    } finally {
+      app.renderer.destroy()
+      Global.Path.state = previous
+    }
+  })
+
+  test("tracks shell commands from the initial list and shell events", async () => {
+    const previous = Global.Path.state
+    await using tmp = await tmpdir()
+    Global.Path.state = tmp.path
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const shell = (id: string, sessionID: string, started: number): ShellProcess => ({
+      id,
+      sessionID,
+      source: "tool",
+      command: "bun dev",
+      cwd: "/tmp/opencode",
+      shell: "/bin/bash",
+      file: `/tmp/${id}`,
+      status: "running",
+      background: true,
+      time: { started },
+    })
+    const { app, emit, sync } = await mount((url) =>
+      url.pathname === "/shell"
+        ? json([shell("sh_b", "ses_a", 2), shell("sh_a", "ses_a", 1), shell("sh_c", "ses_other", 3)])
+        : undefined,
+    )
+    const publish = (payload: GlobalEvent["payload"]) =>
+      emit({ directory: "/tmp/opencode", project: "proj_test", payload })
+
+    try {
+      expect(sync.shell.list("ses_a").map((item) => item.id)).toEqual(["sh_a", "sh_b"])
+
+      publish({
+        id: "evt_shell_exit",
+        type: "shell.updated",
+        properties: {
+          info: { ...shell("sh_a", "ses_a", 1), status: "exited", exit: 0, time: { started: 1, completed: 4 } },
+        },
+      })
+      await wait(() => sync.shell.get("sh_a")?.status === "exited")
+      expect(sync.shell.get("sh_a")?.exit).toBe(0)
+
+      publish({ id: "evt_shell_new", type: "shell.updated", properties: { info: shell("sh_d", "ses_a", 5) } })
+      publish({ id: "evt_shell_gone", type: "shell.deleted", properties: { id: "sh_a", sessionID: "ses_a" } })
+      await wait(() => sync.shell.get("sh_a") === undefined)
+      expect(sync.shell.list("ses_a").map((item) => item.id)).toEqual(["sh_b", "sh_d"])
     } finally {
       app.renderer.destroy()
       Global.Path.state = previous

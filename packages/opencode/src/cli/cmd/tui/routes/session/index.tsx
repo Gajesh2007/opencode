@@ -7,6 +7,7 @@ import {
   For,
   Match,
   on,
+  onCleanup,
   onMount,
   Show,
   Switch,
@@ -29,6 +30,7 @@ import type {
   Part,
   Provider,
   ToolPart,
+  ToolStateRunning,
   UserMessage,
   TextPart,
   ReasoningPart,
@@ -99,8 +101,12 @@ import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut, useOpencodeKeymap 
 import { PathFormatterProvider, usePathFormatter } from "../../context/path-format"
 import { parseFileToolInput } from "../../util/tool-input"
 import { ToolCode } from "../../component/tool-code"
+import { DialogShellOutput } from "../../component/dialog-shell-output"
+import { backgroundNotice, shellResult, shellTone } from "../../util/background"
 
 addDefaultParsers(parsers.parsers)
+
+const BACKGROUND_HINT_DELAY = 3000
 
 const GO_UPSELL_FREE_TIER_LAST_SEEN_AT = "go_upsell_last_seen_at"
 const GO_UPSELL_FREE_TIER_DONT_SHOW = "go_upsell_dont_show"
@@ -1282,6 +1288,9 @@ export function Session() {
                     </Switch>
                   )}
                 </For>
+                <Show when={!disabled()}>
+                  <BackgroundHint parts={sync.data.part[lastAssistant()?.id ?? ""] ?? []} />
+                </Show>
               </scrollbox>
               <box flexShrink={0}>
                 <Show when={permissions().length > 0}>
@@ -1384,6 +1393,11 @@ function UserMessage(props: {
   const metadataVisible = createMemo(() => queued() || ctx.showTimestamps())
 
   const compaction = createMemo(() => props.parts.find((x) => x.type === "compaction"))
+  const notices = createMemo(() =>
+    props.parts.filter(
+      (part): part is TextPart => part.type === "text" && part.synthetic === true && !!backgroundNotice(part.metadata),
+    ),
+  )
 
   return (
     <>
@@ -1448,6 +1462,7 @@ function UserMessage(props: {
           </box>
         </box>
       </Show>
+      <For each={notices()}>{(part) => <BackgroundNoticeRow part={part} />}</For>
       <Show when={compaction()}>
         <box
           marginTop={1}
@@ -1458,6 +1473,106 @@ function UserMessage(props: {
         />
       </Show>
     </>
+  )
+}
+
+// Background shells and subagents report completion as synthetic user text, which is otherwise hidden.
+function BackgroundNoticeRow(props: { part: TextPart }) {
+  const ctx = use()
+  const sync = useSync()
+  const dialog = useDialog()
+  const renderer = useRenderer()
+  const { navigate } = useRoute()
+  const { theme } = useTheme()
+  const [hover, setHover] = createSignal(false)
+  const [expanded, setExpanded] = createSignal(false)
+  const notice = createMemo(() => backgroundNotice(props.part.metadata))
+
+  function open() {
+    if (renderer.getSelection()?.getSelectedText()) return
+    const sessionID = notice()?.sessionID
+    if (sessionID) {
+      navigate({ type: "session", sessionID })
+      return
+    }
+    const shellID = notice()?.shellID
+    const shell = shellID ? sync.shell.get(shellID) : undefined
+    if (shell) {
+      dialog.replace(() => <DialogShellOutput shellID={shell.id} command={shell.command} />)
+      return
+    }
+    setExpanded((value) => !value)
+  }
+
+  return (
+    <Show when={notice()}>
+      {(notice) => (
+        <box
+          paddingLeft={3}
+          marginTop={1}
+          flexShrink={0}
+          onMouseOver={() => setHover(true)}
+          onMouseOut={() => setHover(false)}
+          onMouseUp={open}
+        >
+          <text wrapMode="none">
+            <span style={{ fg: hover() ? theme.text : theme[notice().tone] }}>{notice().label}</span>
+            <Show when={notice().detail}>
+              {(detail) => (
+                <span style={{ fg: theme.textMuted }}>
+                  {Locale.truncate(` · ${detail()}`, Math.max(4, ctx.width - 3 - notice().label.length))}
+                </span>
+              )}
+            </Show>
+          </text>
+          <Show when={expanded()}>
+            <text fg={theme.textMuted} paddingLeft={2}>
+              {props.part.text.trim()}
+            </text>
+          </Show>
+        </box>
+      )}
+    </Show>
+  )
+}
+
+function BackgroundHint(props: { parts: Part[] }) {
+  const { theme } = useTheme()
+  const shortcut = useCommandShortcut("session.background")
+  const running = createMemo(
+    () => {
+      const part = props.parts.find(
+        (part): part is ToolPart & { state: ToolStateRunning } =>
+          part.type === "tool" &&
+          (part.tool === ShellID.ToolID || part.tool === "task") &&
+          part.state.status === "running" &&
+          part.state.metadata?.background !== true,
+      )
+      if (!part) return
+      return { id: part.id, start: part.state.time.start }
+    },
+    undefined,
+    { equals: (previous, next) => previous?.id === next?.id && previous?.start === next?.start },
+  )
+  const [visible, setVisible] = createSignal(false)
+
+  // Restarts for every newly running part, counted from when that part started.
+  createEffect(() => {
+    const current = running()
+    setVisible(false)
+    if (!current) return
+    const timer = setTimeout(() => setVisible(true), BACKGROUND_HINT_DELAY - (Date.now() - current.start))
+    onCleanup(() => clearTimeout(timer))
+  })
+
+  return (
+    <Show when={visible() && shortcut()}>
+      <box paddingLeft={3} marginTop={1} flexShrink={0}>
+        <text fg={theme.textMuted}>
+          Press <span style={{ fg: theme.text }}>{shortcut()}</span> to move running work to the background
+        </text>
+      </box>
+    </Show>
   )
 }
 
@@ -1689,6 +1804,11 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
   const shouldHide = createMemo(() => {
     if (ctx.showDetails()) return false
     if (props.part.state.status !== "completed") return false
+    // A background command's part completes while the command keeps running.
+    if (props.part.tool === ShellID.ToolID && props.part.state.metadata.background === true) {
+      const shellID = props.part.state.metadata.shellID
+      return typeof shellID !== "string" || sync.shell.get(shellID)?.status !== "running"
+    }
     return true
   })
 
@@ -1969,6 +2089,9 @@ function Shell(props: ToolProps<typeof ShellTool>) {
   const { theme } = useTheme()
   const pathFormatter = usePathFormatter()
   const ctx = use()
+  const sync = useSync()
+  const dialog = useDialog()
+  const shell = createMemo(() => (props.metadata.shellID ? sync.shell.get(props.metadata.shellID) : undefined))
   const isRunning = createMemo(() => props.part.state.status === "running")
   const output = createMemo(() => stripAnsi(props.metadata.output?.trim() ?? ""))
   const [expanded, setExpanded] = createSignal(false)
@@ -1994,8 +2117,39 @@ function Shell(props: ToolProps<typeof ShellTool>) {
     return `# ${desc} in ${wd}`
   })
 
+  function openOutput() {
+    const shellID = props.metadata.shellID
+    if (!shellID) return
+    dialog.replace(() => <DialogShellOutput shellID={shellID} command={props.input.command} />)
+  }
+
   return (
     <Switch>
+      <Match when={props.metadata.background === true}>
+        <BlockTool
+          title={`${title()} (background)`}
+          part={props.part}
+          onClick={props.metadata.shellID ? openOutput : undefined}
+        >
+          <text fg={theme.text}>$ {props.input.command}</text>
+          <Switch>
+            <Match when={shell()?.status === "running"}>
+              <Spinner color={theme.textMuted}>running in background · click to view output</Spinner>
+            </Match>
+            <Match when={shell()}>
+              {(info) => (
+                <text fg={theme.textMuted}>
+                  <span style={{ fg: theme[shellTone(info())] }}>{shellResult(info())}</span>
+                  {" · click to view output"}
+                </text>
+              )}
+            </Match>
+            <Match when={props.metadata.shellID}>
+              <text fg={theme.textMuted}>click to view output</text>
+            </Match>
+          </Switch>
+        </BlockTool>
+      </Match>
       <Match when={props.metadata.output !== undefined}>
         <BlockTool
           title={title()}

@@ -48,6 +48,7 @@ import { SessionV2 } from "../../src/v2/session"
 import { Skill } from "../../src/skill"
 import { SystemPrompt } from "../../src/session/system"
 import { Shell } from "../../src/shell/shell"
+import { ShellProcess } from "../../src/shell/process"
 import { Snapshot } from "../../src/snapshot"
 import { ToolRegistry } from "@/tool/registry"
 import { Truncate } from "@/tool/truncate"
@@ -200,6 +201,7 @@ function makePrompt(input?: PromptLayerInput) {
     mcp,
     AppFileSystem.defaultLayer,
     BackgroundJob.defaultLayer,
+    ShellProcess.defaultLayer,
     status,
     SyncEvent.defaultLayer,
     EventV2Bridge.defaultLayer,
@@ -2285,6 +2287,215 @@ unixNoLLMServer(
 
         yield* prompt.cancel(chat.id)
         yield* Fiber.await(a)
+      }),
+    ),
+  { git: true, config: cfg },
+  30_000,
+)
+
+// Moving a `!` command to the background (Ctrl+B)
+
+// Prints, then keeps running until a `release` file appears in the project directory.
+const blockingCommand =
+  "printf 'line1\\nline2\\nline3\\n'; while [ ! -e release ]; do sleep 0.05; done; printf 'line4\\n'; exit 3"
+
+// Upper bound for each readiness signal below; process startup is slow on a loaded machine.
+const backgroundWait = "15 seconds"
+
+const startBlockingShell = Effect.fn("test.startBlockingShell")(function* (sessionID: SessionID) {
+  const prompt = yield* SessionPrompt.Service
+  const fiber = yield* prompt.shell({ sessionID, agent: "build", command: blockingCommand }).pipe(Effect.forkChild)
+  const shellID = yield* pollWithTimeout(
+    Effect.gen(function* () {
+      const part = (yield* MessageV2.filterCompactedEffect(sessionID))
+        .flatMap((message) => message.parts)
+        .findLast((part): part is MessageV2.ToolPart => part.type === "tool" && part.state.status === "running")
+      if (part?.state.status !== "running" || !part.state.metadata?.output?.includes("line3")) return
+      return ShellProcess.ID.make(part.state.metadata.shellID)
+    }),
+    "shell never published its first output",
+    backgroundWait,
+  )
+  return { fiber, shellID }
+})
+
+const backgroundShell = Effect.fn("test.backgroundShell")(function* (sessionID: SessionID) {
+  const started = yield* startBlockingShell(sessionID)
+  const jobs = yield* BackgroundJob.Service
+  // Output can be published a moment before the call starts blocking on its job.
+  const moved = yield* pollWithTimeout(
+    jobs.backgroundAll({ sessionID }).pipe(Effect.map((moved) => (moved.length ? moved : undefined))),
+    "shell never blocked its session",
+    backgroundWait,
+  )
+  expect(moved.map((job) => job.id)).toEqual([started.shellID])
+  const result = yield* awaitWithTimeout(
+    Fiber.join(started.fiber),
+    "backgrounded shell call did not return",
+    backgroundWait,
+  )
+  return { ...started, moved, result }
+})
+
+const shellNotices = Effect.fn("test.shellNotices")(function* (sessionID: SessionID) {
+  const messages = yield* (yield* Session.Service).messages({ sessionID }).pipe(Effect.orDie)
+  return messages
+    .flatMap((message) => message.parts)
+    .filter((part): part is MessageV2.TextPart => part.type === "text" && part.metadata?.source === "shell")
+})
+
+const awaitShellNotices = (sessionID: SessionID) =>
+  pollWithTimeout(
+    shellNotices(sessionID).pipe(Effect.map((notices) => (notices.length ? notices : undefined))),
+    "backgrounded shell never reported its exit",
+    backgroundWait,
+  )
+
+unixNoLLMServer(
+  "ctrl+b moves a running ! command to the background and records its completion without a new turn",
+  () =>
+    withSh(() =>
+      Effect.gen(function* () {
+        const { directory: dir } = yield* TestInstance
+        const { run, sessions, chat } = yield* boot()
+        const shells = yield* ShellProcess.Service
+        const status = yield* SessionStatus.Service
+
+        const { shellID, moved, result } = yield* backgroundShell(chat.id)
+        expect(moved).toMatchObject([{ id: shellID, type: "shell", title: blockingCommand }])
+        const file = (yield* shells.get(shellID)).file
+        const tool = completedTool(result.parts)
+        expect(tool?.state.metadata).toEqual({
+          output: "line1\nline2\nline3",
+          description: "",
+          shellID,
+          background: true,
+          outputPath: file,
+        })
+        expect(tool?.state.output).toBe(
+          `The user moved this command to the background (shell ID: ${shellID}). It is still running; output is streaming to: ${file}\n\nOutput so far:\nline1\nline2\nline3`,
+        )
+        expect((yield* status.get(chat.id)).type).toBe("idle")
+        yield* run.assertNotBusy(chat.id)
+        expect(yield* shells.get(shellID)).toMatchObject({ status: "running", background: true })
+        expect(yield* shellNotices(chat.id)).toEqual([])
+
+        yield* writeText(path.join(dir, "release"), "")
+        const [notice] = yield* awaitShellNotices(chat.id)
+        expect(notice.synthetic).toBe(true)
+        expect(notice.metadata).toEqual({
+          source: "shell",
+          user: true,
+          shellID,
+          command: blockingCommand,
+          state: "exited",
+          exit: 3,
+        })
+        expect(notice.text).toBe(
+          [
+            "The following shell command was executed by the user and finished in the background:",
+            `<shell id="${shellID}" state="exited" command="${blockingCommand}">`,
+            "line1\nline2\nline3\nline4",
+            "",
+            "Exited with code 3",
+            "</shell>",
+          ].join("\n"),
+        )
+        // The `!` command's own reply is the only assistant message: the notice waits for the next turn.
+        const messages = yield* sessions.messages({ sessionID: chat.id })
+        expect(messages.filter((message) => message.info.role === "assistant")).toHaveLength(1)
+        expect(messages.at(-1)?.parts).toEqual([notice])
+        expect((yield* status.get(chat.id)).type).toBe("idle")
+      }),
+    ),
+  { git: true, config: cfg },
+  30_000,
+)
+
+unixNoLLMServer(
+  "backgrounded ! command previews and notices keep to the tool output limits",
+  () =>
+    withSh(() =>
+      Effect.gen(function* () {
+        const { directory: dir } = yield* TestInstance
+        const { chat } = yield* boot()
+        const shells = yield* ShellProcess.Service
+
+        const { shellID, result } = yield* backgroundShell(chat.id)
+        const file = (yield* shells.get(shellID)).file
+        const tool = completedTool(result.parts)
+        expect(tool?.state.metadata.output).toBe("...\nline2\nline3")
+        expect(tool?.state.metadata.outputPath).toBe(file)
+        expect(tool?.state.output).toEndWith("Output so far:\n...\nline2\nline3")
+
+        yield* writeText(path.join(dir, "release"), "")
+        const [notice] = yield* awaitShellNotices(chat.id)
+        expect(notice.text).toBe(
+          [
+            "The following shell command was executed by the user and finished in the background:",
+            `<shell id="${shellID}" state="exited" command="${blockingCommand}">`,
+            `...output truncated...\n\nFull output saved to: ${file}\n\nline3\nline4`,
+            "",
+            "Exited with code 3",
+            "</shell>",
+          ].join("\n"),
+        )
+      }),
+    ),
+  { git: true, config: { ...cfg, tool_output: { max_lines: 2, max_bytes: 1024 } } },
+  30_000,
+)
+
+unixNoLLMServer(
+  "esc leaves a backgrounded ! command running but still kills a foreground one",
+  () =>
+    withSh(() =>
+      Effect.gen(function* () {
+        const { directory: dir } = yield* TestInstance
+        const { prompt, chat } = yield* boot()
+        const shells = yield* ShellProcess.Service
+
+        const backgrounded = yield* backgroundShell(chat.id)
+        yield* prompt.cancel(chat.id)
+        expect((yield* shells.get(backgrounded.shellID)).status).toBe("running")
+
+        const foreground = yield* startBlockingShell(chat.id)
+        yield* prompt.cancel(chat.id)
+        const aborted = yield* awaitWithTimeout(
+          Fiber.join(foreground.fiber),
+          "aborted shell call did not return",
+          backgroundWait,
+        )
+        expect(completedTool(aborted.parts)?.state.output).toContain("User aborted the command")
+        expect((yield* shells.get(foreground.shellID)).status).toBe("killed")
+        expect((yield* shells.get(backgrounded.shellID)).status).toBe("running")
+
+        // Esc does not suppress the backgrounded command's notice either.
+        yield* writeText(path.join(dir, "release"), "")
+        expect((yield* shells.wait(backgrounded.shellID)).status).toBe("exited")
+        const notices = yield* awaitShellNotices(chat.id)
+        expect(notices.map((notice) => notice.metadata?.shellID)).toEqual([backgrounded.shellID])
+      }),
+    ),
+  { git: true, config: cfg },
+  30_000,
+)
+
+unixNoLLMServer(
+  "deleting a session kills its backgrounded ! commands",
+  () =>
+    withSh(() =>
+      Effect.gen(function* () {
+        const { sessions, chat } = yield* boot()
+        const shells = yield* ShellProcess.Service
+        const jobs = yield* BackgroundJob.Service
+
+        const { shellID } = yield* backgroundShell(chat.id)
+        expect((yield* shells.get(shellID)).status).toBe("running")
+
+        yield* sessions.remove(chat.id)
+        expect((yield* shells.get(shellID)).status).toBe("killed")
+        expect((yield* jobs.get(shellID))?.status).toBe("cancelled")
       }),
     ),
   { git: true, config: cfg },

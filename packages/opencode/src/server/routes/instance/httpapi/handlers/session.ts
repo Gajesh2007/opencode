@@ -1,4 +1,5 @@
 import { Agent } from "@/agent/agent"
+import { BackgroundJob } from "@/background/job"
 import { Bus } from "@/bus"
 import { Command } from "@/command"
 import { Permission } from "@/permission"
@@ -66,6 +67,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const goalSvc = yield* Goal.Service
     const summary = yield* SessionSummary.Service
     const bus = yield* Bus.Service
+    const jobs = yield* BackgroundJob.Service
     const scope = yield* Scope.Scope
 
     const list = Effect.fn("SessionHttpApi.list")(function* (ctx: { query: typeof ListQuery.Type }) {
@@ -269,6 +271,12 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       yield* llm.cancelWarm?.(ctx.params.sessionID) ?? Effect.void
       yield* promptSvc.cancel(ctx.params.sessionID)
       return true
+    })
+
+    const background = Effect.fn("SessionHttpApi.background")(function* (ctx: { params: { sessionID: SessionID } }) {
+      yield* requireSession(ctx.params.sessionID)
+      const moved = yield* jobs.backgroundAll({ sessionID: ctx.params.sessionID })
+      return moved.map((job) => ({ id: job.id, type: job.type, ...(job.title ? { title: job.title } : {}) }))
     })
 
     const init = Effect.fn("SessionHttpApi.init")(function* (ctx: {
@@ -483,6 +491,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("update", update)
       .handleRaw("fork", forkRaw)
       .handle("abort", abort)
+      .handle("background", background)
       .handle("init", init)
       .handle("share", share)
       .handle("unshare", unshare)

@@ -5,7 +5,7 @@ import type { Config } from "../../../src/config/config"
 import { ModelID, ProviderID } from "../../../src/provider/schema"
 import type { MessageV2 } from "../../../src/session/message-v2"
 import { MessageID, PartID } from "../../../src/session/schema"
-import { call, callAuthProbe } from "./backend"
+import { call, callAuthProbe, send } from "./backend"
 import { original } from "./environment"
 import { runtime } from "./runtime"
 import type { ActiveScenario, Options, ProjectOptions, Result, Scenario, ScenarioContext, SeededContext } from "./types"
@@ -177,6 +177,7 @@ function withContext<A, E>(
           llmText: (value) => Effect.suspend(() => llm().text(value)),
           llmWait: (count) => Effect.suspend(() => llm().wait(count)),
           tuiRequest: (request) => Effect.sync(() => modules.Tui.submitTuiRequest(request)),
+          request: send,
         }
         yield* trace(options, scenario, `${label} seed start`)
         const state = yield* scenario.seed(base)

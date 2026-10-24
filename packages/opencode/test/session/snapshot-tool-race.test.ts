@@ -31,6 +31,7 @@ import { TestLLMServer } from "../lib/llm-server"
 import { NodeFileSystem } from "@effect/platform-node"
 import { Agent as AgentSvc } from "../../src/agent/agent"
 import { BackgroundJob } from "@/background/job"
+import { ShellProcess } from "@/shell/process"
 import { Collaboration } from "@/agent/collaboration"
 import { SubagentRun } from "@/agent/subagent-run"
 import { SubagentLimit } from "@/agent/subagent-limit"
@@ -138,6 +139,7 @@ function makeHttp() {
     mcp,
     AppFileSystem.defaultLayer,
     BackgroundJob.defaultLayer,
+    ShellProcess.defaultLayer,
     status,
     SyncEvent.defaultLayer,
     EventV2Bridge.defaultLayer,

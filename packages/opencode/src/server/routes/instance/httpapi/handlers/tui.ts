@@ -1,3 +1,4 @@
+import { BackgroundJob } from "@/background/job"
 import { Bus } from "@/bus"
 import { TuiEvent } from "@/cli/cmd/tui/event"
 import { Session } from "@/session/session"
@@ -28,6 +29,7 @@ export const tuiHandlers = HttpApiBuilder.group(InstanceHttpApi, "tui", (handler
   Effect.gen(function* () {
     const bus = yield* Bus.Service
     const session = yield* Session.Service
+    const jobs = yield* BackgroundJob.Service
     const publishCommand = (command: typeof TuiEvent.CommandExecute.properties.Type.command | undefined) =>
       bus.publish(TuiEvent.CommandExecute, { command } as typeof TuiEvent.CommandExecute.properties.Type)
 
@@ -91,8 +93,9 @@ export const tuiHandlers = HttpApiBuilder.group(InstanceHttpApi, "tui", (handler
       if (ctx.payload.type === TuiEvent.ToastShow.type) yield* bus.publish(TuiEvent.ToastShow, ctx.payload.properties)
       if (ctx.payload.type === TuiEvent.SessionSelect.type)
         yield* bus.publish(TuiEvent.SessionSelect, ctx.payload.properties)
+      // Legacy Ctrl+B event; POST /session/:sessionID/background is the current API.
       if (ctx.payload.type === TuiEvent.SubagentDemote.type)
-        yield* bus.publish(TuiEvent.SubagentDemote, ctx.payload.properties)
+        yield* jobs.backgroundAll({ sessionID: ctx.payload.properties.sessionID })
       return true
     })
 

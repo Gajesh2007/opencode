@@ -2,7 +2,7 @@ import { ConfigProvider, Effect, Layer } from "effect"
 import { HttpRouter } from "effect/unstable/http"
 import { parse } from "./assertions"
 import { runtime, type Runtime } from "./runtime"
-import type { ActiveScenario, BackendApp, CallResult, CaptureMode, SeededContext } from "./types"
+import type { ActiveScenario, BackendApp, CallResult, CaptureMode, Method, RequestSpec, SeededContext } from "./types"
 
 type CallOptions = {
   auth?: {
@@ -13,8 +13,16 @@ type CallOptions = {
 
 export function call(scenario: ActiveScenario, ctx: SeededContext<unknown>, options: CallOptions = {}) {
   return Effect.promise(async () =>
-    capture(await app(await runtime(), options).request(toRequest(scenario, ctx)), scenario.capture),
+    capture(
+      await app(await runtime(), options).request(toRequest(scenario.method, scenario.request(ctx, ctx.state))),
+      scenario.capture,
+    ),
   )
+}
+
+/** Sends a request through the same app scenarios call, so seeded state lives in the services under test. */
+export function send(method: Method, spec: RequestSpec) {
+  return Effect.promise(async () => capture(await app(await runtime(), {}).request(toRequest(method, spec)), "full"))
 }
 
 export function callAuthProbe(scenario: ActiveScenario, credentials: "missing" | "valid" = "missing") {
@@ -68,10 +76,9 @@ function app(modules: Runtime, options: CallOptions) {
   })
 }
 
-function toRequest(scenario: ActiveScenario, ctx: SeededContext<unknown>) {
-  const spec = scenario.request(ctx, ctx.state)
+function toRequest(method: Method, spec: RequestSpec) {
   return new Request(new URL(spec.path, "http://localhost"), {
-    method: scenario.method,
+    method,
     headers: spec.body === undefined ? spec.headers : { "content-type": "application/json", ...spec.headers },
     body: spec.body === undefined ? undefined : JSON.stringify(spec.body),
   })

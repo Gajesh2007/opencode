@@ -16,11 +16,17 @@ export type Info = {
   output?: string
   error?: string
   metadata?: Record<string, unknown>
+  /** Set once nothing blocks on the job anymore; its owner reports the result separately. */
+  background?: boolean
 }
 
 type Active = {
   info: Info
   done: Deferred.Deferred<Info>
+  // Resolves when the job moves to the background, releasing every `block` caller.
+  backgrounded: Deferred.Deferred<Info>
+  // Sessions currently blocked on this job, with how many concurrent blocks each holds.
+  blockers: Map<string, number>
   fiber?: Fiber.Fiber<void, unknown>
   preparing?: Deferred.Deferred<void>
 }
@@ -36,7 +42,13 @@ type State = {
   jobs: SynchronizedRef.SynchronizedRef<Map<string, Job>>
   scope: Scope.Scope
   directory?: string
+  // Finished job ids per type, oldest first. Guarded by the jobs lock.
+  finished: Map<string, string[]>
 }
+
+// Finished jobs stay readable for late readers (`wait`, `task_status`). Every shell command is a
+// job, so retention is capped per type: a busy shell can't evict subagent results.
+const FINISHED_LIMIT = 100
 
 export type StartInput = {
   id?: string
@@ -44,6 +56,8 @@ export type StartInput = {
   title?: string
   metadata?: Record<string, unknown>
   rejectRunning?: boolean
+  /** Start already backgrounded, so `block` returns immediately. */
+  background?: boolean
   beforeStart?: Effect.Effect<void, unknown>
   run: Effect.Effect<string, unknown>
 }
@@ -58,6 +72,8 @@ export type WaitResult = {
   timedOut: boolean
 }
 
+export type BlockResult = { type: "finished"; info: Info } | { type: "backgrounded"; info: Info }
+
 export interface Interface {
   readonly list: (input?: { includeOutput?: boolean }) => Effect.Effect<Info[]>
   readonly get: (id: string) => Effect.Effect<Info | undefined>
@@ -65,6 +81,15 @@ export interface Interface {
   /** Finishes a running job as an error while preserving any valid output. */
   readonly fail: (input: { id: string; error: string; output?: string }) => Effect.Effect<Info | undefined>
   readonly wait: (input: WaitInput) => Effect.Effect<WaitResult>
+  /**
+   * Waits for the job on behalf of `sessionID` until it finishes or is moved to the background.
+   * Returns undefined for an unknown job. Interrupting the caller only stops waiting.
+   */
+  readonly block: (input: { id: string; sessionID: string }) => Effect.Effect<BlockResult | undefined>
+  /** Moves a running job to the background, releasing its blockers. */
+  readonly background: (id: string) => Effect.Effect<Info | undefined>
+  /** Backgrounds every running job that `sessionID` is blocked on (Ctrl+B). */
+  readonly backgroundAll: (input: { sessionID: string; type?: string }) => Effect.Effect<Info[]>
   readonly cancel: (id: string) => Effect.Effect<Info | undefined>
 }
 
@@ -105,6 +130,7 @@ export const layer = Layer.effect(
           directory: yield* fs
             .makeTempDirectoryScoped({ prefix: "opencode-background-" })
             .pipe(Effect.catchCause(() => Effect.succeed(undefined))),
+          finished: new Map(),
         }
         // A fiber interrupted before entering its handler must still release existing waiters.
         yield* Effect.addFinalizer(() =>
@@ -169,7 +195,10 @@ export const layer = Layer.effect(
             return [{ info: snapshot({ info }) }, jobs] as const
           }
           if (!s.directory) {
-            return [{ info: snapshot({ info }), done: job.done }, new Map(jobs).set(id, { info })] as const
+            return [
+              { info: snapshot({ info }), done: job.done },
+              yield* retain(s, new Map(jobs).set(id, { info }), info),
+            ] as const
           }
           const receipt = path.join(s.directory, Identifier.ascending("job") + ".json")
           const summary = { ...info }
@@ -183,12 +212,31 @@ export const layer = Layer.effect(
               fs.remove(receipt + ".tmp", { force: true }).pipe(Effect.ignore, Effect.as({ info })),
             ),
           )
-          return [{ info: snapshot({ info }), done: job.done }, new Map(jobs).set(id, stored)] as const
+          return [
+            { info: snapshot({ info }), done: job.done },
+            yield* retain(s, new Map(jobs).set(id, stored), info),
+          ] as const
         }),
       )
       if (result.info && result.done) yield* Deferred.succeed(result.done, result.info).pipe(Effect.ignore)
       return result.info
     }, Effect.uninterruptible)
+
+    // Records a newly finished job and evicts the oldest finished ones of its type past the limit.
+    // Runs under the jobs lock; `jobs` is the fresh map about to be committed.
+    const retain = Effect.fnUntraced(function* (s: State, jobs: Map<string, Job>, info: Info) {
+      const ids = (s.finished.get(info.type) ?? []).filter((item) => item !== info.id)
+      ids.push(info.id)
+      s.finished.set(info.type, ids)
+      for (const old of ids.splice(0, Math.max(0, ids.length - FINISHED_LIMIT))) {
+        const job = jobs.get(old)
+        // An id can be reused by a newer run (task resume); never evict a running job.
+        if (!job || "done" in job) continue
+        jobs.delete(old)
+        if ("receipt" in job && job.receipt) yield* fs.remove(job.receipt, { force: true }).pipe(Effect.ignore)
+      }
+      return jobs
+    })
 
     const list: Interface["list"] = Effect.fn("BackgroundJob.list")(function* (input) {
       return yield* SynchronizedRef.modifyEffect(
@@ -228,8 +276,11 @@ export const layer = Layer.effect(
               status: "running",
               started_at,
               metadata: input.metadata,
+              ...(input.background ? { background: true } : {}),
             },
             done,
+            backgrounded: yield* Deferred.make<Info>(),
+            blockers: new Map(),
             ...(preparing ? { preparing } : {}),
           }
           const previous = yield* SynchronizedRef.modifyEffect<Map<string, Job>, Job | undefined, never, never>(
@@ -349,6 +400,80 @@ export const layer = Layer.effect(
       return { info: snapshot(job), timedOut: true }
     })
 
+    // `start` identifies its entry by object identity, so these update the current Active in place.
+    // Every update runs under the jobs lock.
+    const block: Interface["block"] = Effect.fn("BackgroundJob.block")(function* (input) {
+      const s = yield* InstanceState.get(state)
+      const entry = yield* SynchronizedRef.modifyEffect<
+        Map<string, Job>,
+        BlockResult | Active | undefined,
+        never,
+        never
+      >(
+        s.jobs,
+        Effect.fnUntraced(function* (jobs) {
+          const job = jobs.get(input.id)
+          if (!job) return [undefined, jobs] as const
+          if (!("done" in job)) return [{ type: "finished" as const, info: yield* read(job) }, jobs] as const
+          if (job.info.background) return [{ type: "backgrounded" as const, info: snapshot(job) }, jobs] as const
+          job.blockers.set(input.sessionID, (job.blockers.get(input.sessionID) ?? 0) + 1)
+          return [job, jobs] as const
+        }),
+      )
+      if (!entry || "type" in entry) return entry
+      return yield* Effect.raceFirst(
+        Deferred.await(entry.done).pipe(Effect.map((info): BlockResult => ({ type: "finished", info }))),
+        Deferred.await(entry.backgrounded).pipe(Effect.map((info): BlockResult => ({ type: "backgrounded", info }))),
+      ).pipe(
+        Effect.ensuring(
+          SynchronizedRef.update(s.jobs, (jobs) => {
+            const count = entry.blockers.get(input.sessionID) ?? 0
+            if (count <= 1) entry.blockers.delete(input.sessionID)
+            else entry.blockers.set(input.sessionID, count - 1)
+            return jobs
+          }),
+        ),
+      )
+    })
+
+    const moveToBackground = (job: Active) => {
+      job.info = { ...job.info, background: true }
+      job.blockers.clear()
+      return snapshot(job)
+    }
+
+    const background: Interface["background"] = Effect.fn("BackgroundJob.background")(function* (id) {
+      const s = yield* InstanceState.get(state)
+      const moved = yield* SynchronizedRef.modify(
+        s.jobs,
+        (jobs): readonly [{ info: Info; backgrounded?: Deferred.Deferred<Info> } | undefined, Map<string, Job>] => {
+          const job = jobs.get(id)
+          if (!job || !("done" in job)) return [undefined, jobs]
+          if (job.info.background) return [{ info: snapshot(job) }, jobs]
+          return [{ info: moveToBackground(job), backgrounded: job.backgrounded }, jobs]
+        },
+      )
+      if (moved?.backgrounded) yield* Deferred.succeed(moved.backgrounded, moved.info)
+      return moved?.info
+    })
+
+    const backgroundAll: Interface["backgroundAll"] = Effect.fn("BackgroundJob.backgroundAll")(function* (input) {
+      const s = yield* InstanceState.get(state)
+      const moved = yield* SynchronizedRef.modify(s.jobs, (jobs) => {
+        const selected = Array.from(jobs.values()).filter(
+          (job): job is Active =>
+            "done" in job &&
+            job.info.status === "running" &&
+            !job.info.background &&
+            (input.type === undefined || job.info.type === input.type) &&
+            job.blockers.has(input.sessionID),
+        )
+        return [selected.map((job) => ({ info: moveToBackground(job), backgrounded: job.backgrounded })), jobs] as const
+      })
+      yield* Effect.forEach(moved, (item) => Deferred.succeed(item.backgrounded, item.info), { discard: true })
+      return moved.map((item) => item.info)
+    })
+
     const cancel: Interface["cancel"] = Effect.fn("BackgroundJob.cancel")(function* (id) {
       const job = yield* lookup(id)
       if (!job) return
@@ -362,7 +487,7 @@ export const layer = Layer.effect(
       return yield* Deferred.await(job.done)
     })
 
-    return Service.of({ list, get, start, fail, wait, cancel })
+    return Service.of({ list, get, start, fail, wait, block, background, backgroundAll, cancel })
   }),
 )
 

@@ -126,7 +126,8 @@ export const Definitions = {
   agent_cycle_reverse: keybind("shift+tab", "Previous agent"),
   variant_cycle: keybind("ctrl+t", "Cycle model variants"),
   variant_list: keybind("none", "List model variants"),
-  subagent_background: keybind("ctrl+b", "Move in-flight subagent to background"),
+  session_background: keybind("ctrl+b", "Move running work to the background"),
+  shell_kill: keybind("ctrl+d", "Kill shell command"),
   subagent_steer: keybind("<leader>i", "Send a steering message to the open subagent"),
   subagent_stop: keybind("<leader>k", "Stop subagent or task"),
   tasks_list: keybind("none", "List tasks"),
@@ -242,16 +243,27 @@ export const Definitions = {
 } satisfies Record<string, Definition>
 
 type KeybindName = keyof typeof Definitions
-const KeybindNames = new Set<string>(Object.keys(Definitions))
+// Renamed keybinds stay valid in tui.json. A configured new name wins over its old name.
+const Renamed = {
+  subagent_background: "session_background",
+} as const satisfies Record<string, KeybindName>
+type RenamedName = keyof typeof Renamed
+const KeybindNames = new Set<string>([...Object.keys(Definitions), ...Object.keys(Renamed)])
 
-export const KeybindOverrides = Schema.Struct(
-  Object.fromEntries(
+export const KeybindOverrides = Schema.Struct({
+  ...Object.fromEntries(
     Object.entries(Definitions).map(([name, item]) => [
       name,
       Schema.optional(BindingValueSchema).annotate({ description: item.description }),
     ]),
   ),
-).annotate({ description: "TUI keybinding overrides" })
+  ...Object.fromEntries(
+    Object.entries(Renamed).map(([name, next]) => [
+      name,
+      Schema.optional(BindingValueSchema).annotate({ description: `Deprecated: use ${next}` }),
+    ]),
+  ),
+}).annotate({ description: "TUI keybinding overrides" })
 export const Descriptions = Object.fromEntries(
   Object.entries(Definitions).map(([name, item]) => [name, item.description]),
 ) as Record<KeybindName, string>
@@ -332,7 +344,8 @@ export const CommandMap = {
   agent_cycle_reverse: "agent.cycle.reverse",
   variant_cycle: "variant.cycle",
   variant_list: "variant.list",
-  subagent_background: "subagent.background",
+  session_background: "session.background",
+  shell_kill: "shell.kill",
   subagent_steer: "subagent.steer",
   subagent_stop: "subagent.stop",
   tasks_list: "tasks.list",
@@ -431,7 +444,7 @@ const CommandDescriptions = Object.fromEntries(
 ) as Record<string, string>
 
 export type Keybinds = { [K in KeybindName]: BindingValueSchema }
-export type KeybindOverrides = Partial<Keybinds>
+export type KeybindOverrides = Partial<Keybinds & Record<RenamedName, BindingValueSchema>>
 export type BindingLookupView = {
   readonly bindings: readonly Binding<Renderable, KeyEvent>[]
   get(command: string): readonly Binding<Renderable, KeyEvent>[]
@@ -454,10 +467,13 @@ export function defaultValue(name: KeybindName) {
 export function parse(keybinds: KeybindOverrides): Keybinds {
   const invalid = unknownKeys(keybinds)
   if (invalid.length) throw new Error(`Unrecognized keybind${invalid.length === 1 ? "" : "s"}: ${invalid.join(", ")}`)
+  const legacy = new Map<string, BindingValueSchema | undefined>(
+    Object.entries(Renamed).map(([name, next]) => [next, keybinds[name as RenamedName]]),
+  )
   return Object.fromEntries(
     Object.entries(Definitions).map(([name, item]) => [
       name,
-      decodeBindingValue(keybinds[name as KeybindName] ?? item.default),
+      decodeBindingValue(keybinds[name as KeybindName] ?? legacy.get(name) ?? item.default),
     ]),
   ) as Keybinds
 }

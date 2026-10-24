@@ -5,13 +5,18 @@ import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Config } from "../src/config/config"
 import { Agent } from "../src/agent/agent"
+import { BackgroundJob } from "../src/background/job"
+import { Bus } from "../src/bus"
 import { RuntimeFlags } from "../src/effect/runtime-flags"
 import { Plugin } from "../src/plugin"
 import { Ripgrep } from "../src/file/ripgrep"
 import { Snapshot } from "../src/snapshot"
+import { ShellProcess } from "../src/shell/process"
 import { ShellTool } from "../src/tool/shell"
 import { Truncate } from "../src/tool/truncate"
 import { MessageID, SessionID } from "../src/session/schema"
+import { Session } from "../src/session/session"
+import { SessionStatus } from "../src/session/status"
 import { TestInstance } from "../test/fixture/fixture"
 import { testEffect } from "../test/lib/effect"
 
@@ -28,6 +33,11 @@ const it = testEffect(
     RuntimeFlags.defaultLayer,
     Plugin.defaultLayer,
     Truncate.defaultLayer,
+    ShellProcess.defaultLayer,
+    BackgroundJob.defaultLayer,
+    Session.defaultLayer,
+    SessionStatus.defaultLayer,
+    Bus.layer,
   ),
 )
 

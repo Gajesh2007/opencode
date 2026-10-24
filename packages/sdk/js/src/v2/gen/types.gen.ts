@@ -34,6 +34,8 @@ export type Event =
   | EventCommandExecuted
   | EventProjectUpdated
   | EventSessionCompacted
+  | EventShellUpdated
+  | EventShellDeleted
   | EventVcsBranchUpdated
   | EventWorkspaceReady
   | EventWorkspaceFailed
@@ -434,6 +436,27 @@ export type Project = {
     initialized?: number
   }
   sandboxes: Array<string>
+}
+
+export type ShellProcess = {
+  id: string
+  sessionID?: string
+  callID?: string
+  source: "tool" | "user"
+  command: string
+  description?: string
+  cwd: string
+  shell: string
+  file: string
+  pid?: number
+  status: "running" | "exited" | "timeout" | "killed"
+  exit?: number
+  signal?: string
+  background: boolean
+  time: {
+    started: number
+    completed?: number
+  }
 }
 
 export type Pty = {
@@ -903,6 +926,8 @@ export type GlobalEvent = {
     | EventCommandExecuted
     | EventProjectUpdated
     | EventSessionCompacted
+    | EventShellUpdated
+    | EventShellDeleted
     | EventVcsBranchUpdated
     | EventWorkspaceReady
     | EventWorkspaceFailed
@@ -1184,7 +1209,20 @@ export type ProviderConfig = {
      */
     timeout?: number | false
     chunkTimeout?: number
-    [key: string]: unknown | string | boolean | number | false | number | undefined
+    thinkingDisplay?: "summarized" | "omitted"
+    promptCacheTtl?: "5m" | "1h"
+    [key: string]:
+      | unknown
+      | string
+      | boolean
+      | number
+      | false
+      | number
+      | "summarized"
+      | "omitted"
+      | "5m"
+      | "1h"
+      | undefined
   }
   models?: {
     [key: string]: {
@@ -1965,6 +2003,12 @@ export type NotFoundError = {
   }
 }
 
+export type SessionBackgroundItem = {
+  id: string
+  type: string
+  title?: string
+}
+
 export type TextPartInput = {
   id?: string
   type: "text"
@@ -2017,6 +2061,18 @@ export type SessionBusyError = {
   _tag: "SessionBusyError"
   sessionID: string
   message: string
+}
+
+export type ShellNotFoundError = {
+  _tag: "ShellNotFoundError"
+  shellID: string
+  message: string
+}
+
+export type ShellProcessOutput = {
+  output: string
+  cursor: number
+  size: number
 }
 
 export type V2SessionsResponse = {
@@ -2925,6 +2981,23 @@ export type EventSessionCompacted = {
   type: "session.compacted"
   properties: {
     sessionID: string
+  }
+}
+
+export type EventShellUpdated = {
+  id: string
+  type: "shell.updated"
+  properties: {
+    info: ShellProcess
+  }
+}
+
+export type EventShellDeleted = {
+  id: string
+  type: "shell.deleted"
+  properties: {
+    id: string
+    sessionID?: string
   }
 }
 
@@ -7087,6 +7160,40 @@ export type SessionAbortResponses = {
 
 export type SessionAbortResponse = SessionAbortResponses[keyof SessionAbortResponses]
 
+export type SessionBackgroundData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/background"
+}
+
+export type SessionBackgroundErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionBackgroundError = SessionBackgroundErrors[keyof SessionBackgroundErrors]
+
+export type SessionBackgroundResponses = {
+  /**
+   * Work moved to the background
+   */
+  200: Array<SessionBackgroundItem>
+}
+
+export type SessionBackgroundResponse = SessionBackgroundResponses[keyof SessionBackgroundResponses]
+
 export type SessionInitData = {
   body?: {
     modelID: string
@@ -7583,6 +7690,139 @@ export type PartUpdateResponses = {
 }
 
 export type PartUpdateResponse = PartUpdateResponses[keyof PartUpdateResponses]
+
+export type ShellListData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+    sessionID?: string
+  }
+  url: "/shell"
+}
+
+export type ShellListErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type ShellListError = ShellListErrors[keyof ShellListErrors]
+
+export type ShellListResponses = {
+  /**
+   * Running and recently exited shell commands
+   */
+  200: Array<ShellProcess>
+}
+
+export type ShellListResponse = ShellListResponses[keyof ShellListResponses]
+
+export type ShellGetData = {
+  body?: never
+  path: {
+    shellID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/shell/{shellID}"
+}
+
+export type ShellGetErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * ShellNotFoundError
+   */
+  404: ShellNotFoundError
+}
+
+export type ShellGetError = ShellGetErrors[keyof ShellGetErrors]
+
+export type ShellGetResponses = {
+  /**
+   * Shell command
+   */
+  200: ShellProcess
+}
+
+export type ShellGetResponse = ShellGetResponses[keyof ShellGetResponses]
+
+export type ShellOutputData = {
+  body?: never
+  path: {
+    shellID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+    cursor?: string
+    limit?: string
+  }
+  url: "/shell/{shellID}/output"
+}
+
+export type ShellOutputErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * ShellNotFoundError
+   */
+  404: ShellNotFoundError
+}
+
+export type ShellOutputError = ShellOutputErrors[keyof ShellOutputErrors]
+
+export type ShellOutputResponses = {
+  /**
+   * Captured output page
+   */
+  200: ShellProcessOutput
+}
+
+export type ShellOutputResponse = ShellOutputResponses[keyof ShellOutputResponses]
+
+export type ShellKillData = {
+  body?: never
+  path: {
+    shellID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/shell/{shellID}/kill"
+}
+
+export type ShellKillErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * ShellNotFoundError
+   */
+  404: ShellNotFoundError
+}
+
+export type ShellKillError = ShellKillErrors[keyof ShellKillErrors]
+
+export type ShellKillResponses = {
+  /**
+   * Shell command after it was killed
+   */
+  200: ShellProcess
+}
+
+export type ShellKillResponse = ShellKillResponses[keyof ShellKillResponses]
 
 export type SyncStartData = {
   body?: never

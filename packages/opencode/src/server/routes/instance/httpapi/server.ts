@@ -12,6 +12,7 @@ import * as Socket from "effect/unstable/socket/Socket"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { Account } from "@/account/account"
 import { Agent } from "@/agent/agent"
+import { BackgroundJob } from "@/background/job"
 import { Auth } from "@/auth"
 import { Bus } from "@/bus"
 import { Config } from "@/config/config"
@@ -48,6 +49,7 @@ import { Goal } from "@/session/goal"
 import { Steering } from "@/session/steering"
 import { SessionShare } from "@/share/session"
 import { ShareNext } from "@/share/share-next"
+import { ShellProcess } from "@/shell/process"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Skill } from "@/skill"
 import { Snapshot } from "@/snapshot"
@@ -79,6 +81,7 @@ import { ptyConnectRoute, ptyHandlers } from "./handlers/pty"
 import { questionHandlers } from "./handlers/question"
 import { serverHandlers, pairingConnectHandlers } from "./handlers/server"
 import { sessionHandlers } from "./handlers/session"
+import { shellHandlers } from "./handlers/shell"
 import { syncHandlers } from "./handlers/sync"
 import { tuiHandlers } from "./handlers/tui"
 import { v2Handlers } from "./handlers/v2"
@@ -139,6 +142,7 @@ const instanceApiRoutes = HttpApiBuilder.layer(InstanceHttpApi).pipe(
     permissionHandlers,
     providerHandlers,
     sessionHandlers,
+    shellHandlers,
     syncHandlers,
     v2Handlers,
     tuiHandlers,
@@ -207,6 +211,7 @@ export function createRoutes(
       Account.defaultLayer,
       Agent.defaultLayer,
       Auth.defaultLayer,
+      BackgroundJob.defaultLayer,
       Command.defaultLayer,
       Config.defaultLayer,
       File.defaultLayer,
@@ -236,6 +241,7 @@ export function createRoutes(
       SessionStatus.defaultLayer,
       SessionSummary.defaultLayer,
       ShareNext.defaultLayer,
+      ShellProcess.defaultLayer,
       Snapshot.defaultLayer,
       SyncEvent.defaultLayer,
       EventV2Bridge.defaultLayer,
