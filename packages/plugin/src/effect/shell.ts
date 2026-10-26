@@ -1,6 +1,7 @@
 import type { Hooks } from "./registration.js"
 
 export interface ShellCreateBefore {
+  readonly sessionID?: string
   command: string
   cwd: string
   timeout: number

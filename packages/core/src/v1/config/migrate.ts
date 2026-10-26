@@ -39,7 +39,7 @@ export function migrateAgent(info: ConfigAgentV1.Info) {
   }
   return decodeAgent(
     JSON.stringify({
-      model: modelSelection(info.model, info.variant),
+      model: modelSelection(info.model, info.variant ?? info.effort),
       request: Object.keys(body).length ? { body } : undefined,
       system: info.prompt,
       description: info.description,
@@ -49,6 +49,11 @@ export function migrateAgent(info: ConfigAgentV1.Info) {
       steps: info.steps,
       disabled: info.disable,
       permissions: permissions(info.permission),
+      memory: info.memory,
+      mcpServers: info.mcpServers,
+      skills: info.skills,
+      initialPrompt: info.initialPrompt,
+      workflow: info.workflow,
     }),
   )
 }
@@ -242,9 +247,8 @@ function migrateModel(info: typeof ConfigProviderV1.Model.Type, npm: string | un
     capabilities,
     headers: info.headers,
     body: migrated?.body,
-    variants:
-      info.variants &&
-      Object.entries(info.variants).map(([id, options]) => ({ id, ...split(options) })),
+    variants: info.variants && Object.entries(info.variants).map(([id, options]) => ({ id, ...split(options) })),
+    serviceTiers: info.serviceTiers,
     cost: costs,
     disabled: info.status === "deprecated" ? true : undefined,
     limit: info.limit && {

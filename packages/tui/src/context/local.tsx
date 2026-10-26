@@ -139,7 +139,12 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
     const agent = createAgent()
 
     function createModel() {
-      type ModelSelection = ModelPreferenceModel & { variant?: string }
+      type ModelSelection = ModelPreferenceModel & {
+        variant?: string
+        serviceTier?: string
+        upstream?: string
+        reasoningMode?: "standard" | "pro"
+      }
       const [preferences, setPreferences] = createStore<ModelPreference & { ready: boolean }>({
         ready: false,
         recent: [],
@@ -157,13 +162,16 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       const repository = createModelPreferenceRepository(path.join(paths.state, "model.json"))
       const pendingSelectionCommits = new Map<string, { agentID: string; selection: string }>()
       const selectionKey = (value: ModelSelection) =>
-        `${modelPreferenceKey(value)}:${normalizeModelVariant(value.variant) ?? "default"}`
+        `${modelPreferenceKey(value)}:${normalizeModelVariant(value.variant) ?? "default"}:${value.serviceTier ?? "default"}:${value.upstream ?? "default"}:${value.reasoningMode ?? "standard"}`
 
       function applyPreferences(value: ModelPreference) {
         batch(() => {
           setPreferences("recent", value.recent)
           setPreferences("favorite", value.favorite)
           setPreferences("variant", value.variant)
+          setPreferences("serviceTier", value.serviceTier ?? {})
+          setPreferences("upstream", value.upstream ?? {})
+          setPreferences("reasoningMode", value.reasoningMode ?? {})
           setPreferences("ready", true)
         })
       }
@@ -178,7 +186,14 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         if (!configured) return
         return typeof configured === "string"
           ? { ...parse(configured), variant: undefined }
-          : { providerID: configured.providerID, modelID: configured.model, variant: configured.variant }
+          : {
+              providerID: configured.providerID,
+              modelID: configured.model,
+              variant: configured.variant,
+              serviceTier: configured.serviceTier,
+              upstream: configured.upstream,
+              reasoningMode: configured.reasoningMode,
+            }
       })
 
       const fallbackModel = createMemo(() => {
@@ -250,7 +265,35 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
               : undefined),
         )
         const info = models()?.find((item) => item.providerID === model.providerID && item.id === model.modelID)
-        return { ...model, variant: info?.variants.some((item) => item.id === variant) ? variant : undefined }
+        const mode =
+          preferences.reasoningMode?.[modelPreferenceKey(model)] ??
+          (configured?.id === model.modelID && configured.providerID === model.providerID
+            ? configured.reasoningMode
+            : undefined) ??
+          (fallback?.modelID === model.modelID && fallback.providerID === model.providerID
+            ? fallback.reasoningMode
+            : undefined)
+        return {
+          ...model,
+          reasoningMode: mode === "pro" || mode === "standard" ? mode : undefined,
+          variant: info?.variants.some((item) => item.id === variant) ? variant : undefined,
+          serviceTier:
+            preferences.serviceTier?.[modelPreferenceKey(model)] ??
+            (configured?.id === model.modelID && configured.providerID === model.providerID
+              ? configured.serviceTier
+              : undefined) ??
+            (fallback?.modelID === model.modelID && fallback.providerID === model.providerID
+              ? fallback.serviceTier
+              : undefined),
+          upstream:
+            preferences.upstream?.[modelPreferenceKey(model)] ??
+            (configured?.id === model.modelID && configured.providerID === model.providerID
+              ? configured.upstream
+              : undefined) ??
+            (fallback?.modelID === model.modelID && fallback.providerID === model.providerID
+              ? fallback.upstream
+              : undefined),
+        }
       }
 
       function durableSelection(sessionID: string): ModelSelection | undefined {
@@ -260,6 +303,9 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           providerID: model.providerID,
           modelID: model.id,
           variant: normalizeModelVariant(model.variant),
+          serviceTier: model.serviceTier,
+          upstream: model.upstream,
+          reasoningMode: model.reasoningMode,
         }
       }
 
@@ -351,7 +397,30 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         }),
       )
 
+      const selectionOption = (key: "serviceTier" | "upstream") => ({
+        current: () => currentSelection()?.[key],
+        set(value: string | undefined) {
+          const model = currentSelection()
+          if (!model) return
+          if (route.data.type === "session")
+            setSessionDraft(route.data.sessionID, { ...model, [key]: value ?? "default" })
+          setPreferences({ [key]: { ...preferences[key], [modelPreferenceKey(model)]: value ?? "default" } })
+          void repository.saveSelection(key, model, value).catch(() => undefined)
+        },
+      })
       return {
+        serviceTier: selectionOption("serviceTier"),
+        upstream: selectionOption("upstream"),
+        reasoningMode: {
+          current: () => currentSelection()?.reasoningMode ?? "standard",
+          set(value: "standard" | "pro") {
+            const model = currentSelection()
+            if (!model) return
+            if (route.data.type === "session") setSessionDraft(route.data.sessionID, { ...model, reasoningMode: value })
+            setPreferences("reasoningMode", modelPreferenceKey(model), value)
+            void repository.saveSelection("reasoningMode", model, value).catch(() => undefined)
+          },
+        },
         current: currentModel,
         selection: currentSelection,
         remember() {
@@ -369,12 +438,22 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
             providerID: string
             id: string
             variant?: string
+            serviceTier?: string
+            upstream?: string
+            reasoningMode?: "standard" | "pro"
           },
           agentID: string,
         ) {
           const committed = {
             agentID,
-            selection: selectionKey({ providerID: value.providerID, modelID: value.id, variant: value.variant }),
+            selection: selectionKey({
+              providerID: value.providerID,
+              modelID: value.id,
+              variant: value.variant,
+              serviceTier: value.serviceTier,
+              upstream: value.upstream,
+              reasoningMode: value.reasoningMode,
+            }),
           }
           pendingSelectionCommits.set(sessionID, committed)
           // An unchanged model emits no event; the agent may be the only durable change.

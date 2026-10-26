@@ -108,6 +108,7 @@ class Model extends Schema.Class<Model>("Config.Model")({
     id: VariantID,
     ...ModelOverlays,
   }).pipe(Schema.Array, optional),
+  serviceTiers: Schema.Record(Schema.String, JsonRecord).pipe(optional),
   cost: Schema.Union([Cost, Cost.pipe(Schema.Array)]).pipe(optional),
   disabled: Schema.Boolean.pipe(optional),
   limit: Limit.pipe(optional),

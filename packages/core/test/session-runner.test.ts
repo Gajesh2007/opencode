@@ -130,6 +130,14 @@ const fittedOutputModel = testModel("fitted-output", { context: 100_000, output:
 const smallWindowModel = testModel("small-window", { context: 64_000, output: 16_000 })
 const largeOutputModel = testModel("large-output", { context: 1_000_000, output: 1_000_000 })
 
+test("uses valid gateway billed cost and falls back for malformed amounts", () => {
+  const tokens = { input: 10, output: 2, reasoning: 0, cache: { read: 0, write: 0 } }
+  expect(SessionUsage.calculateCost([], tokens, { cost: "0.001" })).toBe(Money.USD.make(0.001))
+  expect(SessionUsage.calculateCost([], tokens, { cost: 0 })).toBe(Money.USD.zero)
+  for (const cost of [-1, Infinity, "bad", ""])
+    expect(SessionUsage.calculateCost([], tokens, { cost })).toBe(Money.USD.zero)
+})
+
 test("calculates step cost using the matching context tier", () => {
   expect(
     SessionUsage.calculateCost(

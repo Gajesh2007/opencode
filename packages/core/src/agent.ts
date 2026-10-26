@@ -13,6 +13,7 @@ export type Name = Agent.Name
 export const defaultID = ID.make("build")
 
 export const Color = Agent.Color
+export const Memory = Agent.Memory
 
 export const Info = Agent.Info
 export type Info = Agent.Info

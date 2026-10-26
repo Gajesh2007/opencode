@@ -1,6 +1,6 @@
 export * as SubagentJob from "./subagent-job.js"
 
-import { Context, Effect, Layer, Scope } from "effect"
+import { Context, Effect, Layer, Scope, Semaphore } from "effect"
 import { Node } from "@opencode/util/effect/app-node"
 import type { LayerNode } from "@opencode/util/effect/layer-node"
 import { Job } from "../job.js"
@@ -10,7 +10,7 @@ import { SubagentCompletion } from "./subagent-completion.js"
 type Recovery = Extract<Job.Recovery, { kind: "subagent" }>
 
 export interface Interface {
-  start: (recovery: Recovery) => Effect.Effect<Job.Info>
+  start: (recovery: Recovery, limiter?: Semaphore.Semaphore) => Effect.Effect<Job.Info>
   background: (recovery: Recovery) => Effect.Effect<void>
   notify: (recovery: Recovery, startedAt: number) => Effect.Effect<void>
 }
@@ -33,7 +33,16 @@ const make: Effect.Effect<Interface, never, Session.Service | Job.Service | Scop
     notifications.add(key)
     yield* Effect.gen(function* () {
       const info = (yield* jobs.wait({ id: recovery.childSessionID })).info
-      if (info) yield* SubagentCompletion.deliver(sessions, jobs, { ...info, recovery })
+      if (info) {
+        const parent = yield* sessions.get(recovery.parentSessionID).pipe(Effect.orElseSucceed(() => undefined))
+        if (!parent) return
+        const active = yield* sessions.active
+        yield* SubagentCompletion.deliver(sessions, jobs, {
+          ...info,
+          recovery,
+          resume: parent.outcome === "interrupted" && !active.has(parent.id) ? false : undefined,
+        })
+      }
     }).pipe(
       Effect.ensuring(Effect.sync(() => notifications.delete(key))),
       Effect.forkIn(scope, { startImmediately: true }),
@@ -42,7 +51,7 @@ const make: Effect.Effect<Interface, never, Session.Service | Job.Service | Scop
   })
 
   return Service.of({
-    start: (recovery: Recovery) =>
+    start: (recovery: Recovery, limiter) =>
       jobs
         .start({
           id: recovery.childSessionID,
@@ -52,13 +61,26 @@ const make: Effect.Effect<Interface, never, Session.Service | Job.Service | Scop
           recovery,
           run: Effect.gen(function* () {
             yield* sessions.resume(recovery.childSessionID)
-            const messages = yield* sessions.messages({ sessionID: recovery.childSessionID, order: "desc", limit: 20 })
-            const assistant = messages.find(
+            let messages = yield* sessions.messages({ sessionID: recovery.childSessionID, order: "desc", limit: 20 })
+            let assistant = messages.find(
               (message) =>
                 message.type === "assistant" && message.time.completed !== undefined && message.error === undefined,
             )
+            if (assistant && SubagentCompletion.text(assistant) === SubagentCompletion.NO_TEXT) {
+              yield* sessions.synthetic({
+                sessionID: recovery.childSessionID,
+                resume: false,
+                text: "Provide your final written response for the parent agent, including findings and remaining limitations. Do not repeat completed tool work.",
+              })
+              yield* sessions.resume(recovery.childSessionID)
+              messages = yield* sessions.messages({ sessionID: recovery.childSessionID, order: "desc", limit: 20 })
+              assistant = messages.find(
+                (message) =>
+                  message.type === "assistant" && message.time.completed !== undefined && message.error === undefined,
+              )
+            }
             return SubagentCompletion.text(assistant)
-          }),
+          }).pipe((effect) => (limiter ? limiter.withPermit(effect) : effect)),
         })
         .pipe(Effect.setContext(context)),
     background: Effect.fn("SubagentJob.background")(function* (recovery: Recovery) {

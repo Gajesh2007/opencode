@@ -50,6 +50,7 @@ export const Options = Schema.Struct({
   streamOptions: lenient(StreamOptions),
   topLogprobs: lenient(Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 20 }))),
   reasoningEffort: lenient(ReasoningEffort),
+  reasoningMode: lenient(Schema.String),
   reasoningSummary: lenient(Schema.Literals(["auto", "concise", "detailed"])),
   include: lenient(Schema.Array(ResponseIncludableSchema)),
   textVerbosity: lenient(TextVerbositySchema),

@@ -94,7 +94,7 @@ const logEvents = (session: Session.Interface, sessionID: Session.ID, follow?: b
 const assertCreateInputTypes = (session: Session.Interface) => {
   // @ts-expect-error location or parentID is required.
   session.create({})
-  // @ts-expect-error child sessions inherit their parent's location.
+  // A child normally inherits placement; an explicit worktree location is allowed.
   session.create({ parentID: Session.ID.create(), location })
 }
 void assertCreateInputTypes
@@ -104,6 +104,39 @@ function withTmp<A, E, R>(f: (directory: string) => Effect.Effect<A, E, R>) {
 }
 
 describe("Session.create", () => {
+  it.effect("keeps child ownership while using an explicit worktree location", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const parent = yield* sessions.create({ location })
+      const child = yield* sessions.create({
+        parentID: parent.id,
+        location: { directory: AbsolutePath.make("/worktree") },
+      })
+      expect(child.parentID).toBe(parent.id)
+      expect(child.location.directory).toBe(AbsolutePath.make("/worktree"))
+      expect((yield* sessions.get(parent.id)).location).toEqual(location)
+    }),
+  )
+
+  it.effect("forks the latest user turns into an owned child", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const bus = yield* Bus.Service
+      const database = yield* Database.Service
+      const parent = yield* sessions.create({ location })
+      for (const text of ["first turn", "second turn", "third turn"]) {
+        yield* sessions.prompt({ sessionID: parent.id, text, resume: false })
+        yield* SessionInbox.promote(database.db, bus, parent.id, "steer")
+      }
+      const child = yield* sessions.fork({ sessionID: parent.id, asChild: true, lastTurns: 2 })
+      expect(child.parentID).toBe(parent.id)
+      expect(
+        (yield* sessions.context(child.id)).filter((message) => message.type === "user").map((message) => message.text),
+      ).toEqual(["second turn", "third turn"])
+      expect((yield* sessions.context(parent.id)).filter((message) => message.type === "user")).toHaveLength(3)
+    }),
+  )
+
   liveIt.live("preserves the project canonical directory when creating a session in another clone", () =>
     withTmp((directory) =>
       Effect.gen(function* () {
@@ -804,9 +837,10 @@ describe("Session.create", () => {
       const session = yield* Session.Service
       const parent = yield* session.create({ location })
 
-      expect(
-        yield* session.fork({ sessionID: parent.id }).pipe(Effect.flip),
-      ).toMatchObject({ _tag: "Session.ForkEmptyError", sessionID: parent.id })
+      expect(yield* session.fork({ sessionID: parent.id }).pipe(Effect.flip)).toMatchObject({
+        _tag: "Session.ForkEmptyError",
+        sessionID: parent.id,
+      })
     }),
   )
 
@@ -921,7 +955,12 @@ describe("Session.create", () => {
       const input = { id, location }
       const created = yield* session.create(input)
 
-      yield* db.update(SessionTable).set({ agent: Agent.defaultID }).where(eq(SessionTable.id, id)).run().pipe(Effect.orDie)
+      yield* db
+        .update(SessionTable)
+        .set({ agent: Agent.defaultID })
+        .where(eq(SessionTable.id, id))
+        .run()
+        .pipe(Effect.orDie)
 
       expect(yield* session.create(input)).toMatchObject({ id: created.id, agent: "build" })
     }),
@@ -1191,6 +1230,31 @@ describe("Session.create", () => {
         yield* db.select().from(EventTable).where(eq(EventTable.aggregate_id, created.id)).all().pipe(Effect.orDie),
       ).toHaveLength(2)
       expect(yield* session.get(created.id)).toMatchObject({ model })
+    }),
+  )
+
+  it.effect("persists tier and upstream changes without changing the model", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const model = Model.Ref.make({
+        providerID: Provider.ID.make("test"),
+        id: Model.ID.make("model"),
+        variant: Model.VariantID.make("max"),
+      })
+      const session = yield* sessions.create({ location, model })
+      yield* sessions.switchModel({ sessionID: session.id, model: { ...model, serviceTier: "priority" } })
+      expect((yield* sessions.get(session.id)).model).toMatchObject({ ...model, serviceTier: "priority" })
+      yield* sessions.switchModel({
+        sessionID: session.id,
+        model: { ...model, serviceTier: "priority", upstream: "openai" },
+      })
+      expect((yield* sessions.get(session.id)).model).toMatchObject({
+        ...model,
+        serviceTier: "priority",
+        upstream: "openai",
+      })
+      yield* sessions.switchModel({ sessionID: session.id, model })
+      expect((yield* sessions.get(session.id)).model?.upstream).toBeUndefined()
     }),
   )
 

@@ -60,6 +60,7 @@ export const Model = Schema.Struct({
     Schema.Struct({ npm: Schema.optional(Schema.String), api: Schema.optional(Schema.String) }),
   ),
   options: Schema.optional(Schema.Record(Schema.String, Schema.Any)),
+  serviceTiers: Schema.optional(Schema.Record(Schema.String, Schema.Record(Schema.String, Schema.Any))),
   headers: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   variants: Schema.optional(
     Schema.Record(

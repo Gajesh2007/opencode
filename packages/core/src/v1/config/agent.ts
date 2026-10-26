@@ -3,6 +3,7 @@ export * as ConfigAgentV1 from "./agent.js"
 import { Schema, SchemaGetter } from "effect"
 import { PositiveInt } from "../../schema.js"
 import { ConfigPermissionV1 } from "./permission.js"
+import { Workflow } from "@opencode/schema/workflow"
 
 const Color = Schema.Union([
   Schema.String.check(Schema.isPattern(/^#[0-9a-fA-F]{6}$/)),
@@ -15,6 +16,8 @@ const AgentSchema = Schema.StructWithRest(
     variant: Schema.optional(Schema.String).annotate({
       description: "Default model variant for this agent (applies only when using the agent's configured model).",
     }),
+    effort: Schema.optional(Schema.Literals(["low", "medium", "high", "xhigh", "max", "ultra"])),
+    workflow: Schema.optional(Workflow.Definition),
     temperature: Schema.optional(Schema.Finite),
     top_p: Schema.optional(Schema.Finite),
     prompt: Schema.optional(Schema.String),
@@ -36,6 +39,10 @@ const AgentSchema = Schema.StructWithRest(
     }),
     maxSteps: Schema.optional(PositiveInt).annotate({ description: "@deprecated Use 'steps' field instead." }),
     permission: Schema.optional(ConfigPermissionV1.Info),
+    memory: Schema.optional(Schema.Literals(["user", "project", "local"])),
+    mcpServers: Schema.optional(Schema.Array(Schema.String)),
+    skills: Schema.optional(Schema.Array(Schema.String)),
+    initialPrompt: Schema.optional(Schema.String),
   }),
   [Schema.Record(Schema.String, Schema.Any)],
 )

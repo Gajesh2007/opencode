@@ -149,6 +149,7 @@ export const layer = Layer.effect(
       isActive: coordinator.isActive,
       interrupt: (sessionID, options) =>
         Effect.gen(function* () {
+          if (options?.resume) yield* jobs.backgroundAll({ sessionID, type: "subagent" })
           const interrupted = yield* coordinator.interrupt(sessionID, "user")
           if (!options?.resume) return interrupted
           // Resume steering input and between-turn control work from the interrupted

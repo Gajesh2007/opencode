@@ -481,6 +481,9 @@ export function transformSession(input: TransformInput): TransformResult {
               id: latestUser.value.model.modelID,
               providerID: latestUser.value.model.providerID,
               variant: latestUser.value.model.variant ?? "default",
+              serviceTier: latestUser.value.model.serviceTier,
+              upstream: latestUser.value.model.upstream,
+              reasoningMode: latestUser.value.model.reasoningMode,
             }
           : null),
       cost: assistants.reduce((total, item) => total + item.cost, 0),

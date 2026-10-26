@@ -151,7 +151,7 @@ const projectFork = Effect.fn("SessionProjector.projectFork")(function* (
     .insert(SessionTable)
     .values({
       id: event.data.sessionID,
-      parent_id: null,
+      parent_id: event.data.asChild ? event.data.parentID : null,
       fork_session_id: event.data.parentID,
       fork_boundary: event.data.boundary,
       project_id: parent.project_id,
@@ -184,7 +184,24 @@ const projectFork = Effect.fn("SessionProjector.projectFork")(function* (
     yield* InstructionEntry.initialize(db, event.data.sessionID, event.data.instructionEntries, event.created)
 
   const forkedID = (seq: number) => SessionMessage.ID.make(`${SessionMessage.ID.fromEvent(event.id)}_${seq}`)
-  let cursor = -1
+  const recent =
+    event.data.lastTurns && copiedSeq !== undefined
+      ? yield* db
+          .select({ seq: SessionMessageTable.seq })
+          .from(SessionMessageTable)
+          .where(
+            and(
+              eq(SessionMessageTable.session_id, event.data.parentID),
+              eq(SessionMessageTable.type, "user"),
+              lte(SessionMessageTable.seq, copiedSeq),
+            ),
+          )
+          .orderBy(desc(SessionMessageTable.seq))
+          .limit(event.data.lastTurns)
+          .all()
+          .pipe(Effect.orDie)
+      : []
+  let cursor = (recent.at(-1)?.seq ?? 0) - 1
   while (copiedSeq !== undefined) {
     const rows = yield* db
       .select()
@@ -250,12 +267,7 @@ function run(db: DatabaseService, event: MessageEvent) {
       return db
         .update(SessionMessageTable)
         .set({ type, time_created: DateTime.toEpochMillis(message.time.created), data })
-        .where(
-          and(
-            eq(SessionMessageTable.id, message.id),
-            eq(SessionMessageTable.session_id, event.data.sessionID),
-          ),
-        )
+        .where(and(eq(SessionMessageTable.id, message.id), eq(SessionMessageTable.session_id, event.data.sessionID)))
         .run()
         .pipe(Effect.orDie)
     }

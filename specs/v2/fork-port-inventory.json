@@ -1,0 +1,2905 @@
+{
+  "upstream_version": "2.1.4",
+  "upstream_sha": "74f8d4860f49c563909e6b039b0cc8b454ebce72",
+  "fork_sha": "48aee9586f153c47579b96f5cec196dfa4b6841a",
+  "shared_ancestor": "47f333299bb193f28dfdd94ccc43e55c529198ee",
+  "fork_commits": [
+    {
+      "sha": "48aee9586f153c47579b96f5cec196dfa4b6841a",
+      "subject": "feat(opencode): remote control, Esc keeps subagents running, background follow-ups"
+    },
+    {
+      "sha": "489e4aa7c581f35f228177599f21826713e1d0cb",
+      "subject": "feat(opencode): background tasks, background shells, and Ctrl+B"
+    },
+    {
+      "sha": "5b7c8ce86b9404f34a58caf78c81b0feab6c8fc1",
+      "subject": "feat(opencode): add session timing, eager tool execution, and request warming"
+    },
+    {
+      "sha": "c4c65ea686479a8dd7544a302ec03c7d4a1fc9e3",
+      "subject": "fix(core): keep active-goal reminder byte-stable so prefix caches hit"
+    },
+    {
+      "sha": "8d4c833ec7eaaab9e3f236807d20846c800e3b03",
+      "subject": "feat(opencode): improve Bedrock support and agent orchestration"
+    },
+    {
+      "sha": "d65d08ca6130ca451eee108b27f9e5a9193a07d6",
+      "subject": "feat(opencode): expand agent concurrency and GPT-6 support"
+    },
+    {
+      "sha": "da4d1260e4783851d1ca4389379263c2f2f94130",
+      "subject": "fix(opencode): release retained transcripts and job payloads"
+    },
+    {
+      "sha": "8186186de1456080cf597068f32785e45c2628e0",
+      "subject": "fix(opencode): reduce harness memory and execution overhead"
+    },
+    {
+      "sha": "936225258ad4a9c9055d8b42213f02a82cf4ade3",
+      "subject": "docs(opencode): clarify child agent context guidance"
+    },
+    {
+      "sha": "0d5b30a3e687e5d35aa6d08d431ec32b16528cbe",
+      "subject": "feat(opencode): split OpenAI API and Codex providers"
+    },
+    {
+      "sha": "d6cb29ab58049396766205313da8aaacc9ed91d1",
+      "subject": "feat(opencode): add Pro reasoning and improve collaboration"
+    },
+    {
+      "sha": "60497ce51daa915eeac265542254c704c80dcd5e",
+      "subject": "feat(opencode): merge GPT-5.6 Ultra collaboration"
+    },
+    {
+      "sha": "36e9f8474c4e1b0a8aad633dbb0f8ac23ac509ee",
+      "subject": "feat(core): add GPT-5.6 model support"
+    },
+    {
+      "sha": "6b1c7fa8ab8ca85431b6de85e944d375d600b791",
+      "subject": "feat(opencode): add ultra collaboration and chat controls"
+    },
+    {
+      "sha": "15e6ba331a4340e64ccab02713e371fe92f9744f",
+      "subject": "fix(test): repair the pre-existing session test failures (cancel cascade + stale LLM cassettes)"
+    },
+    {
+      "sha": "afeca77a14c355753b07407d99f44705dff5d88a",
+      "subject": "feat(core): metacognition layer \u2014 configurable meta agent + per-step reasoning reviewer"
+    },
+    {
+      "sha": "3969e907c07e21624ae31d430f7c4d0fd121ceaa",
+      "subject": "refactor(core): event-driven goal mode via a GoalDriver on session.idle"
+    },
+    {
+      "sha": "1f119c29ff0123c22ddc5d8abdd23e9b68308ca9",
+      "subject": "feat(core): retry hollow/empty provider completions"
+    },
+    {
+      "sha": "935e00289d42236c5d7e74663ead5f602a742749",
+      "subject": "feat(remote): add tunnel app client and web UI renderer"
+    },
+    {
+      "sha": "0a629d7168cbdf633aafa2900f2bfc1a43a50841",
+      "subject": "feat: add YOLO mode to auto-approve permissions"
+    },
+    {
+      "sha": "625d16be2db9483cc9a5bb15051b4e727c44955b",
+      "subject": "feat: add Claude Fable 5, Nemotron 3 Ultra, and Sakana Fugu models"
+    },
+    {
+      "sha": "b0944e1977a7cf3f74d12ae91c5bc6c4ba9f5c28",
+      "subject": "chore: ignore playwright/e2e scratch artifacts"
+    },
+    {
+      "sha": "2a1a0dfde89de5964e32c82f7c8a662cad70b6ad",
+      "subject": "feat(opencode): give steering agent messages tool to read conversation history"
+    },
+    {
+      "sha": "4da776663cebd6b29c40a519d909446e26a3c169",
+      "subject": "feat(remote): add remote package with host, relay, and web client"
+    },
+    {
+      "sha": "4a47e4beb721a7f32f090413bb80d3e9b4372ead",
+      "subject": "fix(core): nudge a subagent that finishes without a written reply"
+    },
+    {
+      "sha": "4ad5286549138c541126e970411b188800b1b06f",
+      "subject": "feat(tui): steer a running subagent with a message (parity with main-chat queue)"
+    },
+    {
+      "sha": "ff70a2e674e9930f0610563496bf0a1ac0fd7343",
+      "subject": "fix(core): retry transient API/gateway errors with backoff for main chat and subagents"
+    },
+    {
+      "sha": "dd99cf73351cfd3c019252f9c5f9ff542289274a",
+      "subject": "feat(tui): label background subagents in /tasks panel"
+    },
+    {
+      "sha": "07db064f9414393f9185de7d5b86500df93deff9",
+      "subject": "feat(tui): add /teams roster + shared task list panel"
+    },
+    {
+      "sha": "3ec0034afeab2320c25b25e71f63d5040c41f5c2",
+      "subject": "feat(tui): add /tasks, /agents, /workflows panels + subagent token counts"
+    },
+    {
+      "sha": "73ffd1592a9f01a819c0e42ebd2a68e107e55815",
+      "subject": "feat(tui): live per-agent fan-out tree for workflow runs"
+    },
+    {
+      "sha": "a8b430e895a24ac4dcc7b5938517580a6ccb4d96",
+      "subject": "feat(tui): Claude-style UI for workflow/team/memory tools"
+    },
+    {
+      "sha": "977f98c72b2424d966529f5244b5d7f36a22c20e",
+      "subject": "feat(opencode): agent memory + per-agent mcpServers scoping"
+    },
+    {
+      "sha": "7e803a63e9e3570895ed0cc3ebebf2e2da40ccb4",
+      "subject": "feat(opencode): multi-agent suite \u2014 workflow engine, forks, teams, hooks, richer agents, batch"
+    },
+    {
+      "sha": "c1c36f0a1129ffdbc65da660725702a7a0a16588",
+      "subject": "feat(opencode): add /subagent command for runtime subagent model, variant, and tier configuration"
+    },
+    {
+      "sha": "df2365546f28b46a22d881b15814d9d83f794b38",
+      "subject": "feat(opencode): goal mode with auto-continuation loop and steering agent"
+    },
+    {
+      "sha": "e77fef9753693d59bf33e3a25795c67eaf16ed10",
+      "subject": "feat(llm): OpenAI WebSocket Responses mode + previous_response_id + connection pool"
+    },
+    {
+      "sha": "a91ac428ef2c372acf857c7d72e922c51cc2b96c",
+      "subject": "fix(opencode): bump gpt-5.5 Codex OAuth context limit to 1M, allow user overrides"
+    },
+    {
+      "sha": "1aec07578204e1c46fa1a27c661d3ca2955b4a78",
+      "subject": "fix(opencode): subagents inherit parent service tier, variant, and upstream"
+    },
+    {
+      "sha": "b2a67ac4053daefacf1dfc8cf817962b55fdab9e",
+      "subject": "perf(opencode): reduce per-token streaming overhead"
+    },
+    {
+      "sha": "6850e70bd7310e41837966d34c39a4b656883156",
+      "subject": "feat(opencode): /provider picker \u2014 pin requests to a specific upstream"
+    },
+    {
+      "sha": "b4b9e4cad87194c394d4999b4dedd63bb1e2c329",
+      "subject": "feat(opencode): background subagents mainlined + worktree + Ctrl+B demote"
+    },
+    {
+      "sha": "e46d5555d77dd9554eea6babd765e75627deac94",
+      "subject": "Merge branch 'anomalyco:dev' into dev"
+    },
+    {
+      "sha": "4518d28c9ab9cd9d10113755d3734072e1e0f23f",
+      "subject": "feat(opencode): /tier slash command, gateway provider+TPS surfacing, gateway-authoritative cost"
+    },
+    {
+      "sha": "1da7c93191562e446d0d3fd9ca2d0f5872594fce",
+      "subject": "feat(opencode): per-model service tier picker + 1h Anthropic cache"
+    }
+  ],
+  "changed_files": [
+    {
+      "added": "8",
+      "deleted": "0",
+      "path": ".gitignore"
+    },
+    {
+      "added": "237",
+      "deleted": "0",
+      "path": ".opencode/agent/refactor.md"
+    },
+    {
+      "added": "243",
+      "deleted": "0",
+      "path": ".opencode/agent/verifier.md"
+    },
+    {
+      "added": "63",
+      "deleted": "1",
+      "path": ".opencode/opencode.jsonc"
+    },
+    {
+      "added": "467",
+      "deleted": "0",
+      "path": "CHANGELOG.md"
+    },
+    {
+      "added": "95",
+      "deleted": "2",
+      "path": "bun.lock"
+    },
+    {
+      "added": "1",
+      "deleted": "1",
+      "path": "bunfig.toml"
+    },
+    {
+      "added": "7",
+      "deleted": "1",
+      "path": "package.json"
+    },
+    {
+      "added": "1",
+      "deleted": "0",
+      "path": "packages/app/package.json"
+    },
+    {
+      "added": "0",
+      "deleted": "1",
+      "path": "packages/app/src/components/dialog-select-provider.tsx"
+    },
+    {
+      "added": "199",
+      "deleted": "71",
+      "path": "packages/app/src/components/dialog-select-server.tsx"
+    },
+    {
+      "added": "56",
+      "deleted": "4",
+      "path": "packages/app/src/components/prompt-input.tsx"
+    },
+    {
+      "added": "41",
+      "deleted": "3",
+      "path": "packages/app/src/components/prompt-input/submit.test.ts"
+    },
+    {
+      "added": "7",
+      "deleted": "1",
+      "path": "packages/app/src/components/prompt-input/submit.ts"
+    },
+    {
+      "added": "107",
+      "deleted": "0",
+      "path": "packages/app/src/components/server/pairing-scanner.tsx"
+    },
+    {
+      "added": "0",
+      "deleted": "1",
+      "path": "packages/app/src/components/settings-providers.tsx"
+    },
+    {
+      "added": "114",
+      "deleted": "1",
+      "path": "packages/app/src/context/global-sync/event-reducer.test.ts"
+    },
+    {
+      "added": "7",
+      "deleted": "1",
+      "path": "packages/app/src/context/global-sync/event-reducer.ts"
+    },
+    {
+      "added": "18",
+      "deleted": "1",
+      "path": "packages/app/src/context/local.tsx"
+    },
+    {
+      "added": "40",
+      "deleted": "1",
+      "path": "packages/app/src/context/model-variant.test.ts"
+    },
+    {
+      "added": "13",
+      "deleted": "0",
+      "path": "packages/app/src/context/model-variant.ts"
+    },
+    {
+      "added": "1",
+      "deleted": "0",
+      "path": "packages/app/src/hooks/use-providers.ts"
+    },
+    {
+      "added": "20",
+      "deleted": "0",
+      "path": "packages/app/src/i18n/en.ts"
+    },
+    {
+      "added": "14",
+      "deleted": "6",
+      "path": "packages/app/src/pages/home.tsx"
+    },
+    {
+      "added": "88",
+      "deleted": "0",
+      "path": "packages/app/src/pages/home/recent-chats.tsx"
+    },
+    {
+      "added": "112",
+      "deleted": "0",
+      "path": "packages/app/src/pages/home/recent-sessions.test.ts"
+    },
+    {
+      "added": "25",
+      "deleted": "0",
+      "path": "packages/app/src/pages/home/recent-sessions.ts"
+    },
+    {
+      "added": "70",
+      "deleted": "10",
+      "path": "packages/app/src/pages/session.tsx"
+    },
+    {
+      "added": "11",
+      "deleted": "1",
+      "path": "packages/app/src/pages/session/composer/session-composer-region.tsx"
+    },
+    {
+      "added": "10",
+      "deleted": "0",
+      "path": "packages/app/src/pages/session/composer/session-followup-dock.tsx"
+    },
+    {
+      "added": "14",
+      "deleted": "0",
+      "path": "packages/app/src/pages/session/composer/session-revert-dock.test.tsx"
+    },
+    {
+      "added": "24",
+      "deleted": "2",
+      "path": "packages/app/src/pages/session/composer/session-revert-dock.tsx"
+    },
+    {
+      "added": "151",
+      "deleted": "0",
+      "path": "packages/app/src/pages/session/followup-queue.test.ts"
+    },
+    {
+      "added": "49",
+      "deleted": "0",
+      "path": "packages/app/src/pages/session/followup-queue.ts"
+    },
+    {
+      "added": "6",
+      "deleted": "2",
+      "path": "packages/app/src/pages/session/session-model-helpers.test.ts"
+    },
+    {
+      "added": "30",
+      "deleted": "0",
+      "path": "packages/app/src/pages/session/use-session-commands.tsx"
+    },
+    {
+      "added": "180",
+      "deleted": "0",
+      "path": "packages/app/src/utils/pairing.test.ts"
+    },
+    {
+      "added": "167",
+      "deleted": "0",
+      "path": "packages/app/src/utils/pairing.ts"
+    },
+    {
+      "added": "1",
+      "deleted": "1",
+      "path": "packages/app/src/utils/server-health.ts"
+    },
+    {
+      "added": "6",
+      "deleted": "0",
+      "path": "packages/core/src/flag/flag.ts"
+    },
+    {
+      "added": "296",
+      "deleted": "1",
+      "path": "packages/core/src/models-dev.ts"
+    },
+    {
+      "added": "1",
+      "deleted": "1",
+      "path": "packages/core/src/permission.ts"
+    },
+    {
+      "added": "239",
+      "deleted": "10",
+      "path": "packages/core/test/models.test.ts"
+    },
+    {
+      "added": "2",
+      "deleted": "2",
+      "path": "packages/llm/AGENTS.md"
+    },
+    {
+      "added": "30",
+      "deleted": "0",
+      "path": "packages/llm/script/bench-runtime.md"
+    },
+    {
+      "added": "90",
+      "deleted": "0",
+      "path": "packages/llm/script/bench-runtime.ts"
+    },
+    {
+      "added": "1",
+      "deleted": "1",
+      "path": "packages/llm/src/protocols/anthropic-messages.ts"
+    },
+    {
+      "added": "4",
+      "deleted": "1",
+      "path": "packages/llm/src/protocols/openai-chat.ts"
+    },
+    {
+      "added": "173",
+      "deleted": "31",
+      "path": "packages/llm/src/protocols/openai-responses.ts"
+    },
+    {
+      "added": "2",
+      "deleted": "1",
+      "path": "packages/llm/src/protocols/shared.ts"
+    },
+    {
+      "added": "35",
+      "deleted": "3",
+      "path": "packages/llm/src/protocols/utils/openai-options.ts"
+    },
+    {
+      "added": "10",
+      "deleted": "3",
+      "path": "packages/llm/src/protocols/utils/tool-stream.ts"
+    },
+    {
+      "added": "31",
+      "deleted": "0",
+      "path": "packages/llm/src/providers/openai-options.ts"
+    },
+    {
+      "added": "6",
+      "deleted": "1",
+      "path": "packages/llm/src/providers/openai.ts"
+    },
+    {
+      "added": "21",
+      "deleted": "6",
+      "path": "packages/llm/src/route/client.ts"
+    },
+    {
+      "added": "58",
+      "deleted": "14",
+      "path": "packages/llm/src/route/executor.ts"
+    },
+    {
+      "added": "1",
+      "deleted": "1",
+      "path": "packages/llm/src/route/framing.ts"
+    },
+    {
+      "added": "1",
+      "deleted": "0",
+      "path": "packages/llm/src/route/transport/http.ts"
+    },
+    {
+      "added": "5",
+      "deleted": "0",
+      "path": "packages/llm/src/route/transport/index.ts"
+    },
+    {
+      "added": "270",
+      "deleted": "5",
+      "path": "packages/llm/src/route/transport/websocket.ts"
+    },
+    {
+      "added": "2",
+      "deleted": "0",
+      "path": "packages/llm/src/schema/events.ts"
+    },
+    {
+      "added": "1",
+      "deleted": "0",
+      "path": "packages/llm/src/schema/messages.ts"
+    },
+    {
+      "added": "182",
+      "deleted": "52",
+      "path": "packages/llm/src/tool-runtime.ts"
+    },
+    {
+      "added": "16",
+      "deleted": "0",
+      "path": "packages/llm/src/tool.ts"
+    },
+    {
+      "added": "10",
+      "deleted": "0",
+      "path": "packages/llm/test/auth-options.types.ts"
+    },
+    {
+      "added": "158",
+      "deleted": "1",
+      "path": "packages/llm/test/executor.test.ts"
+    },
+    {
+      "added": "141",
+      "deleted": "0",
+      "path": "packages/llm/test/parallel-tool-options.test.ts"
+    },
+    {
+      "added": "174",
+      "deleted": "0",
+      "path": "packages/llm/test/preconnect.test.ts"
+    },
+    {
+      "added": "20",
+      "deleted": "0",
+      "path": "packages/llm/test/provider/anthropic-messages.test.ts"
+    },
+    {
+      "added": "43",
+      "deleted": "0",
+      "path": "packages/llm/test/provider/openai-chat.test.ts"
+    },
+    {
+      "added": "218",
+      "deleted": "0",
+      "path": "packages/llm/test/provider/openai-responses-options.test.ts"
+    },
+    {
+      "added": "499",
+      "deleted": "9",
+      "path": "packages/llm/test/provider/openai-responses.test.ts"
+    },
+    {
+      "added": "742",
+      "deleted": "0",
+      "path": "packages/llm/test/tool-runtime-eager.test.ts"
+    },
+    {
+      "added": "294",
+      "deleted": "2",
+      "path": "packages/llm/test/tool-runtime.test.ts"
+    },
+    {
+      "added": "33",
+      "deleted": "0",
+      "path": "packages/llm/test/tool-stream.test.ts"
+    },
+    {
+      "added": "629",
+      "deleted": "0",
+      "path": "packages/llm/test/websocket-pool.test.ts"
+    },
+    {
+      "added": "19",
+      "deleted": "0",
+      "path": "packages/opencode/migration/20260525075032_goal/migration.sql"
+    },
+    {
+      "added": "1758",
+      "deleted": "0",
+      "path": "packages/opencode/migration/20260525075032_goal/snapshot.json"
+    },
+    {
+      "added": "13",
+      "deleted": "0",
+      "path": "packages/opencode/migration/20260613183511_metaagent/migration.sql"
+    },
+    {
+      "added": "1870",
+      "deleted": "0",
+      "path": "packages/opencode/migration/20260613183511_metaagent/snapshot.json"
+    },
+    {
+      "added": "15",
+      "deleted": "0",
+      "path": "packages/opencode/migration/20261008222319_goal_attempt_usage/migration.sql"
+    },
+    {
+      "added": "2016",
+      "deleted": "0",
+      "path": "packages/opencode/migration/20261008222319_goal_attempt_usage/snapshot.json"
+    },
+    {
+      "added": "1",
+      "deleted": "0",
+      "path": "packages/opencode/migration/20261008223752_recoverable_goal_turn/migration.sql"
+    },
+    {
+      "added": "2026",
+      "deleted": "0",
+      "path": "packages/opencode/migration/20261008223752_recoverable_goal_turn/snapshot.json"
+    },
+    {
+      "added": "16",
+      "deleted": "0",
+      "path": "packages/opencode/migration/20261009011429_session_timing/migration.sql"
+    },
+    {
+      "added": "2198",
+      "deleted": "0",
+      "path": "packages/opencode/migration/20261009011429_session_timing/snapshot.json"
+    },
+    {
+      "added": "4",
+      "deleted": "1",
+      "path": "packages/opencode/package.json"
+    },
+    {
+      "added": "87",
+      "deleted": "0",
+      "path": "packages/opencode/script/bench-agent-tasks.md"
+    },
+    {
+      "added": "377",
+      "deleted": "0",
+      "path": "packages/opencode/script/bench-agent-tasks.ts"
+    },
+    {
+      "added": "174",
+      "deleted": "0",
+      "path": "packages/opencode/script/bench-ai-sdk-memory.md"
+    },
+    {
+      "added": "163",
+      "deleted": "0",
+      "path": "packages/opencode/script/bench-ai-sdk-memory.ts"
+    },
+    {
+      "added": "239",
+      "deleted": "0",
+      "path": "packages/opencode/script/bench-anthropic-overhead.ts"
+    },
+    {
+      "added": "173",
+      "deleted": "0",
+      "path": "packages/opencode/script/bench-bedrock-astra.ts"
+    },
+    {
+      "added": "704",
+      "deleted": "0",
+      "path": "packages/opencode/script/bench-bedrock-report.ts"
+    },
+    {
+      "added": "360",
+      "deleted": "0",
+      "path": "packages/opencode/script/bench-context-warm.ts"
+    },
+    {
+      "added": "196",
+      "deleted": "0",
+      "path": "packages/opencode/script/bench-execution.test.ts"
+    },
+    {
+      "added": "139",
+      "deleted": "0",
+      "path": "packages/opencode/script/bench-network-latency.ts"
+    },
+    {
+      "added": "181",
+      "deleted": "0",
+      "path": "packages/opencode/script/bench-openai-latency.md"
+    },
+    {
+      "added": "344",
+      "deleted": "0",
+      "path": "packages/opencode/script/bench-openai-latency.ts"
+    },
+    {
+      "added": "193",
+      "deleted": "0",
+      "path": "packages/opencode/script/bench-parallel-tools.md"
+    },
+    {
+      "added": "1493",
+      "deleted": "0",
+      "path": "packages/opencode/script/bench-parallel-tools.ts"
+    },
+    {
+      "added": "388",
+      "deleted": "0",
+      "path": "packages/opencode/script/bench-provider-latency.ts"
+    },
+    {
+      "added": "275",
+      "deleted": "0",
+      "path": "packages/opencode/script/check-service-tier-wire.ts"
+    },
+    {
+      "added": "113",
+      "deleted": "0",
+      "path": "packages/opencode/script/inspect-inference-routing.ts"
+    },
+    {
+      "added": "110",
+      "deleted": "0",
+      "path": "packages/opencode/script/install-phone-access.ts"
+    },
+    {
+      "added": "284",
+      "deleted": "5",
+      "path": "packages/opencode/src/agent/agent.ts"
+    },
+    {
+      "added": "110",
+      "deleted": "0",
+      "path": "packages/opencode/src/agent/child-model.ts"
+    },
+    {
+      "added": "157",
+      "deleted": "0",
+      "path": "packages/opencode/src/agent/child-session.ts"
+    },
+    {
+      "added": "962",
+      "deleted": "0",
+      "path": "packages/opencode/src/agent/collaboration.ts"
+    },
+    {
+      "added": "33",
+      "deleted": "0",
+      "path": "packages/opencode/src/agent/prompt/batch-orchestrator.txt"
+    },
+    {
+      "added": "13",
+      "deleted": "0",
+      "path": "packages/opencode/src/agent/prompt/reasoning-reviewer.txt"
+    },
+    {
+      "added": "49",
+      "deleted": "0",
+      "path": "packages/opencode/src/agent/prompt/review-logic.txt"
+    },
+    {
+      "added": "42",
+      "deleted": "0",
+      "path": "packages/opencode/src/agent/prompt/review-orchestrator.txt"
+    },
+    {
+      "added": "49",
+      "deleted": "0",
+      "path": "packages/opencode/src/agent/prompt/review-security.txt"
+    },
+    {
+      "added": "48",
+      "deleted": "0",
+      "path": "packages/opencode/src/agent/prompt/review-style.txt"
+    },
+    {
+      "added": "27",
+      "deleted": "0",
+      "path": "packages/opencode/src/agent/prompt/review-synthesizer.txt"
+    },
+    {
+      "added": "24",
+      "deleted": "0",
+      "path": "packages/opencode/src/agent/prompt/steer.txt"
+    },
+    {
+      "added": "46",
+      "deleted": "0",
+      "path": "packages/opencode/src/agent/subagent-limit.ts"
+    },
+    {
+      "added": "14",
+      "deleted": "5",
+      "path": "packages/opencode/src/agent/subagent-permissions.ts"
+    },
+    {
+      "added": "502",
+      "deleted": "0",
+      "path": "packages/opencode/src/agent/subagent-run.ts"
+    },
+    {
+      "added": "148",
+      "deleted": "0",
+      "path": "packages/opencode/src/agent/team.ts"
+    },
+    {
+      "added": "177",
+      "deleted": "24",
+      "path": "packages/opencode/src/auth/index.ts"
+    },
+    {
+      "added": "359",
+      "deleted": "63",
+      "path": "packages/opencode/src/background/job.ts"
+    },
+    {
+      "added": "92",
+      "deleted": "0",
+      "path": "packages/opencode/src/background/notify.ts"
+    },
+    {
+      "added": "20",
+      "deleted": "0",
+      "path": "packages/opencode/src/bus/global.ts"
+    },
+    {
+      "added": "25",
+      "deleted": "7",
+      "path": "packages/opencode/src/bus/index.ts"
+    },
+    {
+      "added": "13",
+      "deleted": "5",
+      "path": "packages/opencode/src/cli/cmd/acp.ts"
+    },
+    {
+      "added": "248",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/cmd/pair.ts"
+    },
+    {
+      "added": "5",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/cmd/prompt-display.ts"
+    },
+    {
+      "added": "12",
+      "deleted": "9",
+      "path": "packages/opencode/src/cli/cmd/providers.ts"
+    },
+    {
+      "added": "80",
+      "deleted": "42",
+      "path": "packages/opencode/src/cli/cmd/run.ts"
+    },
+    {
+      "added": "18",
+      "deleted": "8",
+      "path": "packages/opencode/src/cli/cmd/run/footer.command.tsx"
+    },
+    {
+      "added": "2",
+      "deleted": "1",
+      "path": "packages/opencode/src/cli/cmd/run/footer.prompt.tsx"
+    },
+    {
+      "added": "1",
+      "deleted": "1",
+      "path": "packages/opencode/src/cli/cmd/run/prompt.shared.ts"
+    },
+    {
+      "added": "21",
+      "deleted": "4",
+      "path": "packages/opencode/src/cli/cmd/serve.ts"
+    },
+    {
+      "added": "239",
+      "deleted": "5",
+      "path": "packages/opencode/src/cli/cmd/tui/app.tsx"
+    },
+    {
+      "added": "8",
+      "deleted": "1",
+      "path": "packages/opencode/src/cli/cmd/tui/attach.ts"
+    },
+    {
+      "added": "117",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/cmd/tui/component/dialog-agents.tsx"
+    },
+    {
+      "added": "19",
+      "deleted": "6",
+      "path": "packages/opencode/src/cli/cmd/tui/component/dialog-model.tsx"
+    },
+    {
+      "added": "398",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/cmd/tui/component/dialog-pair.tsx"
+    },
+    {
+      "added": "6",
+      "deleted": "4",
+      "path": "packages/opencode/src/cli/cmd/tui/component/dialog-provider.tsx"
+    },
+    {
+      "added": "63",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/cmd/tui/component/dialog-service-tier.tsx"
+    },
+    {
+      "added": "57",
+      "deleted": "14",
+      "path": "packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx"
+    },
+    {
+      "added": "236",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/cmd/tui/component/dialog-shell-output.tsx"
+    },
+    {
+      "added": "259",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/cmd/tui/component/dialog-subagent-model.tsx"
+    },
+    {
+      "added": "138",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/cmd/tui/component/dialog-tasks.tsx"
+    },
+    {
+      "added": "201",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/cmd/tui/component/dialog-teams.tsx"
+    },
+    {
+      "added": "117",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/cmd/tui/component/dialog-upstream.tsx"
+    },
+    {
+      "added": "44",
+      "deleted": "9",
+      "path": "packages/opencode/src/cli/cmd/tui/component/dialog-variant.tsx"
+    },
+    {
+      "added": "86",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/cmd/tui/component/dialog-workflows.tsx"
+    },
+    {
+      "added": "12",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/cmd/tui/component/model-variant.ts"
+    },
+    {
+      "added": "3",
+      "deleted": "1",
+      "path": "packages/opencode/src/cli/cmd/tui/component/prompt/autocomplete.tsx"
+    },
+    {
+      "added": "201",
+      "deleted": "5",
+      "path": "packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx"
+    },
+    {
+      "added": "116",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/cmd/tui/component/task-entries.ts"
+    },
+    {
+      "added": "17",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/cmd/tui/component/tool-code.tsx"
+    },
+    {
+      "added": "49",
+      "deleted": "8",
+      "path": "packages/opencode/src/cli/cmd/tui/config/keybind.ts"
+    },
+    {
+      "added": "1",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/cmd/tui/context/args.tsx"
+    },
+    {
+      "added": "223",
+      "deleted": "1",
+      "path": "packages/opencode/src/cli/cmd/tui/context/local.tsx"
+    },
+    {
+      "added": "1",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/cmd/tui/context/sdk.tsx"
+    },
+    {
+      "added": "84",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/cmd/tui/context/streaming-metrics.tsx"
+    },
+    {
+      "added": "32",
+      "deleted": "1",
+      "path": "packages/opencode/src/cli/cmd/tui/context/sync-v2.tsx"
+    },
+    {
+      "added": "85",
+      "deleted": "3",
+      "path": "packages/opencode/src/cli/cmd/tui/context/sync.tsx"
+    },
+    {
+      "added": "8",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/cmd/tui/event.ts"
+    },
+    {
+      "added": "76",
+      "deleted": "18",
+      "path": "packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx"
+    },
+    {
+      "added": "23",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/cmd/tui/routes/session/dialog-message.tsx"
+    },
+    {
+      "added": "570",
+      "deleted": "57",
+      "path": "packages/opencode/src/cli/cmd/tui/routes/session/index.tsx"
+    },
+    {
+      "added": "14",
+      "deleted": "1",
+      "path": "packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx"
+    },
+    {
+      "added": "58",
+      "deleted": "28",
+      "path": "packages/opencode/src/cli/cmd/tui/thread.ts"
+    },
+    {
+      "added": "4",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/cmd/tui/ui/dialog-select.tsx"
+    },
+    {
+      "added": "1",
+      "deleted": "3",
+      "path": "packages/opencode/src/cli/cmd/tui/ui/link.tsx"
+    },
+    {
+      "added": "71",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/cmd/tui/util/background.ts"
+    },
+    {
+      "added": "104",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/cmd/tui/util/pair.ts"
+    },
+    {
+      "added": "17",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/cmd/tui/util/service-tier.ts"
+    },
+    {
+      "added": "62",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/cmd/tui/util/session-search.ts"
+    },
+    {
+      "added": "24",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/cmd/tui/util/tool-input.ts"
+    },
+    {
+      "added": "3",
+      "deleted": "1",
+      "path": "packages/opencode/src/cli/cmd/tui/util/transcript.ts"
+    },
+    {
+      "added": "118",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/cmd/tui/worker-fetch.ts"
+    },
+    {
+      "added": "34",
+      "deleted": "19",
+      "path": "packages/opencode/src/cli/cmd/tui/worker.ts"
+    },
+    {
+      "added": "34",
+      "deleted": "6",
+      "path": "packages/opencode/src/cli/cmd/web.ts"
+    },
+    {
+      "added": "76",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/network.ts"
+    },
+    {
+      "added": "70",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/remote-consent.ts"
+    },
+    {
+      "added": "23",
+      "deleted": "0",
+      "path": "packages/opencode/src/cli/yolo-forever.ts"
+    },
+    {
+      "added": "36",
+      "deleted": "5",
+      "path": "packages/opencode/src/command/index.ts"
+    },
+    {
+      "added": "9",
+      "deleted": "0",
+      "path": "packages/opencode/src/command/template/batch.txt"
+    },
+    {
+      "added": "11",
+      "deleted": "0",
+      "path": "packages/opencode/src/command/template/metaagent.txt"
+    },
+    {
+      "added": "12",
+      "deleted": "94",
+      "path": "packages/opencode/src/command/template/review.txt"
+    },
+    {
+      "added": "50",
+      "deleted": "0",
+      "path": "packages/opencode/src/config/agent.ts"
+    },
+    {
+      "added": "5",
+      "deleted": "1",
+      "path": "packages/opencode/src/config/config.ts"
+    },
+    {
+      "added": "37",
+      "deleted": "0",
+      "path": "packages/opencode/src/config/provider.ts"
+    },
+    {
+      "added": "14",
+      "deleted": "0",
+      "path": "packages/opencode/src/effect/app-runtime.ts"
+    },
+    {
+      "added": "3",
+      "deleted": "3",
+      "path": "packages/opencode/src/effect/bridge.ts"
+    },
+    {
+      "added": "10",
+      "deleted": "1",
+      "path": "packages/opencode/src/effect/runtime-flags.ts"
+    },
+    {
+      "added": "152",
+      "deleted": "45",
+      "path": "packages/opencode/src/file/ripgrep.ts"
+    },
+    {
+      "added": "1",
+      "deleted": "0",
+      "path": "packages/opencode/src/id/id.ts"
+    },
+    {
+      "added": "11",
+      "deleted": "1",
+      "path": "packages/opencode/src/index.ts"
+    },
+    {
+      "added": "3",
+      "deleted": "2",
+      "path": "packages/opencode/src/mcp/index.ts"
+    },
+    {
+      "added": "70",
+      "deleted": "0",
+      "path": "packages/opencode/src/memory/memory.ts"
+    },
+    {
+      "added": "7",
+      "deleted": "1",
+      "path": "packages/opencode/src/permission/evaluate.ts"
+    },
+    {
+      "added": "79",
+      "deleted": "14",
+      "path": "packages/opencode/src/permission/index.ts"
+    },
+    {
+      "added": "124",
+      "deleted": "103",
+      "path": "packages/opencode/src/plugin/codex.ts"
+    },
+    {
+      "added": "11",
+      "deleted": "1",
+      "path": "packages/opencode/src/project/bootstrap.ts"
+    },
+    {
+      "added": "177",
+      "deleted": "26",
+      "path": "packages/opencode/src/provider/provider.ts"
+    },
+    {
+      "added": "1",
+      "deleted": "0",
+      "path": "packages/opencode/src/provider/schema.ts"
+    },
+    {
+      "added": "373",
+      "deleted": "62",
+      "path": "packages/opencode/src/provider/transform.ts"
+    },
+    {
+      "added": "2",
+      "deleted": "1",
+      "path": "packages/opencode/src/pty/index.ts"
+    },
+    {
+      "added": "48",
+      "deleted": "5",
+      "path": "packages/opencode/src/server/auth.ts"
+    },
+    {
+      "added": "28",
+      "deleted": "1",
+      "path": "packages/opencode/src/server/event.ts"
+    },
+    {
+      "added": "66",
+      "deleted": "0",
+      "path": "packages/opencode/src/server/pairing-state.ts"
+    },
+    {
+      "added": "38",
+      "deleted": "0",
+      "path": "packages/opencode/src/server/pairing.ts"
+    },
+    {
+      "added": "121",
+      "deleted": "0",
+      "path": "packages/opencode/src/server/remote.ts"
+    },
+    {
+      "added": "7",
+      "deleted": "0",
+      "path": "packages/opencode/src/server/routes/instance/httpapi/api.ts"
+    },
+    {
+      "added": "9",
+      "deleted": "0",
+      "path": "packages/opencode/src/server/routes/instance/httpapi/errors.ts"
+    },
+    {
+      "added": "2",
+      "deleted": "1",
+      "path": "packages/opencode/src/server/routes/instance/httpapi/groups/control.ts"
+    },
+    {
+      "added": "20",
+      "deleted": "0",
+      "path": "packages/opencode/src/server/routes/instance/httpapi/groups/global.ts"
+    },
+    {
+      "added": "42",
+      "deleted": "0",
+      "path": "packages/opencode/src/server/routes/instance/httpapi/groups/instance.ts"
+    },
+    {
+      "added": "96",
+      "deleted": "0",
+      "path": "packages/opencode/src/server/routes/instance/httpapi/groups/server.ts"
+    },
+    {
+      "added": "144",
+      "deleted": "4",
+      "path": "packages/opencode/src/server/routes/instance/httpapi/groups/session.ts"
+    },
+    {
+      "added": "98",
+      "deleted": "0",
+      "path": "packages/opencode/src/server/routes/instance/httpapi/groups/shell.ts"
+    },
+    {
+      "added": "5",
+      "deleted": "0",
+      "path": "packages/opencode/src/server/routes/instance/httpapi/groups/tui.ts"
+    },
+    {
+      "added": "7",
+      "deleted": "2",
+      "path": "packages/opencode/src/server/routes/instance/httpapi/handlers/control.ts"
+    },
+    {
+      "added": "8",
+      "deleted": "4",
+      "path": "packages/opencode/src/server/routes/instance/httpapi/handlers/event.ts"
+    },
+    {
+      "added": "49",
+      "deleted": "30",
+      "path": "packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts"
+    },
+    {
+      "added": "24",
+      "deleted": "1",
+      "path": "packages/opencode/src/server/routes/instance/httpapi/handlers/instance.ts"
+    },
+    {
+      "added": "1",
+      "deleted": "1",
+      "path": "packages/opencode/src/server/routes/instance/httpapi/handlers/provider.ts"
+    },
+    {
+      "added": "81",
+      "deleted": "0",
+      "path": "packages/opencode/src/server/routes/instance/httpapi/handlers/server.ts"
+    },
+    {
+      "added": "105",
+      "deleted": "4",
+      "path": "packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts"
+    },
+    {
+      "added": "41",
+      "deleted": "0",
+      "path": "packages/opencode/src/server/routes/instance/httpapi/handlers/shell.ts"
+    },
+    {
+      "added": "5",
+      "deleted": "0",
+      "path": "packages/opencode/src/server/routes/instance/httpapi/handlers/tui.ts"
+    },
+    {
+      "added": "40",
+      "deleted": "16",
+      "path": "packages/opencode/src/server/routes/instance/httpapi/middleware/authorization.ts"
+    },
+    {
+      "added": "25",
+      "deleted": "3",
+      "path": "packages/opencode/src/server/routes/instance/httpapi/server.ts"
+    },
+    {
+      "added": "52",
+      "deleted": "0",
+      "path": "packages/opencode/src/server/server-info.ts"
+    },
+    {
+      "added": "14",
+      "deleted": "1",
+      "path": "packages/opencode/src/server/server.ts"
+    },
+    {
+      "added": "13",
+      "deleted": "2",
+      "path": "packages/opencode/src/server/shared/ui.ts"
+    },
+    {
+      "added": "1",
+      "deleted": "1",
+      "path": "packages/opencode/src/server/shared/workspace-routing.ts"
+    },
+    {
+      "added": "32",
+      "deleted": "0",
+      "path": "packages/opencode/src/session/auxiliary.ts"
+    },
+    {
+      "added": "284",
+      "deleted": "0",
+      "path": "packages/opencode/src/session/codex-session.ts"
+    },
+    {
+      "added": "33",
+      "deleted": "0",
+      "path": "packages/opencode/src/session/collaboration.ts"
+    },
+    {
+      "added": "1",
+      "deleted": "1",
+      "path": "packages/opencode/src/session/compaction.ts"
+    },
+    {
+      "added": "296",
+      "deleted": "0",
+      "path": "packages/opencode/src/session/goal-driver.ts"
+    },
+    {
+      "added": "368",
+      "deleted": "0",
+      "path": "packages/opencode/src/session/goal.ts"
+    },
+    {
+      "added": "30",
+      "deleted": "6",
+      "path": "packages/opencode/src/session/instruction.ts"
+    },
+    {
+      "added": "190",
+      "deleted": "20",
+      "path": "packages/opencode/src/session/llm.ts"
+    },
+    {
+      "added": "5",
+      "deleted": "0",
+      "path": "packages/opencode/src/session/llm/ai-sdk.ts"
+    },
+    {
+      "added": "372",
+      "deleted": "0",
+      "path": "packages/opencode/src/session/llm/bedrock-retry.ts"
+    },
+    {
+      "added": "188",
+      "deleted": "0",
+      "path": "packages/opencode/src/session/llm/continuation.ts"
+    },
+    {
+      "added": "44",
+      "deleted": "2",
+      "path": "packages/opencode/src/session/llm/native-request.ts"
+    },
+    {
+      "added": "232",
+      "deleted": "29",
+      "path": "packages/opencode/src/session/llm/native-runtime.ts"
+    },
+    {
+      "added": "160",
+      "deleted": "18",
+      "path": "packages/opencode/src/session/llm/request.ts"
+    },
+    {
+      "added": "2",
+      "deleted": "0",
+      "path": "packages/opencode/src/session/llm/tool-execution.ts"
+    },
+    {
+      "added": "475",
+      "deleted": "0",
+      "path": "packages/opencode/src/session/llm/warm.ts"
+    },
+    {
+      "added": "84",
+      "deleted": "19",
+      "path": "packages/opencode/src/session/message-v2.ts"
+    },
+    {
+      "added": "131",
+      "deleted": "0",
+      "path": "packages/opencode/src/session/metaagent.ts"
+    },
+    {
+      "added": "179",
+      "deleted": "0",
+      "path": "packages/opencode/src/session/opencode-session.ts"
+    },
+    {
+      "added": "411",
+      "deleted": "66",
+      "path": "packages/opencode/src/session/processor.ts"
+    },
+    {
+      "added": "728",
+      "deleted": "142",
+      "path": "packages/opencode/src/session/prompt.ts"
+    },
+    {
+      "added": "3",
+      "deleted": "1",
+      "path": "packages/opencode/src/session/prompt/codex.txt"
+    },
+    {
+      "added": "13",
+      "deleted": "0",
+      "path": "packages/opencode/src/session/prompt/goal-budget-limit.txt"
+    },
+    {
+      "added": "41",
+      "deleted": "0",
+      "path": "packages/opencode/src/session/prompt/goal-continuation.txt"
+    },
+    {
+      "added": "4",
+      "deleted": "1",
+      "path": "packages/opencode/src/session/prompt/gpt.txt"
+    },
+    {
+      "added": "161",
+      "deleted": "0",
+      "path": "packages/opencode/src/session/prompt/session-reference.ts"
+    },
+    {
+      "added": "11",
+      "deleted": "0",
+      "path": "packages/opencode/src/session/queued-message.ts"
+    },
+    {
+      "added": "170",
+      "deleted": "0",
+      "path": "packages/opencode/src/session/reasoning-reviewer.ts"
+    },
+    {
+      "added": "134",
+      "deleted": "38",
+      "path": "packages/opencode/src/session/retry.ts"
+    },
+    {
+      "added": "9",
+      "deleted": "3",
+      "path": "packages/opencode/src/session/revert.ts"
+    },
+    {
+      "added": "128",
+      "deleted": "12",
+      "path": "packages/opencode/src/session/run-state.ts"
+    },
+    {
+      "added": "105",
+      "deleted": "0",
+      "path": "packages/opencode/src/session/search.ts"
+    },
+    {
+      "added": "144",
+      "deleted": "0",
+      "path": "packages/opencode/src/session/session-transcript.ts"
+    },
+    {
+      "added": "44",
+      "deleted": "0",
+      "path": "packages/opencode/src/session/session.sql.ts"
+    },
+    {
+      "added": "198",
+      "deleted": "25",
+      "path": "packages/opencode/src/session/session.ts"
+    },
+    {
+      "added": "163",
+      "deleted": "0",
+      "path": "packages/opencode/src/session/steering.ts"
+    },
+    {
+      "added": "67",
+      "deleted": "29",
+      "path": "packages/opencode/src/session/summary.ts"
+    },
+    {
+      "added": "1",
+      "deleted": "2",
+      "path": "packages/opencode/src/session/system.ts"
+    },
+    {
+      "added": "279",
+      "deleted": "0",
+      "path": "packages/opencode/src/session/timing-store.ts"
+    },
+    {
+      "added": "54",
+      "deleted": "0",
+      "path": "packages/opencode/src/session/timing.sql.ts"
+    },
+    {
+      "added": "321",
+      "deleted": "0",
+      "path": "packages/opencode/src/session/timing.ts"
+    },
+    {
+      "added": "78",
+      "deleted": "15",
+      "path": "packages/opencode/src/session/tools.ts"
+    },
+    {
+      "added": "24",
+      "deleted": "0",
+      "path": "packages/opencode/src/session/usage.sql.ts"
+    },
+    {
+      "added": "244",
+      "deleted": "0",
+      "path": "packages/opencode/src/session/usage.ts"
+    },
+    {
+      "added": "468",
+      "deleted": "0",
+      "path": "packages/opencode/src/shell/process.ts"
+    },
+    {
+      "added": "34",
+      "deleted": "17",
+      "path": "packages/opencode/src/snapshot/index.ts"
+    },
+    {
+      "added": "9",
+      "deleted": "6",
+      "path": "packages/opencode/src/storage/db.ts"
+    },
+    {
+      "added": "266",
+      "deleted": "232",
+      "path": "packages/opencode/src/tool/apply_patch.ts"
+    },
+    {
+      "added": "206",
+      "deleted": "0",
+      "path": "packages/opencode/src/tool/collaboration.ts"
+    },
+    {
+      "added": "9",
+      "deleted": "17",
+      "path": "packages/opencode/src/tool/edit.ts"
+    },
+    {
+      "added": "103",
+      "deleted": "3",
+      "path": "packages/opencode/src/tool/external-directory.ts"
+    },
+    {
+      "added": "96",
+      "deleted": "0",
+      "path": "packages/opencode/src/tool/file-mutation.ts"
+    },
+    {
+      "added": "15",
+      "deleted": "12",
+      "path": "packages/opencode/src/tool/glob.ts"
+    },
+    {
+      "added": "1",
+      "deleted": "1",
+      "path": "packages/opencode/src/tool/glob.txt"
+    },
+    {
+      "added": "130",
+      "deleted": "0",
+      "path": "packages/opencode/src/tool/goal.ts"
+    },
+    {
+      "added": "15",
+      "deleted": "0",
+      "path": "packages/opencode/src/tool/goal.txt"
+    },
+    {
+      "added": "111",
+      "deleted": "33",
+      "path": "packages/opencode/src/tool/grep.ts"
+    },
+    {
+      "added": "2",
+      "deleted": "0",
+      "path": "packages/opencode/src/tool/grep.txt"
+    },
+    {
+      "added": "78",
+      "deleted": "0",
+      "path": "packages/opencode/src/tool/inbox.ts"
+    },
+    {
+      "added": "3",
+      "deleted": "0",
+      "path": "packages/opencode/src/tool/inbox.txt"
+    },
+    {
+      "added": "49",
+      "deleted": "0",
+      "path": "packages/opencode/src/tool/memory.ts"
+    },
+    {
+      "added": "10",
+      "deleted": "0",
+      "path": "packages/opencode/src/tool/memory.txt"
+    },
+    {
+      "added": "103",
+      "deleted": "0",
+      "path": "packages/opencode/src/tool/metaagent.ts"
+    },
+    {
+      "added": "10",
+      "deleted": "0",
+      "path": "packages/opencode/src/tool/metaagent.txt"
+    },
+    {
+      "added": "173",
+      "deleted": "0",
+      "path": "packages/opencode/src/tool/read-many.ts"
+    },
+    {
+      "added": "9",
+      "deleted": "0",
+      "path": "packages/opencode/src/tool/read-many.txt"
+    },
+    {
+      "added": "26",
+      "deleted": "11",
+      "path": "packages/opencode/src/tool/read.ts"
+    },
+    {
+      "added": "1",
+      "deleted": "1",
+      "path": "packages/opencode/src/tool/read.txt"
+    },
+    {
+      "added": "75",
+      "deleted": "7",
+      "path": "packages/opencode/src/tool/registry.ts"
+    },
+    {
+      "added": "120",
+      "deleted": "0",
+      "path": "packages/opencode/src/tool/send_message.ts"
+    },
+    {
+      "added": "3",
+      "deleted": "0",
+      "path": "packages/opencode/src/tool/send_message.txt"
+    },
+    {
+      "added": "318",
+      "deleted": "157",
+      "path": "packages/opencode/src/tool/shell.ts"
+    },
+    {
+      "added": "14",
+      "deleted": "4",
+      "path": "packages/opencode/src/tool/shell/prompt.ts"
+    },
+    {
+      "added": "6",
+      "deleted": "0",
+      "path": "packages/opencode/src/tool/shell/shell.txt"
+    },
+    {
+      "added": "90",
+      "deleted": "0",
+      "path": "packages/opencode/src/tool/spawn_agent.ts"
+    },
+    {
+      "added": "7",
+      "deleted": "0",
+      "path": "packages/opencode/src/tool/spawn_agent.txt"
+    },
+    {
+      "added": "441",
+      "deleted": "195",
+      "path": "packages/opencode/src/tool/task.ts"
+    },
+    {
+      "added": "2",
+      "deleted": "1",
+      "path": "packages/opencode/src/tool/task.txt"
+    },
+    {
+      "added": "24",
+      "deleted": "25",
+      "path": "packages/opencode/src/tool/task_status.ts"
+    },
+    {
+      "added": "4",
+      "deleted": "4",
+      "path": "packages/opencode/src/tool/task_status.txt"
+    },
+    {
+      "added": "66",
+      "deleted": "0",
+      "path": "packages/opencode/src/tool/team_tasks.ts"
+    },
+    {
+      "added": "8",
+      "deleted": "0",
+      "path": "packages/opencode/src/tool/team_tasks.txt"
+    },
+    {
+      "added": "6",
+      "deleted": "0",
+      "path": "packages/opencode/src/tool/tool.ts"
+    },
+    {
+      "added": "16",
+      "deleted": "3",
+      "path": "packages/opencode/src/tool/truncate.ts"
+    },
+    {
+      "added": "501",
+      "deleted": "0",
+      "path": "packages/opencode/src/tool/workflow.ts"
+    },
+    {
+      "added": "18",
+      "deleted": "0",
+      "path": "packages/opencode/src/tool/workflow.txt"
+    },
+    {
+      "added": "33",
+      "deleted": "25",
+      "path": "packages/opencode/src/tool/write.ts"
+    },
+    {
+      "added": "35",
+      "deleted": "18",
+      "path": "packages/opencode/src/util/rpc.ts"
+    },
+    {
+      "added": "168",
+      "deleted": "0",
+      "path": "packages/opencode/src/workflow/finding.ts"
+    },
+    {
+      "added": "232",
+      "deleted": "0",
+      "path": "packages/opencode/test/agent/agent.test.ts"
+    },
+    {
+      "added": "187",
+      "deleted": "0",
+      "path": "packages/opencode/test/agent/child-model.test.ts"
+    },
+    {
+      "added": "820",
+      "deleted": "0",
+      "path": "packages/opencode/test/agent/collaboration.test.ts"
+    },
+    {
+      "added": "191",
+      "deleted": "0",
+      "path": "packages/opencode/test/agent/memory-retention.bench.test.ts"
+    },
+    {
+      "added": "369",
+      "deleted": "0",
+      "path": "packages/opencode/test/agent/subagent-followup-permission.test.ts"
+    },
+    {
+      "added": "127",
+      "deleted": "0",
+      "path": "packages/opencode/test/agent/subagent-limit.test.ts"
+    },
+    {
+      "added": "416",
+      "deleted": "0",
+      "path": "packages/opencode/test/agent/subagent-parent-wakeup.test.ts"
+    },
+    {
+      "added": "949",
+      "deleted": "0",
+      "path": "packages/opencode/test/agent/subagent-run.test.ts"
+    },
+    {
+      "added": "57",
+      "deleted": "0",
+      "path": "packages/opencode/test/agent/team.test.ts"
+    },
+    {
+      "added": "104",
+      "deleted": "0",
+      "path": "packages/opencode/test/auth/auth-process.test.ts"
+    },
+    {
+      "added": "219",
+      "deleted": "1",
+      "path": "packages/opencode/test/auth/auth.test.ts"
+    },
+    {
+      "added": "81",
+      "deleted": "0",
+      "path": "packages/opencode/test/auth/fixtures/auth-worker.ts"
+    },
+    {
+      "added": "568",
+      "deleted": "2",
+      "path": "packages/opencode/test/background/job.test.ts"
+    },
+    {
+      "added": "52",
+      "deleted": "0",
+      "path": "packages/opencode/test/bus/bus-effect.test.ts"
+    },
+    {
+      "added": "21",
+      "deleted": "0",
+      "path": "packages/opencode/test/cli/capture-output.ts"
+    },
+    {
+      "added": "64",
+      "deleted": "0",
+      "path": "packages/opencode/test/cli/cmd/tui/background.test.ts"
+    },
+    {
+      "added": "321",
+      "deleted": "0",
+      "path": "packages/opencode/test/cli/cmd/tui/dialog-pair.test.tsx"
+    },
+    {
+      "added": "154",
+      "deleted": "0",
+      "path": "packages/opencode/test/cli/cmd/tui/dialog-shell-output.test.tsx"
+    },
+    {
+      "added": "15",
+      "deleted": "0",
+      "path": "packages/opencode/test/cli/cmd/tui/provider-options.test.ts"
+    },
+    {
+      "added": "257",
+      "deleted": "0",
+      "path": "packages/opencode/test/cli/cmd/tui/streaming-metrics.test.tsx"
+    },
+    {
+      "added": "9",
+      "deleted": "2",
+      "path": "packages/opencode/test/cli/cmd/tui/sync-fixture.tsx"
+    },
+    {
+      "added": "120",
+      "deleted": "2",
+      "path": "packages/opencode/test/cli/cmd/tui/sync.test.tsx"
+    },
+    {
+      "added": "386",
+      "deleted": "0",
+      "path": "packages/opencode/test/cli/cmd/tui/task-entries.test.ts"
+    },
+    {
+      "added": "119",
+      "deleted": "0",
+      "path": "packages/opencode/test/cli/cmd/tui/transcript-memory.bench.ts"
+    },
+    {
+      "added": "449",
+      "deleted": "0",
+      "path": "packages/opencode/test/cli/cmd/tui/transcript-retention.test.tsx"
+    },
+    {
+      "added": "408",
+      "deleted": "218",
+      "path": "packages/opencode/test/cli/help/__snapshots__/help-snapshots.test.ts.snap"
+    },
+    {
+      "added": "11",
+      "deleted": "0",
+      "path": "packages/opencode/test/cli/help/help-snapshots.test.ts"
+    },
+    {
+      "added": "233",
+      "deleted": "0",
+      "path": "packages/opencode/test/cli/pair-remote.test.ts"
+    },
+    {
+      "added": "162",
+      "deleted": "0",
+      "path": "packages/opencode/test/cli/remote-consent.test.ts"
+    },
+    {
+      "added": "3",
+      "deleted": "0",
+      "path": "packages/opencode/test/cli/run/prompt.shared.test.ts"
+    },
+    {
+      "added": "220",
+      "deleted": "0",
+      "path": "packages/opencode/test/cli/run/run-output.test.ts"
+    },
+    {
+      "added": "50",
+      "deleted": "0",
+      "path": "packages/opencode/test/cli/run/run-process.test.ts"
+    },
+    {
+      "added": "30",
+      "deleted": "0",
+      "path": "packages/opencode/test/cli/tui/fixtures/worker-fetch.ts"
+    },
+    {
+      "added": "27",
+      "deleted": "0",
+      "path": "packages/opencode/test/cli/tui/keybind.test.ts"
+    },
+    {
+      "added": "29",
+      "deleted": "0",
+      "path": "packages/opencode/test/cli/tui/model-variant.test.ts"
+    },
+    {
+      "added": "68",
+      "deleted": "0",
+      "path": "packages/opencode/test/cli/tui/pair-worker.test.ts"
+    },
+    {
+      "added": "128",
+      "deleted": "0",
+      "path": "packages/opencode/test/cli/tui/pair.test.ts"
+    },
+    {
+      "added": "29",
+      "deleted": "0",
+      "path": "packages/opencode/test/cli/tui/service-tier.test.ts"
+    },
+    {
+      "added": "125",
+      "deleted": "0",
+      "path": "packages/opencode/test/cli/tui/session-search.test.ts"
+    },
+    {
+      "added": "56",
+      "deleted": "0",
+      "path": "packages/opencode/test/cli/tui/tool-code.test.tsx"
+    },
+    {
+      "added": "46",
+      "deleted": "0",
+      "path": "packages/opencode/test/cli/tui/tool-input.test.ts"
+    },
+    {
+      "added": "15",
+      "deleted": "0",
+      "path": "packages/opencode/test/cli/tui/transcript.test.ts"
+    },
+    {
+      "added": "577",
+      "deleted": "0",
+      "path": "packages/opencode/test/cli/tui/ultrafast.test.tsx"
+    },
+    {
+      "added": "121",
+      "deleted": "0",
+      "path": "packages/opencode/test/cli/tui/worker-fetch.test.ts"
+    },
+    {
+      "added": "75",
+      "deleted": "0",
+      "path": "packages/opencode/test/cli/yolo-forever.test.ts"
+    },
+    {
+      "added": "105",
+      "deleted": "0",
+      "path": "packages/opencode/test/command.test.ts"
+    },
+    {
+      "added": "77",
+      "deleted": "1",
+      "path": "packages/opencode/test/effect/runtime-flags.test.ts"
+    },
+    {
+      "added": "111",
+      "deleted": "1",
+      "path": "packages/opencode/test/file/ripgrep.test.ts"
+    },
+    {
+      "added": "44",
+      "deleted": "0",
+      "path": "packages/opencode/test/memory/memory.test.ts"
+    },
+    {
+      "added": "210",
+      "deleted": "0",
+      "path": "packages/opencode/test/permission/next.test.ts"
+    },
+    {
+      "added": "283",
+      "deleted": "1",
+      "path": "packages/opencode/test/plugin/codex.test.ts"
+    },
+    {
+      "added": "6",
+      "deleted": "0",
+      "path": "packages/opencode/test/preload.ts"
+    },
+    {
+      "added": "276",
+      "deleted": "2",
+      "path": "packages/opencode/test/provider/amazon-bedrock.test.ts"
+    },
+    {
+      "added": "151",
+      "deleted": "0",
+      "path": "packages/opencode/test/provider/azure-ultrafast.test.ts"
+    },
+    {
+      "added": "313",
+      "deleted": "0",
+      "path": "packages/opencode/test/provider/openai-ultrafast.test.ts"
+    },
+    {
+      "added": "231",
+      "deleted": "0",
+      "path": "packages/opencode/test/provider/provider.test.ts"
+    },
+    {
+      "added": "101",
+      "deleted": "0",
+      "path": "packages/opencode/test/provider/request-latency.test.ts"
+    },
+    {
+      "added": "580",
+      "deleted": "3",
+      "path": "packages/opencode/test/provider/transform.test.ts"
+    },
+    {
+      "added": "9",
+      "deleted": "0",
+      "path": "packages/opencode/test/server/auth.test.ts"
+    },
+    {
+      "added": "51",
+      "deleted": "0",
+      "path": "packages/opencode/test/server/fake-tunnel.ts"
+    },
+    {
+      "added": "97",
+      "deleted": "3",
+      "path": "packages/opencode/test/server/httpapi-authorization.test.ts"
+    },
+    {
+      "added": "3",
+      "deleted": "4",
+      "path": "packages/opencode/test/server/httpapi-compression.test.ts"
+    },
+    {
+      "added": "42",
+      "deleted": "1",
+      "path": "packages/opencode/test/server/httpapi-event.test.ts"
+    },
+    {
+      "added": "12",
+      "deleted": "5",
+      "path": "packages/opencode/test/server/httpapi-exercise/backend.ts"
+    },
+    {
+      "added": "618",
+      "deleted": "3",
+      "path": "packages/opencode/test/server/httpapi-exercise/index.ts"
+    },
+    {
+      "added": "4",
+      "deleted": "1",
+      "path": "packages/opencode/test/server/httpapi-exercise/runner.ts"
+    },
+    {
+      "added": "8",
+      "deleted": "0",
+      "path": "packages/opencode/test/server/httpapi-exercise/types.ts"
+    },
+    {
+      "added": "40",
+      "deleted": "0",
+      "path": "packages/opencode/test/server/httpapi-listen.test.ts"
+    },
+    {
+      "added": "23",
+      "deleted": "0",
+      "path": "packages/opencode/test/server/httpapi-provider.test.ts"
+    },
+    {
+      "added": "138",
+      "deleted": "0",
+      "path": "packages/opencode/test/server/httpapi-remote.test.ts"
+    },
+    {
+      "added": "142",
+      "deleted": "0",
+      "path": "packages/opencode/test/server/httpapi-sdk.test.ts"
+    },
+    {
+      "added": "120",
+      "deleted": "4",
+      "path": "packages/opencode/test/server/httpapi-session.test.ts"
+    },
+    {
+      "added": "44",
+      "deleted": "0",
+      "path": "packages/opencode/test/server/httpapi-ui.test.ts"
+    },
+    {
+      "added": "85",
+      "deleted": "0",
+      "path": "packages/opencode/test/server/pairing-state.test.ts"
+    },
+    {
+      "added": "230",
+      "deleted": "0",
+      "path": "packages/opencode/test/server/pairing.test.ts"
+    },
+    {
+      "added": "198",
+      "deleted": "0",
+      "path": "packages/opencode/test/server/remote-access.test.ts"
+    },
+    {
+      "added": "114",
+      "deleted": "0",
+      "path": "packages/opencode/test/server/session-warm-cancel.test.ts"
+    },
+    {
+      "added": "133",
+      "deleted": "0",
+      "path": "packages/opencode/test/server/sse-retention-bench.test.ts"
+    },
+    {
+      "added": "170",
+      "deleted": "0",
+      "path": "packages/opencode/test/server/sse-retention.test.ts"
+    },
+    {
+      "added": "59",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/agent-benchmark.test.ts"
+    },
+    {
+      "added": "338",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/ai-sdk-single-consumer.test.ts"
+    },
+    {
+      "added": "62",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/auxiliary.test.ts"
+    },
+    {
+      "added": "226",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/bedrock-retry-llm.test.ts"
+    },
+    {
+      "added": "618",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/bedrock-retry-processor.test.ts"
+    },
+    {
+      "added": "1184",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/bedrock-retry.test.ts"
+    },
+    {
+      "added": "601",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/codex-session.test.ts"
+    },
+    {
+      "added": "74",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/collaboration.test.ts"
+    },
+    {
+      "added": "86",
+      "deleted": "164",
+      "path": "packages/opencode/test/session/compaction.test.ts"
+    },
+    {
+      "added": "443",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/eager-tool-cancellation.test.ts"
+    },
+    {
+      "added": "292",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/goal-driver.test.ts"
+    },
+    {
+      "added": "623",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/goal-interruption.test.ts"
+    },
+    {
+      "added": "231",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/llm-codex-transport.test.ts"
+    },
+    {
+      "added": "386",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/llm-concurrency.test.ts"
+    },
+    {
+      "added": "693",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/llm-continuation.test.ts"
+    },
+    {
+      "added": "342",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/llm-fast-path.test.ts"
+    },
+    {
+      "added": "60",
+      "deleted": "6",
+      "path": "packages/opencode/test/session/llm-native-recorded.test.ts"
+    },
+    {
+      "added": "111",
+      "deleted": "6",
+      "path": "packages/opencode/test/session/llm-native.test.ts"
+    },
+    {
+      "added": "271",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/llm-request-cache.test.ts"
+    },
+    {
+      "added": "226",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/llm-request.test.ts"
+    },
+    {
+      "added": "694",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/llm-warm.test.ts"
+    },
+    {
+      "added": "268",
+      "deleted": "65",
+      "path": "packages/opencode/test/session/llm.test.ts"
+    },
+    {
+      "added": "220",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/mcp-output-memory.test.ts"
+    },
+    {
+      "added": "259",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/message-history.test.ts"
+    },
+    {
+      "added": "61",
+      "deleted": "1",
+      "path": "packages/opencode/test/session/messages-pagination.test.ts"
+    },
+    {
+      "added": "134",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/metaagent.test.ts"
+    },
+    {
+      "added": "421",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/opencode-session.test.ts"
+    },
+    {
+      "added": "570",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/parallel-tool-benchmark.test.ts"
+    },
+    {
+      "added": "1046",
+      "deleted": "8",
+      "path": "packages/opencode/test/session/processor-effect.test.ts"
+    },
+    {
+      "added": "1119",
+      "deleted": "7",
+      "path": "packages/opencode/test/session/prompt.test.ts"
+    },
+    {
+      "added": "468",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/provider-error-retry.test.ts"
+    },
+    {
+      "added": "27",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/queued-message.test.ts"
+    },
+    {
+      "added": "217",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/reasoning-reviewer.test.ts"
+    },
+    {
+      "added": "200",
+      "deleted": "3",
+      "path": "packages/opencode/test/session/retry.test.ts"
+    },
+    {
+      "added": "25",
+      "deleted": "1",
+      "path": "packages/opencode/test/session/revert-compact.test.ts"
+    },
+    {
+      "added": "14",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/schema-decoding.test.ts"
+    },
+    {
+      "added": "258",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/search.test.ts"
+    },
+    {
+      "added": "27",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/service-tier-adapter.test.ts"
+    },
+    {
+      "added": "104",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/session-reference.test.ts"
+    },
+    {
+      "added": "95",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/session.test.ts"
+    },
+    {
+      "added": "90",
+      "deleted": "1",
+      "path": "packages/opencode/test/session/snapshot-tool-race.test.ts"
+    },
+    {
+      "added": "196",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/summary.test.ts"
+    },
+    {
+      "added": "12",
+      "deleted": "1",
+      "path": "packages/opencode/test/session/system.test.ts"
+    },
+    {
+      "added": "791",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/timing-persistence.test.ts"
+    },
+    {
+      "added": "677",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/timing-store.test.ts"
+    },
+    {
+      "added": "595",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/timing.test.ts"
+    },
+    {
+      "added": "112",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/tool-snapshot-barrier.test.ts"
+    },
+    {
+      "added": "119",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/tool-timing.test.ts"
+    },
+    {
+      "added": "227",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/ultrafast.test.ts"
+    },
+    {
+      "added": "321",
+      "deleted": "0",
+      "path": "packages/opencode/test/session/usage.test.ts"
+    },
+    {
+      "added": "239",
+      "deleted": "0",
+      "path": "packages/opencode/test/shell/process.test.ts"
+    },
+    {
+      "added": "60",
+      "deleted": "0",
+      "path": "packages/opencode/test/snapshot/snapshot.test.ts"
+    },
+    {
+      "added": "82",
+      "deleted": "1",
+      "path": "packages/opencode/test/storage/db.test.ts"
+    },
+    {
+      "added": "40",
+      "deleted": "3",
+      "path": "packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap"
+    },
+    {
+      "added": "411",
+      "deleted": "0",
+      "path": "packages/opencode/test/tool/collaboration.test.ts"
+    },
+    {
+      "added": "780",
+      "deleted": "0",
+      "path": "packages/opencode/test/tool/file-mutation.test.ts"
+    },
+    {
+      "added": "342",
+      "deleted": "1",
+      "path": "packages/opencode/test/tool/grep.test.ts"
+    },
+    {
+      "added": "149",
+      "deleted": "0",
+      "path": "packages/opencode/test/tool/hooks.test.ts"
+    },
+    {
+      "added": "45",
+      "deleted": "0",
+      "path": "packages/opencode/test/tool/metaagent.test.ts"
+    },
+    {
+      "added": "16",
+      "deleted": "0",
+      "path": "packages/opencode/test/tool/parameters.test.ts"
+    },
+    {
+      "added": "787",
+      "deleted": "0",
+      "path": "packages/opencode/test/tool/read-many.test.ts"
+    },
+    {
+      "added": "92",
+      "deleted": "22",
+      "path": "packages/opencode/test/tool/registry.test.ts"
+    },
+    {
+      "added": "364",
+      "deleted": "0",
+      "path": "packages/opencode/test/tool/session-reference-read.test.ts"
+    },
+    {
+      "added": "453",
+      "deleted": "0",
+      "path": "packages/opencode/test/tool/shell-background.test.ts"
+    },
+    {
+      "added": "226",
+      "deleted": "0",
+      "path": "packages/opencode/test/tool/shell-timing.test.ts"
+    },
+    {
+      "added": "173",
+      "deleted": "1",
+      "path": "packages/opencode/test/tool/shell.test.ts"
+    },
+    {
+      "added": "691",
+      "deleted": "0",
+      "path": "packages/opencode/test/tool/task-model-selection.test.ts"
+    },
+    {
+      "added": "431",
+      "deleted": "32",
+      "path": "packages/opencode/test/tool/task.test.ts"
+    },
+    {
+      "added": "154",
+      "deleted": "4",
+      "path": "packages/opencode/test/tool/task_status.test.ts"
+    },
+    {
+      "added": "38",
+      "deleted": "0",
+      "path": "packages/opencode/test/tool/truncation.test.ts"
+    },
+    {
+      "added": "332",
+      "deleted": "0",
+      "path": "packages/opencode/test/tool/workflow.test.ts"
+    },
+    {
+      "added": "269",
+      "deleted": "0",
+      "path": "packages/opencode/test/workflow/engine.test.ts"
+    },
+    {
+      "added": "73",
+      "deleted": "0",
+      "path": "packages/opencode/test/workflow/finding.test.ts"
+    },
+    {
+      "added": "20",
+      "deleted": "1",
+      "path": "packages/plugin/src/index.ts"
+    },
+    {
+      "added": "210",
+      "deleted": "0",
+      "path": "packages/remote/README.md"
+    },
+    {
+      "added": "20",
+      "deleted": "0",
+      "path": "packages/remote/app/index.html"
+    },
+    {
+      "added": "28",
+      "deleted": "0",
+      "path": "packages/remote/app/package.json"
+    },
+    {
+      "added": "129",
+      "deleted": "0",
+      "path": "packages/remote/app/src/connect.tsx"
+    },
+    {
+      "added": "38",
+      "deleted": "0",
+      "path": "packages/remote/app/src/entry.tsx"
+    },
+    {
+      "added": "45",
+      "deleted": "0",
+      "path": "packages/remote/app/src/platform.ts"
+    },
+    {
+      "added": "42",
+      "deleted": "0",
+      "path": "packages/remote/app/src/tunnel-state.ts"
+    },
+    {
+      "added": "342",
+      "deleted": "0",
+      "path": "packages/remote/app/src/tunnel.ts"
+    },
+    {
+      "added": "65",
+      "deleted": "0",
+      "path": "packages/remote/app/src/websocket-stub.ts"
+    },
+    {
+      "added": "237",
+      "deleted": "0",
+      "path": "packages/remote/app/transport-check.ts"
+    },
+    {
+      "added": "23",
+      "deleted": "0",
+      "path": "packages/remote/app/tsconfig.json"
+    },
+    {
+      "added": "23",
+      "deleted": "0",
+      "path": "packages/remote/app/vite.config.ts"
+    },
+    {
+      "added": "24",
+      "deleted": "0",
+      "path": "packages/remote/package.json"
+    },
+    {
+      "added": "45",
+      "deleted": "0",
+      "path": "packages/remote/src/caffeinate.ts"
+    },
+    {
+      "added": "514",
+      "deleted": "0",
+      "path": "packages/remote/src/e2e.test.ts"
+    },
+    {
+      "added": "239",
+      "deleted": "0",
+      "path": "packages/remote/src/host.ts"
+    },
+    {
+      "added": "86",
+      "deleted": "0",
+      "path": "packages/remote/src/protocol.ts"
+    },
+    {
+      "added": "300",
+      "deleted": "0",
+      "path": "packages/remote/src/relay.ts"
+    },
+    {
+      "added": "13",
+      "deleted": "0",
+      "path": "packages/remote/tsconfig.json"
+    },
+    {
+      "added": "46",
+      "deleted": "0",
+      "path": "packages/remote/web/README.md"
+    },
+    {
+      "added": "142",
+      "deleted": "0",
+      "path": "packages/remote/web/bun.lock"
+    },
+    {
+      "added": "130",
+      "deleted": "0",
+      "path": "packages/remote/web/index.html"
+    },
+    {
+      "added": "221",
+      "deleted": "0",
+      "path": "packages/remote/web/integration-check.ts"
+    },
+    {
+      "added": "17",
+      "deleted": "0",
+      "path": "packages/remote/web/package.json"
+    },
+    {
+      "added": "242",
+      "deleted": "0",
+      "path": "packages/remote/web/smoke-test.ts"
+    },
+    {
+      "added": "392",
+      "deleted": "0",
+      "path": "packages/remote/web/src/api.ts"
+    },
+    {
+      "added": "337",
+      "deleted": "0",
+      "path": "packages/remote/web/src/chat.ts"
+    },
+    {
+      "added": "240",
+      "deleted": "0",
+      "path": "packages/remote/web/src/format.ts"
+    },
+    {
+      "added": "620",
+      "deleted": "0",
+      "path": "packages/remote/web/src/main.ts"
+    },
+    {
+      "added": "1021",
+      "deleted": "0",
+      "path": "packages/remote/web/src/styles.css"
+    },
+    {
+      "added": "342",
+      "deleted": "0",
+      "path": "packages/remote/web/src/tunnel.ts"
+    },
+    {
+      "added": "26",
+      "deleted": "0",
+      "path": "packages/remote/web/tsconfig.json"
+    },
+    {
+      "added": "7",
+      "deleted": "0",
+      "path": "packages/remote/web/vite.config.ts"
+    },
+    {
+      "added": "642",
+      "deleted": "3",
+      "path": "packages/sdk/js/src/v2/gen/sdk.gen.ts"
+    },
+    {
+      "added": "964",
+      "deleted": "10",
+      "path": "packages/sdk/js/src/v2/gen/types.gen.ts"
+    },
+    {
+      "added": "25",
+      "deleted": "0",
+      "path": "packages/tunnel/package.json"
+    },
+    {
+      "added": "143",
+      "deleted": "0",
+      "path": "packages/tunnel/src/index.ts"
+    },
+    {
+      "added": "170",
+      "deleted": "0",
+      "path": "packages/tunnel/test/tunnel.test.ts"
+    },
+    {
+      "added": "7",
+      "deleted": "0",
+      "path": "packages/tunnel/tsconfig.json"
+    },
+    {
+      "added": "104",
+      "deleted": "88",
+      "path": "packages/ui/src/components/message-part.tsx"
+    },
+    {
+      "added": "4",
+      "deleted": "1",
+      "path": "packages/ui/src/components/provider-icon.tsx"
+    },
+    {
+      "added": "117",
+      "deleted": "14",
+      "path": "packages/web/src/content/docs/cli.mdx"
+    },
+    {
+      "added": "1",
+      "deleted": "1",
+      "path": "packages/web/src/content/docs/config.mdx"
+    },
+    {
+      "added": "21",
+      "deleted": "1",
+      "path": "packages/web/src/content/docs/keybinds.mdx"
+    },
+    {
+      "added": "7",
+      "deleted": "8",
+      "path": "packages/web/src/content/docs/providers.mdx"
+    },
+    {
+      "added": "19",
+      "deleted": "0",
+      "path": "packages/web/src/content/docs/tools.mdx"
+    },
+    {
+      "added": "23",
+      "deleted": "0",
+      "path": "packages/web/src/content/docs/tui.mdx"
+    },
+    {
+      "added": "10",
+      "deleted": "0",
+      "path": "packages/web/src/content/docs/web.mdx"
+    },
+    {
+      "added": "47",
+      "deleted": "0",
+      "path": "patches/@ai-sdk%2Famazon-bedrock@4.0.112.patch"
+    },
+    {
+      "added": "684",
+      "deleted": "0",
+      "path": "patches/@ai-sdk%2Fopenai@3.0.48.patch"
+    },
+    {
+      "added": "664",
+      "deleted": "0",
+      "path": "patches/@ai-sdk%2Fopenai@3.0.53.patch"
+    },
+    {
+      "added": "684",
+      "deleted": "0",
+      "path": "patches/@ai-sdk%2Fopenai@3.0.67.patch"
+    },
+    {
+      "added": "206",
+      "deleted": "0",
+      "path": "patches/ai@6.0.168.patch"
+    },
+    {
+      "added": "613",
+      "deleted": "0",
+      "path": "perf/agent-improvement-roadmap.md"
+    },
+    {
+      "added": "161",
+      "deleted": "0",
+      "path": "perf/anthropic-latency-2026-10-21.md"
+    },
+    {
+      "added": "95",
+      "deleted": "0",
+      "path": "perf/bedrock-astra.md"
+    },
+    {
+      "added": "185",
+      "deleted": "0",
+      "path": "perf/bedrock-report-regions.md"
+    },
+    {
+      "added": "169",
+      "deleted": "0",
+      "path": "perf/bedrock-sol61-report.md"
+    },
+    {
+      "added": "109",
+      "deleted": "0",
+      "path": "perf/harness.md"
+    },
+    {
+      "added": "159",
+      "deleted": "0",
+      "path": "perf/infrastructure-latency-2026-10-08.md"
+    },
+    {
+      "added": "90",
+      "deleted": "0",
+      "path": "perf/local-timing.md"
+    },
+    {
+      "added": "142",
+      "deleted": "0",
+      "path": "perf/local-warming-2026-10-08.md"
+    },
+    {
+      "added": "140",
+      "deleted": "0",
+      "path": "perf/memory-retention.md"
+    },
+    {
+      "added": "136",
+      "deleted": "0",
+      "path": "perf/p1-completion-2026-10-08.md"
+    },
+    {
+      "added": "146",
+      "deleted": "0",
+      "path": "perf/parallel-tools-2026-10-08.md"
+    },
+    {
+      "added": "227",
+      "deleted": "0",
+      "path": "perf/sol-astra-latency-2026-10-08.md"
+    },
+    {
+      "added": "182",
+      "deleted": "0",
+      "path": "perf/sol-astra-latency-fixes-2026-10-08.md"
+    }
+  ]
+}

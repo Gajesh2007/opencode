@@ -28,6 +28,9 @@ export function fromRow(row: typeof SessionTable.$inferSelect): SessionSchema.In
           id: Model.ID.make(row.model.id),
           providerID: Provider.ID.make(row.model.providerID),
           variant: Model.VariantID.make(row.model.variant ?? "default"),
+          serviceTier: row.model.serviceTier,
+          upstream: row.model.upstream,
+          reasoningMode: row.model.reasoningMode,
         }
       : undefined,
     cost: Money.USD.make(row.cost),

@@ -9,6 +9,7 @@ import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNodePlatform } from "@opencode/core/effect/app-node-platform"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Global } from "@opencode/util/global"
+import { FSUtil } from "@opencode/util/fs-util"
 import { makeGlobalNode, makeLocationNode } from "@opencode/util/effect/app-node"
 import { Database } from "@opencode/core/database/database"
 import { Bus } from "@opencode/core/bus"
@@ -22,6 +23,12 @@ import { Job } from "@opencode/core/job"
 import { KV } from "@opencode/core/kv"
 import { LocationServiceMap } from "@opencode/core/location-service-map"
 import { Session } from "@opencode/core/session"
+import { Collaboration } from "@opencode/core/collaboration"
+import { Team } from "@opencode/core/team"
+import { Worktree } from "@opencode/core/worktree"
+import { SubagentModel } from "@opencode/core/subagent-model"
+import { initRepo } from "./fixture/git"
+import { SubagentLimit } from "@opencode/core/subagent-limit"
 import { SessionEvent } from "@opencode/core/session/event"
 import { SessionExecution } from "@opencode/core/session/execution"
 import { SessionRestart } from "@opencode/core/session/execution/restart"
@@ -35,6 +42,8 @@ import { PluginHooks } from "@opencode/core/plugin/hooks"
 import { PluginSupervisor } from "@opencode/core/plugin/supervisor"
 import { Permission } from "@opencode/core/permission"
 import { SubagentTool } from "@opencode/core/tool/plugin/subagent"
+import { WorkflowPlugin } from "@opencode/core/plugin/workflow"
+import { SubagentCompatPlugin } from "@opencode/core/plugin/subagent-compat"
 import { Tool } from "@opencode/core/tool"
 import { tmpdir } from "./fixture/tmpdir"
 import { tempGlobalLayer } from "./fixture/global"
@@ -118,6 +127,10 @@ const subagentPluginSupervisor = makeLocationNode({
     Effect.gen(function* () {
       const hooks = yield* PluginHooks.Service
       yield* registerToolPlugin(SubagentTool.Plugin, {}, (name, callback) => hooks.register("tool", name, callback))
+      yield* registerToolPlugin(WorkflowPlugin.Plugin, {}, (name, callback) => hooks.register("tool", name, callback))
+      yield* registerToolPlugin(SubagentCompatPlugin.Plugin, {}, (name, callback) =>
+        hooks.register("tool", name, callback),
+      )
     }),
   ),
   deps: [
@@ -128,12 +141,22 @@ const subagentPluginSupervisor = makeLocationNode({
     Session.node,
     Job.node,
     SubagentJob.node,
+    Collaboration.node,
+    Team.node,
+    Worktree.node,
+    SubagentLimit.node,
+    SubagentModel.node,
     Tool.node,
     PluginHooks.node,
+    FSUtil.node,
+    Global.node,
   ],
 })
 
 const nodes = LayerNode.group([
+  FSUtil.node,
+  Collaboration.node,
+  SubagentModel.node,
   Database.node,
   Bus.node,
   Job.node,
@@ -208,6 +231,243 @@ const withSubagent = (location: Location.Ref) =>
   })
 
 describe("SubagentTool", () => {
+  productionIt.live("reads several files through the native permission-aware read tool", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          const sessions = yield* Session.Service
+          const parent = yield* sessions.create({ location: { directory: AbsolutePath.make(dir.path) } })
+          yield* withSubagent(parent.location)
+          const fs = yield* FSUtil.Service
+          yield* fs.writeWithDirs(path.join(dir.path, "one.txt"), "first file")
+          yield* fs.writeWithDirs(path.join(dir.path, "two.txt"), "second file")
+          const locations = yield* LocationServiceMap.Service
+          const registry = yield* Tool.Service.pipe(Effect.provide(locations.get(parent.location)))
+          const result = yield* executeTool(registry, {
+            sessionID: parent.id,
+            ...toolIdentity,
+            call: {
+              type: "tool-call",
+              id: "call-read-many",
+              name: "read_many",
+              input: { files: [{ path: "one.txt" }, { path: "two.txt" }] },
+            },
+          })
+          expect(result.status).toBe("completed")
+          expect(JSON.stringify(result.content)).toContain("first file")
+          expect(JSON.stringify(result.content)).toContain("second file")
+        }),
+      ),
+    ),
+  )
+
+  it.live("places a named child in a fresh git worktree", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(() => initRepo(dir.path))
+          const sessions = yield* Session.Service
+          const parent = yield* sessions.create({ location: { directory: AbsolutePath.make(dir.path) } })
+          yield* withSubagent(parent.location)
+          const locations = yield* LocationServiceMap.Service
+          const registry = yield* Tool.Service.pipe(Effect.provide(locations.get(parent.location)))
+          const result = yield* executeTool(registry, {
+            sessionID: parent.id,
+            ...toolIdentity,
+            call: {
+              type: "tool-call",
+              id: "call-worktree",
+              name: "spawn_agent",
+              input: { task_name: "isolated", message: "Review in isolation", agent_type: "reviewer", worktree: true },
+            },
+          })
+          expect(result.status).toBe("completed")
+          const child = yield* sessions.get(outputSessionID(result.metadata))
+          expect(child.parentID).toBe(parent.id)
+          expect(child.location.directory).not.toBe(parent.location.directory)
+          expect((yield* sessions.get(parent.id)).location).toEqual(parent.location)
+          const fs = yield* FSUtil.Service
+          expect(yield* fs.exists(path.join(child.location.directory, ".git"))).toBe(true)
+        }),
+      ),
+    ),
+  )
+
+  it.live("applies persistent subagent model overrides before inherited defaults", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          const sessions = yield* Session.Service
+          const defaults = yield* SubagentModel.Service
+          const parent = yield* sessions.create({
+            location: { directory: AbsolutePath.make(dir.path) },
+            model: parentModel,
+          })
+          yield* withSubagent(parent.location)
+          yield* defaults.set("reviewer", { ...overrideModel, serviceTier: "priority" })
+          const locations = yield* LocationServiceMap.Service
+          const registry = yield* Tool.Service.pipe(Effect.provide(locations.get(parent.location)))
+          const result = yield* executeTool(registry, {
+            sessionID: parent.id,
+            ...toolIdentity,
+            call: {
+              type: "tool-call",
+              id: "call-default",
+              name: "spawn_agent",
+              input: { task_name: "configured", message: "Review", agent_type: "reviewer" },
+            },
+          })
+          expect((yield* sessions.get(outputSessionID(result.metadata))).model).toMatchObject({
+            ...overrideModel,
+            serviceTier: "priority",
+          })
+        }),
+      ),
+    ),
+  )
+
+  it.live("spawns a named child and inherits independent routing choices", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          const sessions = yield* Session.Service
+          const parent = yield* sessions.create({
+            location: { directory: AbsolutePath.make(dir.path) },
+            model: { ...parentModel, serviceTier: "priority", upstream: "openai" },
+          })
+          yield* withSubagent(parent.location)
+          const locations = yield* LocationServiceMap.Service
+          const registry = yield* Tool.Service.pipe(Effect.provide(locations.get(parent.location)))
+          const result = yield* executeTool(registry, {
+            sessionID: parent.id,
+            ...toolIdentity,
+            call: {
+              type: "tool-call",
+              id: "call-named-spawn",
+              name: "spawn_agent",
+              input: { task_name: "review", message: "Review the implementation", agent_type: "reviewer" },
+            },
+          })
+          const child = yield* sessions.get(outputSessionID(result.metadata))
+          expect(child.parentID).toBe(parent.id)
+          expect(child.model).toMatchObject({ ...childModel, serviceTier: "priority", upstream: "openai" })
+          const collaboration = yield* Collaboration.Service
+          expect((yield* collaboration.resolve(parent.id, "review")).session.id).toBe(child.id)
+        }),
+      ),
+    ),
+  )
+
+  it.live("runs the workflow grid through child sessions and persists its report", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          const sessions = yield* Session.Service
+          const root = yield* sessions.create({
+            location: Location.Ref.make({ directory: AbsolutePath.make(dir.path) }),
+          })
+          const parent = yield* sessions.create({ parentID: root.id })
+          yield* withSubagent(parent.location)
+          const locations = yield* LocationServiceMap.Service
+          const registry = yield* Tool.Service.pipe(Effect.provide(locations.get(parent.location)))
+          const result = yield* executeTool(registry, {
+            sessionID: parent.id,
+            ...toolIdentity,
+            call: {
+              type: "tool-call",
+              id: "call-workflow",
+              name: "workflow",
+              input: {
+                description: "Review both files",
+                units: [{ id: "a.ts" }, { id: "b.ts", context: "changed" }],
+                passes: [
+                  { name: "logic", agent: "reviewer", prompt: "Review {unit_id}: {unit_context}" },
+                  { name: "style", agent: "reviewer", prompt: "Review {unit_id}" },
+                ],
+                synthesis: { agent: "reviewer", prompt: "Combine the results" },
+                concurrency: 2,
+              },
+            },
+          })
+          expect(result.status).toBe("completed")
+          expect(result.metadata).toMatchObject({ cells: 4, completed: 4, phase: "done" })
+          const children = yield* sessions.list({ parentID: parent.id, limit: 10 })
+          expect(children.data).toHaveLength(5)
+          const fs = yield* FSUtil.Service
+          const artifact = Schema.decodeUnknownSync(Schema.Struct({ artifacts: Schema.String }))(
+            result.metadata,
+          ).artifacts
+          expect(yield* fs.readFileString(path.join(artifact, "report.md"))).toContain(
+            "Coverage: complete (4/4 cells).",
+          )
+          expect(yield* fs.readFileString(path.join(artifact, "outcomes.json"))).toContain("child final response")
+        }),
+      ),
+    ),
+  )
+
+  completionIt.live("keeps completion in the inbox when its parent was stopped", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          const sessions = yield* Session.Service
+          const parent = yield* sessions.create({
+            location: Location.Ref.make({ directory: AbsolutePath.make(dir.path) }),
+            model: parentModel,
+          })
+          yield* withSubagent(parent.location)
+          const bus = yield* Bus.Service
+          yield* bus.publish(SessionEvent.Execution.Interrupted, { sessionID: parent.id, reason: "user" })
+          const locations = yield* LocationServiceMap.Service
+          const registry = yield* Tool.Service.pipe(Effect.provide(locations.get(parent.location)))
+          const admitted = yield* bus.subscribe(SessionEvent.InboxEnqueued).pipe(
+            Stream.filter((event) => event.data.sessionID === parent.id && event.data.item.type === "synthetic"),
+            Stream.take(1),
+            Stream.runCollect,
+            Effect.forkScoped({ startImmediately: true }),
+          )
+          yield* executeTool(registry, {
+            sessionID: parent.id,
+            ...toolIdentity,
+            call: {
+              type: "tool-call",
+              id: "call-stopped-parent",
+              name: SubagentTool.name,
+              input: { agent: "reviewer", description: "background review", prompt: "review", background: true },
+            },
+          })
+          yield* Fiber.join(admitted)
+          const jobs = yield* Job.Service
+          yield* jobs.pendingBackground.pipe(Effect.repeat({ until: (pending) => pending.length === 0 }))
+          yield* sessions.wait(parent.id)
+          expect(yield* sessions.context(parent.id)).toEqual([
+            expect.objectContaining({ type: "idle", outcome: "interrupted" }),
+          ])
+          expect(yield* sessions.inbox(parent.id)).toHaveLength(1)
+          expect((yield* sessions.get(parent.id)).outcome).toBe("interrupted")
+        }),
+      ),
+    ),
+  )
+
   completionIt.live("admits one durable completion across live delivery and restart replay", () =>
     Effect.acquireRelease(
       Effect.promise(() => tmpdir()),

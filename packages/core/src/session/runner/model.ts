@@ -84,7 +84,7 @@ const layer = Layer.effect(
           const resolved = preferred
             ? yield* resolver.resolveModel(preferred, agent.variant)
             : yield* resolver.resolve()
-          if (resolved) return resolved
+          if (resolved) return { ...resolved, ref: { ...resolved.ref, ...agent } }
           return yield* new ModelNotSelectedError({ sessionID: session.id })
         }
         const selected = (yield* available()).find(
@@ -95,7 +95,16 @@ const layer = Layer.effect(
             providerID: session.model.providerID,
             modelID: session.model.id,
           })
-        return yield* resolver.resolveModel(selected, session.model.variant)
+        const resolved = yield* resolver.resolveModel(selected, session.model.variant)
+        return {
+          ...resolved,
+          ref: {
+            ...resolved.ref,
+            serviceTier: session.model.serviceTier,
+            upstream: session.model.upstream,
+            reasoningMode: session.model.reasoningMode,
+          },
+        }
       }),
     })
   }),

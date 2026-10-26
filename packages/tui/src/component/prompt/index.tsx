@@ -1242,6 +1242,9 @@ export function Prompt(props: PromptProps) {
           providerID: selection.providerID,
           id: selection.modelID,
           variant,
+          serviceTier: selection.serviceTier,
+          upstream: selection.upstream,
+          reasoningMode: selection.reasoningMode,
         },
       })
       if (newSessionID !== undefined) created.request.catch(() => args.restoreNewSessionID(newSessionID))
@@ -1287,7 +1290,14 @@ export function Prompt(props: PromptProps) {
       }
     }
     const commitModel = () => {
-      const model = { providerID: selection.providerID, id: selection.modelID, variant }
+      const model = {
+        providerID: selection.providerID,
+        id: selection.modelID,
+        variant,
+        serviceTier: selection.serviceTier,
+        upstream: selection.upstream,
+        reasoningMode: selection.reasoningMode,
+      }
       const cancelCommit = local.model.trackSessionCommit(target, model, agent.id)
       return client.api.session.switchModel({ sessionID: target, model }).catch((error) => {
         cancelCommit()

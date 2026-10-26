@@ -287,6 +287,7 @@ export const coreFields = {
     Schema.Struct({
       effort: Schema.optional(OpenResponsesOptions.ReasoningEffort),
       summary: Schema.optional(Schema.Literals(["auto", "concise", "detailed"])),
+      mode: Schema.optional(Schema.String),
     }),
   ),
   text: Schema.optional(
@@ -596,10 +597,7 @@ const lowerToolResultOutput = Effect.fnUntraced(function* (
 
 const DEFAULT_EFFORT = "medium"
 
-const lowerMessages = Effect.fnUntraced(function* (
-  request: LLMRequest,
-  adapter: ProviderAdapter,
-) {
+const lowerMessages = Effect.fnUntraced(function* (request: LLMRequest, adapter: ProviderAdapter) {
   const input: OpenResponsesInputItem[] = []
   const providerMetadataKey = metadataKey(request.model)
 
@@ -759,10 +757,7 @@ const lowerMessages = Effect.fnUntraced(function* (
   return input
 })
 
-export const lowerConversation = Effect.fnUntraced(function* (
-  request: LLMRequest,
-  adapter: ProviderAdapter,
-) {
+export const lowerConversation = Effect.fnUntraced(function* (request: LLMRequest, adapter: ProviderAdapter) {
   const instructions = ProviderShared.joinText(request.system)
   return {
     model: request.model.id,
@@ -791,8 +786,14 @@ export const lowerGeneration = (request: LLMRequest, options = OpenResponsesOpti
     ...(options.topLogprobs !== undefined ? { top_logprobs: options.topLogprobs } : {}),
     ...(cacheKey ? { prompt_cache_key: cacheKey } : {}),
     ...(options.include ? { include: options.include } : {}),
-    ...(options.reasoningEffort || options.reasoningSummary
-      ? { reasoning: { effort: options.reasoningEffort, summary: options.reasoningSummary } }
+    ...(options.reasoningEffort || options.reasoningSummary || options.reasoningMode
+      ? {
+          reasoning: {
+            effort: options.reasoningEffort,
+            summary: options.reasoningSummary,
+            mode: options.reasoningMode,
+          },
+        }
       : {}),
     ...(options.textVerbosity ? { text: { verbosity: options.textVerbosity } } : {}),
     ...(options.serviceTier ? { service_tier: options.serviceTier } : {}),
@@ -1147,10 +1148,7 @@ const onReasoningSummaryPartDone = (state: ParserState, event: Event): StepResul
   ]
 }
 
-const onFunctionCallArgumentsDelta = Effect.fnUntraced(function* (
-  state: ParserState,
-  event: Event,
-) {
+const onFunctionCallArgumentsDelta = Effect.fnUntraced(function* (state: ParserState, event: Event) {
   if (event.item_id === undefined) return [state, NO_EVENTS] satisfies StepResult
   const tool = state.tools[event.item_id]
   if (!tool) return [state, NO_EVENTS] satisfies StepResult
@@ -1178,10 +1176,7 @@ const onFunctionCallArgumentsDelta = Effect.fnUntraced(function* (
   return [{ ...state, lifecycle, tools: result.tools }, events] satisfies StepResult
 })
 
-const onOutputItemDone = Effect.fnUntraced(function* (
-  state: ParserState,
-  item: NormalizedEvent["item"],
-) {
+const onOutputItemDone = Effect.fnUntraced(function* (state: ParserState, item: NormalizedEvent["item"]) {
   if (!item) return [state, NO_EVENTS] satisfies StepResult
 
   if (item.type === "compaction") {

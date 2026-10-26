@@ -1092,6 +1092,51 @@ describe("SessionRestart background recovery", () => {
 })
 
 describe("SessionExecution interrupt continuation", () => {
+  it.effect("preserves a blocking child when the parent is interrupted with continue", () =>
+    Effect.gen(function* () {
+      const database = yield* Database.Service
+      const parent = Session.ID.make("ses_continue_parent")
+      const child = Session.ID.make("ses_continue_child")
+      yield* seedSessions(database, [parent])
+      yield* seedSessions(database, [child], { parent_id: parent })
+      const jobs = yield* Job.Service
+      const running = yield* Deferred.make<void>()
+      const finish = yield* Deferred.make<string>()
+      yield* jobs.start({
+        id: child,
+        type: "subagent",
+        recovery: {
+          kind: "subagent",
+          parentSessionID: parent,
+          childSessionID: child,
+          agent: "general",
+          description: "Keep working",
+        },
+        run: Deferred.await(finish),
+      })
+      const scope = yield* Scope.make()
+      yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
+      const context = yield* buildExecution(scope, () =>
+        Effect.gen(function* () {
+          const blocking = yield* jobs
+            .block({ id: child, sessionID: parent })
+            .pipe(Effect.forkChild({ startImmediately: true }))
+          yield* Deferred.succeed(running, undefined)
+          yield* Fiber.join(blocking)
+        }),
+      )
+      const execution = Context.get(context, SessionExecution.Service)
+      yield* execution.resume(parent).pipe(Effect.forkScoped)
+      yield* Deferred.await(running)
+      yield* execution.interrupt(parent, { resume: true })
+      yield* execution.awaitIdle(parent)
+      expect(yield* jobs.isBackgrounded(child)).toBe(true)
+      expect((yield* jobs.get(child))?.status).toBe("running")
+      yield* Deferred.succeed(finish, "child finished independently")
+      expect((yield* jobs.wait({ id: child })).info?.output).toBe("child finished independently")
+    }),
+  )
+
   it.effect("resumes only steering input after an interrupt with continue", () =>
     Effect.gen(function* () {
       const database = yield* Database.Service

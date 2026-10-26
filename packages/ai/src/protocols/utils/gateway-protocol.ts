@@ -1,6 +1,6 @@
 import { Effect, Option, Schema } from "effect"
 import { Protocol } from "../../route/protocol.js"
-import { LLMEvent, mergeJsonRecords, type AIError, type LLMRequest } from "../../schema/index.js"
+import { LLMEvent, Usage, mergeJsonRecords, type AIError, type LLMRequest } from "../../schema/index.js"
 import { JsonObject, lenient } from "../shared.js"
 
 interface ParserState<Inner> {
@@ -33,9 +33,17 @@ function attachGatewayMetadata(
   events: ReadonlyArray<LLMEvent>,
   gateway: Record<string, unknown> | undefined,
 ): ReadonlyArray<LLMEvent> {
-  if (!gateway || !events.some(LLMEvent.is.finish)) return events
+  if (!gateway) return events
   return events.map((event) =>
-    LLMEvent.is.finish(event) ? { ...event, providerMetadata: { ...event.providerMetadata, gateway } } : event,
+    LLMEvent.is.finish(event) || LLMEvent.is.stepFinish(event)
+      ? {
+          ...event,
+          providerMetadata: { ...event.providerMetadata, gateway },
+          usage: event.usage
+            ? Usage.from({ ...event.usage, providerMetadata: { ...event.usage.providerMetadata, gateway } })
+            : undefined,
+        }
+      : event,
   )
 }
 

@@ -4,6 +4,8 @@ import { Model } from "../model.js"
 import { Permission } from "../permission.js"
 import { Context, Effect, Layer } from "effect"
 import { Agent } from "../agent.js"
+import { AgentMCP } from "../agent-mcp.js"
+import { Mcp } from "../mcp/index.js"
 import { CodeModeInstructions } from "../codemode/instructions.js"
 import { Database } from "../database/database.js"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
@@ -82,6 +84,7 @@ const layer = Layer.effect(
     const location = yield* Location.Service
     const mcpInstructions = yield* McpInstructions.Service
     const mcpTools = yield* McpTool.Service
+    const mcp = yield* Mcp.Service
     const models = yield* SessionRunnerModel.Service
     const request = yield* SessionModelRequest.Service
     const referenceInstructions = yield* ReferenceInstructions.Service
@@ -133,7 +136,11 @@ const layer = Layer.effect(
       const agent = yield* agents.select(session.agent)
       if (!agent.info) return yield* new AgentNotFoundError({ sessionID: session.id, agent: session.agent ?? agent.id })
       // Session permissions narrow discovery the same way they narrow the tool snapshot.
-      const permissions = Permission.merge(agent.info.permissions, session.permissions ?? [])
+      const permissions = Permission.merge(
+        agent.info.permissions,
+        session.permissions ?? [],
+        AgentMCP.permissions(agent.info, yield* mcp.tools()),
+      )
       const loaded = yield* Effect.all(
         {
           tools: registry.snapshot(permissions),
@@ -215,6 +222,7 @@ export const node = makeLocationNode({
     Location.node,
     McpInstructions.node,
     McpTool.node,
+    Mcp.node,
     ReferenceInstructions.node,
     SessionRunnerModel.node,
     SessionModelRequest.node,

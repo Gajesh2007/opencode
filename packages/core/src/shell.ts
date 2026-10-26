@@ -271,6 +271,7 @@ const layer = () =>
             ? undefined
             : ((Schema.is(SessionSchema.ID)(sessionID) ? yield* environments.get(sessionID) : undefined) ?? process.env)
         const invocation: ShellCreateBefore = {
+          ...(Schema.is(SessionSchema.ID)(sessionID) ? { sessionID } : {}),
           command: input.command,
           cwd: input.cwd ?? location.directory,
           timeout: input.timeout ?? 0,

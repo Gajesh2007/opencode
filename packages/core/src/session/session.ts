@@ -111,7 +111,10 @@ export const make = Effect.fn("Session.make")(function* () {
     if (
       session.model?.providerID === input.model.providerID &&
       session.model.id === input.model.id &&
-      (session.model.variant ?? "default") === (input.model.variant ?? "default")
+      (session.model.variant ?? "default") === (input.model.variant ?? "default") &&
+      (session.model.serviceTier ?? "default") === (input.model.serviceTier ?? "default") &&
+      (session.model.upstream ?? "default") === (input.model.upstream ?? "default") &&
+      session.model.reasoningMode === input.model.reasoningMode
     )
       return
     yield* bus.publish(SessionEvent.ModelSelected, { sessionID, model: input.model, previous: session.model })

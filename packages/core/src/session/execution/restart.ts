@@ -141,7 +141,8 @@ export const layer = (options?: Options) =>
         suspended: ReadonlySet<SessionSchema.ID>,
       ) {
         const child = yield* store.get(recovery.childSessionID)
-        if (!child || child.parentID !== recovery.parentSessionID || !(yield* store.get(recovery.parentSessionID))) {
+        const parent = yield* store.get(recovery.parentSessionID)
+        if (!child || child.parentID !== recovery.parentSessionID || !parent) {
           yield* jobs.completeBackground(background.notificationID)
           return
         }
@@ -151,7 +152,7 @@ export const layer = (options?: Options) =>
             ...result,
             recovery,
             notificationID: background.notificationID,
-            resume: suspended.has(recovery.parentSessionID) ? false : undefined,
+            resume: suspended.has(recovery.parentSessionID) || parent.outcome === "interrupted" ? false : undefined,
           }).pipe(Effect.orDie)
         })
 

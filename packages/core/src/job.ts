@@ -131,6 +131,7 @@ export interface Interface {
   readonly block: (input: BlockInput) => Effect.Effect<BlockResult | undefined>
   readonly background: (id: string) => Effect.Effect<Info | undefined>
   readonly backgroundAll: (input: BackgroundAllInput) => Effect.Effect<Info[]>
+  readonly isBackgrounded: (id: string) => Effect.Effect<boolean>
   readonly cancel: (id: string) => Effect.Effect<Info | undefined>
   readonly pendingBackground: Effect.Effect<readonly Background[]>
   readonly runningBackground: Effect.Effect<readonly Recovery[]>
@@ -479,6 +480,8 @@ export const make = Effect.gen(function* () {
     block,
     background,
     backgroundAll,
+    isBackgrounded: (id) =>
+      SynchronizedRef.get(state.jobs).pipe(Effect.map((jobs) => jobs.get(id)?.isBackgrounded === true)),
     cancel,
     pendingBackground,
     runningBackground,

@@ -46,3 +46,24 @@ test("atomically serializes model preference updates", async () => {
     "anthropic/claude/sonnet": "low",
   })
 })
+
+test("persists service tier and upstream separately from reasoning variants", async () => {
+  await using tmp = await tmpdir()
+  const repository = createModelPreferenceRepository(path.join(tmp.path, "model.json"))
+  const model = { providerID: "gateway", modelID: "openai/gpt-6.1-sol" }
+  await Promise.all([
+    repository.saveVariant(model, "max"),
+    repository.saveSelection("serviceTier", model, "priority"),
+    repository.saveSelection("upstream", model, "openai"),
+    repository.saveSelection("reasoningMode", model, "pro"),
+  ])
+  expect(await repository.load()).toMatchObject({
+    variant: { "gateway/openai/gpt-6.1-sol": "max" },
+    serviceTier: { "gateway/openai/gpt-6.1-sol": "priority" },
+    upstream: { "gateway/openai/gpt-6.1-sol": "openai" },
+    reasoningMode: { "gateway/openai/gpt-6.1-sol": "pro" },
+  })
+  await repository.saveSelection("serviceTier", model, undefined)
+  expect((await repository.load()).serviceTier).toEqual({ "gateway/openai/gpt-6.1-sol": "default" })
+  expect((await repository.load()).upstream).toEqual({ "gateway/openai/gpt-6.1-sol": "openai" })
+})

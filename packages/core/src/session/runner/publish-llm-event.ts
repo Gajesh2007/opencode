@@ -143,7 +143,10 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
       assistantMessageID: yield* startAssistant(),
     })
   })
-  const native = (metadata: ProviderMetadata | undefined) => metadata?.[input.providerMetadataKey]
+  const native = (metadata: ProviderMetadata | undefined) =>
+    metadata?.gateway
+      ? { ...metadata[input.providerMetadataKey], gateway: metadata.gateway }
+      : metadata?.[input.providerMetadataKey]
   const fragments = (
     name: string,
     ended: (id: string, value: string, ordinal: number, native?: SessionMessage.Native) => Effect.Effect<void>,

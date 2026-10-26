@@ -133,6 +133,8 @@ export const Plugin = define({
               model.compatibility = { ...model.compatibility, ...config.compatibility }
             if (config.package !== undefined) model.package = config.package
             if (config.settings !== undefined) model.settings = Provider.mergeOverlay(model.settings, config.settings)
+            if (config.serviceTiers !== undefined)
+              model.serviceTiers = { ...model.serviceTiers, ...config.serviceTiers }
             if (config.headers !== undefined) model.headers = Provider.mergeHeaders(model.headers, config.headers)
             if (config.body !== undefined) model.body = Provider.mergeOverlay(model.body, config.body)
             if (config.capabilities !== undefined)
@@ -183,7 +185,11 @@ export const Plugin = define({
             source?.base !== undefined &&
             source.base.variants.length > 0 &&
             models.get(providerID, id)?.package !== source.base.package
-          if (config.variants === undefined && config.capabilities?.reasoning === undefined && (!source?.base || repackaged))
+          if (
+            config.variants === undefined &&
+            config.capabilities?.reasoning === undefined &&
+            (!source?.base || repackaged)
+          )
             models.update(providerID, id, (model) => {
               model.variants = [
                 ...Variant.resolve({

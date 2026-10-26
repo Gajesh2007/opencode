@@ -133,6 +133,31 @@ const transform = (messages: V1Migration.SourceMessage[], parts: V1Migration.Sou
 }
 
 describe("V1Migration.transformSession", () => {
+  test("preserves the fork's independent routing selections", () => {
+    const result = transform(
+      [
+        user("msg_routing", {
+          model: {
+            providerID: "gateway",
+            modelID: "openai/gpt-5.6-sol",
+            variant: "max",
+            serviceTier: "priority",
+            upstream: "openai",
+            reasoningMode: "pro",
+          },
+        }),
+      ],
+      [],
+    )
+    expect(result.session.model).toMatchObject({
+      id: "openai/gpt-5.6-sol",
+      providerID: "gateway",
+      variant: "max",
+      serviceTier: "priority",
+      upstream: "openai",
+      reasoningMode: "pro",
+    })
+  })
   test("maps ordinary user text, agents, ignored fields, order, and timestamps", () => {
     const message = user("msg_000000000001aaaaaaaaaaaaaa", {
       system: "discard",

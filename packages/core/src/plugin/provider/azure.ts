@@ -505,14 +505,17 @@ function resourceQuery(resource: string) {
 // A deployment's ID is its name, while limits, costs, and routes come from the catalog model it deploys. Azure compares
 // names without case and may return another case, so IDs are lowercase like the catalog's.
 // https://learn.microsoft.com/azure/azure-resource-manager/management/resource-name-rules
-function deployedModels(deployments: readonly Deployment[], catalog: readonly Model.MutableInfo[]) {
+function deployedModels<T extends Pick<Model.Info, "id" | "modelID" | "name">>(
+  deployments: readonly Deployment[],
+  catalog: readonly T[],
+) {
   const models = new Map(catalog.map((model) => [model.id.toLowerCase(), model]))
   return new Map(
     deployments.flatMap((deployment) => {
       const model = catalogModel(models, deployment)
       if (!model) return []
       const id = Model.ID.make(deployment.name.toLowerCase())
-      const info: Model.MutableInfo = {
+      const info = {
         ...structuredClone(model),
         id,
         modelID: Model.ID.make(deployment.name),

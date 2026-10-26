@@ -4,6 +4,7 @@ import { Schema } from "effect"
 import { ephemeral, inventory } from "./event.js"
 import { optional } from "./schema.js"
 import { Model } from "./model.js"
+import { Workflow } from "./workflow.js"
 import { Permission } from "./permission.js"
 import { Provider } from "./provider.js"
 import { PositiveInt, statics } from "./schema.js"
@@ -19,6 +20,9 @@ export type Name = typeof Name.Type
 export const Color = Schema.String.annotate({ identifier: "Agent.Color" })
 export type Color = typeof Color.Type
 
+export const Memory = Schema.Literals(["user", "project", "local"]).annotate({ identifier: "Agent.Memory" })
+export type Memory = typeof Memory.Type
+
 export interface Info extends Schema.Schema.Type<typeof Info> {}
 export const Info = Schema.Struct({
   id: ID,
@@ -31,6 +35,11 @@ export const Info = Schema.Struct({
   hidden: Schema.Boolean,
   color: Color.pipe(optional),
   steps: PositiveInt.pipe(optional),
+  memory: Memory.pipe(optional),
+  mcpServers: Schema.Array(Schema.String).pipe(optional),
+  skills: Schema.Array(Schema.String).pipe(optional),
+  initialPrompt: Schema.String.pipe(optional),
+  workflow: Workflow.Definition.pipe(optional),
   permissions: Permission.Ruleset,
 })
   .annotate({ identifier: "Agent.Info" })

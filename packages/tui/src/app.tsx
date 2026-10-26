@@ -103,6 +103,9 @@ import { CommandPaletteDialog } from "./component/command-palette"
 import { COMMAND_PALETTE_COMMAND, Keymap, type KeymapCommand } from "./context/keymap"
 
 import { DialogVariant } from "./component/dialog-variant"
+import { DialogSubagentModel } from "./component/dialog-subagent-model"
+import { DialogModelRouting } from "./component/dialog-model-routing"
+import { DialogFork } from "./component/dialog-fork"
 import { destroyRenderer, setTerminalTitle } from "./util/renderer"
 import { cliErrorMessage, errorFormat } from "./util/error"
 import { AttentionProvider } from "./context/attention"
@@ -147,6 +150,15 @@ const pinnedSessionBindingCommands = [
 ] as const
 
 const appBindingCommands = [
+  "fork.goal",
+  "fork.metaagent",
+  "fork.agents",
+  "fork.teams",
+  "fork.workflows",
+  "model.service-tier",
+  "model.reasoning-mode",
+  "subagent.model",
+  "model.upstream",
   "command.palette.show",
   "model.list",
   "model.cycle_recent",
@@ -945,7 +957,7 @@ function App() {
         name: "agent.list",
         title: "Switch agent",
         category: "Agent",
-        slash: { name: "agents" },
+        slash: { name: "agents", aliases: ["tasks"] },
         run: () => {
           dialog.replace(() => <DialogAgent />)
         },
@@ -967,6 +979,89 @@ function App() {
         run: () => {
           local.agent.move(1)
         },
+      },
+      {
+        name: "fork.goal",
+        title: "Goal controls",
+        category: "Session",
+        slash: { name: "goal" },
+        run: () => {
+          if (route.data.type !== "session") return toast.show({ message: "Start a session first.", variant: "info" })
+          const sessionID = route.data.sessionID
+          dialog.replace(() => <DialogFork kind="goal" sessionID={sessionID} />)
+        },
+      },
+      {
+        name: "fork.metaagent",
+        title: "Reasoning reviewer",
+        category: "Session",
+        slash: { name: "metaagent" },
+        run: () => {
+          if (route.data.type !== "session") return toast.show({ message: "Start a session first.", variant: "info" })
+          const sessionID = route.data.sessionID
+          dialog.replace(() => <DialogFork kind="metaagent" sessionID={sessionID} />)
+        },
+      },
+      {
+        name: "fork.agents",
+        title: "Agent roster",
+        category: "Session",
+        slash: { name: "agents" },
+        run: () => {
+          if (route.data.type !== "session") return toast.show({ message: "Start a session first.", variant: "info" })
+          const sessionID = route.data.sessionID
+          dialog.replace(() => <DialogFork kind="agents" sessionID={sessionID} />)
+        },
+      },
+      {
+        name: "fork.teams",
+        title: "Teams and shared tasks",
+        category: "Session",
+        slash: { name: "teams" },
+        run: () => {
+          if (route.data.type !== "session") return toast.show({ message: "Start a session first.", variant: "info" })
+          const sessionID = route.data.sessionID
+          dialog.replace(() => <DialogFork kind="teams" sessionID={sessionID} />)
+        },
+      },
+      {
+        name: "fork.workflows",
+        title: "Workflow progress",
+        category: "Session",
+        slash: { name: "workflows" },
+        run: () => {
+          if (route.data.type !== "session") return toast.show({ message: "Start a session first.", variant: "info" })
+          const sessionID = route.data.sessionID
+          dialog.replace(() => <DialogFork kind="workflows" sessionID={sessionID} />)
+        },
+      },
+      {
+        name: "subagent.model",
+        title: "Configure subagent model",
+        category: "Agent",
+        slash: { name: "subagent" },
+        run: () => dialog.replace(() => <DialogSubagentModel />),
+      },
+      {
+        name: "model.service-tier",
+        title: "Switch service tier",
+        category: "Agent",
+        slash: { name: "tier" },
+        run: () => dialog.replace(() => <DialogModelRouting kind="serviceTier" />),
+      },
+      {
+        name: "model.reasoning-mode",
+        title: "Switch reasoning mode",
+        category: "Agent",
+        slash: { name: "pro" },
+        run: () => dialog.replace(() => <DialogModelRouting kind="reasoningMode" />),
+      },
+      {
+        name: "model.upstream",
+        title: "Pin upstream provider",
+        category: "Agent",
+        slash: { name: "provider" },
+        run: () => dialog.replace(() => <DialogModelRouting kind="upstream" />),
       },
       {
         name: "variant.cycle",

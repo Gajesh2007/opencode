@@ -173,6 +173,11 @@ it.effect("Gateway Messages preserves signatures and billing metadata through to
       routing: { finalProvider: "bedrock" },
     })
     expect(response.usage?.cacheReadInputTokens).toBe(20)
+    expect(response.events.find(LLMEvent.is.stepFinish)?.providerMetadata?.gateway).toMatchObject({
+      cost: "0.001",
+      routing: { finalProvider: "bedrock" },
+    })
+    expect(response.usage?.providerMetadata?.gateway).toMatchObject({ cost: "0.001" })
     const compiled = yield* compileRequest(
       LLM.request({
         model,

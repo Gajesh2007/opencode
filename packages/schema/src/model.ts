@@ -20,6 +20,9 @@ export const Ref = Schema.Struct({
   id: ID,
   providerID: Provider.ID,
   variant: VariantID.pipe(optional),
+  serviceTier: Schema.String.pipe(optional),
+  upstream: Schema.String.pipe(optional),
+  reasoningMode: Schema.Literals(["standard", "pro"]).pipe(optional),
 })
   .annotate({ identifier: "Model.Ref" })
   .pipe(
@@ -112,6 +115,7 @@ export const Info = Schema.Struct({
   ...Overlays,
   capabilities: Capabilities,
   variants: Schema.Array(Variant),
+  serviceTiers: Schema.Record(Schema.String, Schema.Record(Schema.String, Schema.Json)).pipe(optional),
   time: Schema.Struct({
     released: Schema.Finite,
   }),

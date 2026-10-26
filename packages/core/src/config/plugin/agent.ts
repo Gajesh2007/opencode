@@ -17,6 +17,7 @@ import type { FileAccess } from "../../file-access.js"
 import type { ReadTool } from "../../tool/plugin/read.js"
 import type { EditTool } from "../../tool/plugin/edit.js"
 import { AbsolutePath } from "../../schema.js"
+import { WorkflowReport } from "../../workflow/report.js"
 
 const legacySources = [
   { pattern: "{agent,agents}/**/*.md", primary: false },
@@ -108,6 +109,9 @@ export const Plugin = define({
                 id: item.model.model,
                 providerID: item.model.providerID,
                 ...(item.model.variant === undefined ? {} : { variant: item.model.variant }),
+                serviceTier: item.model.serviceTier,
+                upstream: item.model.upstream,
+                reasoningMode: item.model.reasoningMode,
               }
             if (item.request !== undefined) {
               Object.assign(agent.request.headers, item.request.headers ?? {})
@@ -119,6 +123,18 @@ export const Plugin = define({
             if (item.hidden !== undefined) agent.hidden = item.hidden
             if (item.color !== undefined) agent.color = item.color
             if (item.steps !== undefined) agent.steps = item.steps
+            if (item.memory !== undefined) agent.memory = item.memory
+            if (item.mcpServers !== undefined) agent.mcpServers = [...item.mcpServers]
+            if (item.skills !== undefined) agent.skills = [...item.skills]
+            if (item.initialPrompt !== undefined) agent.initialPrompt = item.initialPrompt
+            if (item.workflow !== undefined) {
+              agent.workflow = {
+                ...item.workflow,
+                passes: item.workflow.passes.map((pass) => ({ ...pass })),
+              }
+              agent.system = [agent.system, WorkflowReport.directive(item.workflow)].filter(Boolean).join("\n\n")
+              agent.permissions.push({ action: "workflow", resource: "*", effect: "allow" })
+            }
             if (item.permissions !== undefined) {
               agent.permissions.push(...expandPermissions(item.permissions, global.home))
             }

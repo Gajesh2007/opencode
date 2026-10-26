@@ -56,6 +56,9 @@ export const SessionTable = sqliteTable(
       id: string
       providerID: string
       variant?: string
+      serviceTier?: string
+      upstream?: string
+      reasoningMode?: "standard" | "pro"
     }>(),
     ...Timestamps,
     time_idle: integer(),

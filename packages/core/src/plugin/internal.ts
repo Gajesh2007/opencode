@@ -8,6 +8,27 @@ import { AppProcess } from "@opencode/util/process"
 import { Context, Effect, Scope } from "effect"
 import { HttpClient } from "effect/http"
 import { Agent } from "../agent.js"
+import { AgentMemory } from "../agent-memory.js"
+import { AgentMemoryPlugin } from "./agent-memory.js"
+import { AgentSkillsPlugin } from "./agent-skills.js"
+import { Goal } from "../goal.js"
+import { GoalPlugin } from "./goal.js"
+import { Collaboration } from "../collaboration.js"
+import { CollaborationPlugin } from "./collaboration.js"
+import { WorkflowPlugin } from "./workflow.js"
+import { Team } from "../team.js"
+import { TeamPlugin } from "./team.js"
+import { ModelSelectionPlugin } from "./model-selection.js"
+import { AuxiliaryReview } from "../session/auxiliary-review.js"
+import { MetaAgent } from "../meta-agent.js"
+import { MetaAgentPlugin } from "./meta-agent.js"
+import { ForkControlPlugin } from "./fork-control.js"
+import { SubagentCompatPlugin } from "./subagent-compat.js"
+import { YukonPlugin } from "./yukon.js"
+import { ForkAgentsPlugin } from "./fork-agents.js"
+import { ReadManyPlugin } from "./read-many.js"
+import { SubagentModel } from "../subagent-model.js"
+import { SubagentLimit } from "../subagent-limit.js"
 import { Model } from "../model.js"
 import { Provider } from "../provider.js"
 import { Command } from "../command.js"
@@ -109,6 +130,14 @@ import { WellKnownPlugin } from "../wellknown/plugin.js"
 
 const services = [
   Agent.Service,
+  AgentMemory.Service,
+  Goal.Service,
+  Collaboration.Service,
+  Team.Service,
+  AuxiliaryReview.Service,
+  MetaAgent.Service,
+  SubagentLimit.Service,
+  SubagentModel.Service,
   AppProcess.Service,
   Provider.Service,
   Model.Service,
@@ -164,6 +193,14 @@ export type Requirements = Context.Service.Identifier<(typeof services)[number]>
 
 export const requirements = LayerNode.group([
   Agent.node,
+  AgentMemory.node,
+  Goal.node,
+  Collaboration.node,
+  Team.node,
+  AuxiliaryReview.node,
+  MetaAgent.node,
+  SubagentLimit.node,
+  SubagentModel.node,
   AppProcess.node,
   Provider.node,
   Model.node,
@@ -225,6 +262,7 @@ const pre = [
   WellKnownPlugin.Plugin,
   VcsGitPlugin.Plugin,
   AgentPlugin.Plugin,
+  ForkAgentsPlugin.Plugin,
   PlanPlugin.Plugin,
   CommandPlugin.Plugin,
   SkillPlugin.Plugin,
@@ -244,9 +282,21 @@ const pre = [
   McpResourceTools.Plugin,
   QuestionTool.Plugin,
   ReadTool.Plugin,
+  ReadManyPlugin.Plugin,
   ShellTool.Plugin,
   SkillTool.Plugin,
   SubagentTool.Plugin,
+  AgentMemoryPlugin.Plugin,
+  AgentSkillsPlugin.Plugin,
+  GoalPlugin.Plugin,
+  CollaborationPlugin.Plugin,
+  WorkflowPlugin.Plugin,
+  TeamPlugin.Plugin,
+  ModelSelectionPlugin.Plugin,
+  MetaAgentPlugin.Plugin,
+  ForkControlPlugin.Plugin,
+  SubagentCompatPlugin.Plugin,
+  YukonPlugin.Plugin,
   TodoTool.Plugin,
   WebFetchTool.Plugin,
   WebSearchTool.Plugin,

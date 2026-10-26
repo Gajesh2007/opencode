@@ -13,6 +13,11 @@ import { Session } from "../../session.js"
 import { SessionSchema } from "../../session/schema.js"
 import { SubagentCompletion } from "../../session/subagent-completion.js"
 import { SubagentJob } from "../../session/subagent-job.js"
+import { Collaboration } from "../../collaboration.js"
+import { Team } from "../../team.js"
+import { Worktree } from "../../worktree.js"
+import { SubagentModel } from "../../subagent-model.js"
+import { SubagentLimit } from "../../subagent-limit.js"
 
 export const name = "subagent"
 
@@ -27,6 +32,18 @@ const backgroundResult = (sessionID: SessionSchema.ID) => ({
 })
 
 export const Input = Schema.Struct({
+  variant: Schema.optionalKey(Schema.String),
+  reset_model: Schema.optionalKey(Schema.Boolean),
+  fork_turns: Schema.optionalKey(
+    Schema.Union([Schema.Literals(["none", "all"]), Schema.Int.check(Schema.isGreaterThan(0))]),
+  ),
+  worktree: Schema.optionalKey(Schema.Boolean),
+  team: Schema.optionalKey(Schema.String).annotate({
+    description: "Optional team name; the caller joins as lead and the child joins under name.",
+  }),
+  name: Schema.optionalKey(Schema.String).annotate({
+    description: "Short unique task name used for addressing this child in family messages.",
+  }),
   agent: Schema.String.annotate({
     description:
       "The type of specialized agent to use for this task. If the user asks for a subagent by a name that is not one of the available subagents, they most likely mean a model: pick a suitable agent and pass the name through the model parameter instead.",
@@ -71,6 +88,11 @@ export const Plugin = {
     const permission = yield* Permission.Service
     const models = yield* Model.Service
     const subagents = yield* SubagentJob.Service
+    const collaboration = yield* Collaboration.Service
+    const teams = yield* Team.Service
+    const worktrees = yield* Worktree.Service
+    const limiter = yield* SubagentLimit.Service
+    const defaults = yield* SubagentModel.Service
 
     const resolveModel = Effect.fn("SubagentTool.resolveModel")(function* (input: string) {
       const ref = yield* Effect.try({
@@ -126,14 +148,15 @@ export const Plugin = {
                     ),
                   )
               }
-              const limit = Config.latest(yield* config.entries(), "experimental")?.subagent_depth ?? 1
+              const limit =
+                Config.latest(yield* config.entries(), "experimental")?.subagent_depth ?? (input.name ? Infinity : 1)
               if (depth >= limit)
                 return yield* new ToolFailure({
                   message: `Subagent depth limit reached (${limit}). Increase "experimental.subagent_depth" to allow nested subagents.`,
                 })
               const agent = yield* agents.resolve(input.agent)
               if (agent === undefined) return yield* new ToolFailure({ message: `Unknown agent: ${input.agent}` })
-              if (agent.mode === "primary")
+              if (agent.mode === "primary" && !input.name && !input.sessionID)
                 return yield* new ToolFailure({ message: `Agent ${input.agent} cannot run as a subagent` })
               yield* permission
                 .assert({
@@ -165,12 +188,28 @@ export const Plugin = {
                 return yield* new ToolFailure({
                   message: `Session ${existing.id} is not a child of the current session`,
                 })
-              const override = input.model === undefined ? undefined : yield* resolveModel(input.model)
+              if (input.reset_model && (input.model !== undefined || input.variant !== undefined))
+                return yield* new ToolFailure({ message: "reset_model cannot be combined with model or variant." })
+              const configured = (yield* defaults.list)[agent.id] ?? agent.model
+              const requested = input.model === undefined ? undefined : yield* resolveModel(input.model)
+              const base =
+                requested ??
+                (input.reset_model ? (configured ?? parent.model) : (existing?.model ?? configured ?? parent.model))
+              if (input.variant !== undefined && !base)
+                return yield* new ToolFailure({ message: "Select a model before setting a variant." })
+              const override =
+                input.variant !== undefined && base
+                  ? input.variant === "default"
+                    ? { ...base, variant: undefined }
+                    : { ...base, ...(yield* resolveModel(base.providerID + "/" + base.id + "#" + input.variant)) }
+                  : input.reset_model
+                    ? base
+                    : requested
               // Continuing with a different agent switches the child, mirroring create semantics
               // where an explicit model wins over the agent's configured model, which wins over the inherited one.
               if (existing !== undefined) {
                 const switched = existing.agent !== agent.id
-                const model = override ?? (switched ? agent.model : undefined)
+                const model = override ?? (switched ? configured : undefined)
                 yield* Effect.all([
                   switched ? sessions.switchAgent({ sessionID: existing.id, agent: agent.id }) : Effect.void,
                   model === undefined ? Effect.void : sessions.switchModel({ sessionID: existing.id, model }),
@@ -181,35 +220,97 @@ export const Plugin = {
                 )
               }
 
-              const model = override ?? agent.model ?? parent.model
+              const selected = override ?? configured ?? parent.model
+              const model = selected && {
+                ...selected,
+                serviceTier: selected.serviceTier ?? parent.model?.serviceTier,
+                upstream: selected.upstream ?? parent.model?.upstream,
+                reasoningMode: selected.reasoningMode ?? parent.model?.reasoningMode,
+              }
+              if (input.worktree && input.fork_turns && input.fork_turns !== "none")
+                return yield* new ToolFailure({ message: "Use a fresh child for worktree isolation." })
+              const tree =
+                !existing && input.worktree
+                  ? yield* worktrees
+                      .create({ projectID: parent.projectID, from: parent.location.directory, name: input.name })
+                      .pipe(
+                        Effect.mapError(
+                          (error) => new ToolFailure({ message: "Unable to create subagent worktree", error }),
+                        ),
+                      )
+                  : undefined
+              const fork =
+                !existing && input.fork_turns && input.fork_turns !== "none"
+                  ? yield* sessions
+                      .fork({
+                        sessionID: parent.id,
+                        asChild: true,
+                        lastTurns: typeof input.fork_turns === "number" ? input.fork_turns : undefined,
+                      })
+                      .pipe(
+                        Effect.mapError(
+                          (error) => new ToolFailure({ message: "Unable to fork parent context", error }),
+                        ),
+                      )
+                  : undefined
               const child =
                 existing ??
+                fork ??
                 (yield* sessions
                   .create({
                     parentID: context.sessionID,
                     title: input.description,
                     agent: agent.id,
                     model,
+                    ...(tree ? { location: { directory: tree.directory } } : {}),
                   })
                   .pipe(
                     Effect.mapError(
                       (error) => new ToolFailure({ message: `Parent session not found: ${context.sessionID}`, error }),
                     ),
                   ))
+              if (fork) {
+                yield* sessions.switchAgent({ sessionID: fork.id, agent: agent.id }).pipe(Effect.orDie)
+                if (model) yield* sessions.switchModel({ sessionID: fork.id, model }).pipe(Effect.orDie)
+                yield* sessions.rename({ sessionID: fork.id, title: input.description }).pipe(Effect.orDie)
+              }
 
               const background = input.background === true
+              if (!existing && input.name !== undefined)
+                yield* collaboration
+                  .register(context.sessionID, child.id, input.name)
+                  .pipe(
+                    Effect.catch((error) =>
+                      sessions
+                        .remove(child.id)
+                        .pipe(Effect.ignore, Effect.andThen(new ToolFailure({ message: error.message }))),
+                    ),
+                  )
+              if (input.team) {
+                const lead = yield* teams.whoami(context.sessionID)
+                yield* teams.register({ team: input.team, name: lead?.name ?? "lead", sessionID: context.sessionID })
+                yield* teams.register({ team: input.team, name: input.name ?? agent.name, sessionID: child.id })
+              }
               yield* context.progress({ sessionID: child.id, status: "running" })
 
-              // Standard prompt admission outside the job: Job.start joining a running child skips
-              // its run effect, and the default wake starts an idle child or steers a running one.
+              // Admit durably before the job takes its concurrency permit. An active child
+              // observes this steer at the next boundary; an idle child starts inside the permit.
               yield* sessions
                 .prompt({
                   sessionID: child.id,
                   text:
                     existing === undefined
-                      ? ["You are a subagent spawned by another session.", input.prompt].join("\n")
+                      ? [
+                          "You are a subagent spawned by another session.",
+                          input.team
+                            ? `You are teammate ${input.name ?? agent.name} in team ${input.team}. Coordinate with send_message, inbox and team_tasks.`
+                            : "",
+                          input.prompt,
+                        ]
+                          .filter(Boolean)
+                          .join("\n")
                       : input.prompt,
-                  ...(background && existing === undefined ? { resume: false } : {}),
+                  resume: false,
                 })
                 .pipe(
                   Effect.mapError(
@@ -224,7 +325,7 @@ export const Plugin = {
                 agent: agent.name,
                 description: input.description,
               }
-              yield* subagents.start(recovery)
+              yield* subagents.start(recovery, yield* limiter.semaphore)
 
               if (background) {
                 yield* subagents.background(recovery)
@@ -233,8 +334,13 @@ export const Plugin = {
 
               const result = yield* jobs.block({ id: child.id, sessionID: context.sessionID }).pipe(
                 Effect.onInterrupt(() =>
-                  Effect.all([sessions.interrupt(child.id), jobs.cancel(child.id)], {
-                    discard: true,
+                  Effect.gen(function* () {
+                    if (yield* jobs.isBackgrounded(child.id)) {
+                      const running = yield* jobs.get(child.id)
+                      if (running) yield* subagents.notify(recovery, running.started_at)
+                      return
+                    }
+                    yield* Effect.all([sessions.interrupt(child.id), jobs.cancel(child.id)], { discard: true })
                   }),
                 ),
               )

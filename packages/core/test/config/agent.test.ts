@@ -30,6 +30,21 @@ function migrateV1(input: unknown) {
   if (result.type !== "normalized") throw new Error("expected normalized config")
   return result.encoded
 }
+
+test("preserves fork agent memory, skills, MCP scope and initial prompts through V1 normalization", () => {
+  const fields = { memory: "project", skills: ["review"], mcpServers: [], initialPrompt: "Start the review." }
+  const normalized = migrateV1({ agent: { reviewer: fields } })
+  expect(decode(normalized).agents?.reviewer).toMatchObject(fields)
+  expect(decode({ agents: { reviewer: fields } }).agents?.reviewer).toMatchObject(fields)
+})
+test("preserves workflow declarations and the reasoning effort alias", () => {
+  const workflow = { passes: [{ name: "logic", agent: "review-logic" }], format: "findings" }
+  const normalized = migrateV1({ agent: { reviewer: { model: "openai/gpt-6.1-sol", effort: "max", workflow } } })
+  expect(decode(normalized).agents?.reviewer).toMatchObject({
+    model: { providerID: "openai", model: "gpt-6.1-sol", variant: "max" },
+    workflow,
+  })
+})
 const defaultPermissions = Agent.Info.default(Agent.ID.make("test")).permissions
 
 test("ignores named agent color tokens", () => {

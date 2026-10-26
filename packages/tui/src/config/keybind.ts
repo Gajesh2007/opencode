@@ -43,6 +43,15 @@ export const LeaderDefault = "ctrl+x"
 const keybind = (value: Definition["default"], description: string): Definition => ({ default: value, description })
 
 export const Definitions = {
+  "fork.goal": keybind("none", "Manage persistent goals"),
+  "fork.metaagent": keybind("none", "Configure reasoning review"),
+  "fork.agents": keybind("none", "Show child agent roster"),
+  "fork.teams": keybind("none", "Show teams and shared tasks"),
+  "fork.workflows": keybind("none", "Show workflow progress"),
+  "model.reasoning-mode": keybind("none", "Select reasoning mode"),
+  "subagent.model": keybind("none", "Configure subagent model"),
+  "model.service-tier": keybind("none", "Select service tier"),
+  "model.upstream": keybind("none", "Pin upstream provider"),
   leader: keybind(LeaderDefault, "Leader key for keybind combinations"),
 
   "app.exit": keybind("ctrl+c,ctrl+d,<leader>q", "Exit the application"),

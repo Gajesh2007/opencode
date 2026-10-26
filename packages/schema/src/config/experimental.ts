@@ -1,7 +1,7 @@
 export * as ConfigExperimental from "./experimental.js"
 
 import { Schema } from "effect"
-import { NonNegativeInt, optional } from "../schema.js"
+import { NonNegativeInt, PositiveInt, optional } from "../schema.js"
 import { ConfigPolicy } from "./policy.js"
 
 export class Info extends Schema.Class<Info>("ConfigExperimental.Info")({
@@ -17,6 +17,9 @@ export class Info extends Schema.Class<Info>("ConfigExperimental.Info")({
   }),
   subagent_depth: NonNegativeInt.pipe(optional).annotate({
     description: "Maximum subagent nesting depth. Defaults to 1.",
+  }),
+  subagent_concurrency: PositiveInt.pipe(optional).annotate({
+    description: "Maximum concurrent child agents at this location. Omit for unlimited concurrency.",
   }),
   location_idle_timeout: Schema.Union([Schema.DurationFromString, Schema.Literal(false)])
     .pipe(optional)

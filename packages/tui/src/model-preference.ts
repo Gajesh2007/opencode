@@ -13,6 +13,9 @@ export type ModelPreference = {
   recent: ModelPreferenceModel[]
   favorite: ModelPreferenceModel[]
   variant: Record<string, string | undefined>
+  serviceTier?: Record<string, string | undefined>
+  upstream?: Record<string, string | undefined>
+  reasoningMode?: Record<string, string | undefined>
 }
 
 export type ModelPreferenceDocument = Record<string, unknown> & ModelPreference
@@ -81,6 +84,9 @@ export function decodeModelPreference(value: unknown): ModelPreferenceDocument {
     recent: models(root.recent),
     favorite: models(root.favorite),
     variant: variants(root.variant),
+    ...(root.serviceTier === undefined ? {} : { serviceTier: variants(root.serviceTier) }),
+    ...(root.upstream === undefined ? {} : { upstream: variants(root.upstream) }),
+    ...(root.reasoningMode === undefined ? {} : { reasoningMode: variants(root.reasoningMode) }),
   }
 }
 
@@ -89,6 +95,9 @@ function preference(value: ModelPreferenceDocument): ModelPreference {
     recent: value.recent,
     favorite: value.favorite,
     variant: value.variant,
+    ...(value.serviceTier === undefined ? {} : { serviceTier: value.serviceTier }),
+    ...(value.upstream === undefined ? {} : { upstream: value.upstream }),
+    ...(value.reasoningMode === undefined ? {} : { reasoningMode: value.reasoningMode }),
   }
 }
 
@@ -97,6 +106,9 @@ function patch(value: Partial<ModelPreference>) {
     ...(value.recent === undefined ? {} : { recent: models(value.recent) }),
     ...(value.favorite === undefined ? {} : { favorite: models(value.favorite) }),
     ...(value.variant === undefined ? {} : { variant: variants(value.variant) }),
+    ...(value.serviceTier === undefined ? {} : { serviceTier: variants(value.serviceTier) }),
+    ...(value.upstream === undefined ? {} : { upstream: variants(value.upstream) }),
+    ...(value.reasoningMode === undefined ? {} : { reasoningMode: variants(value.reasoningMode) }),
   }
 }
 
@@ -173,6 +185,13 @@ export function createModelPreferenceRepository(filePath: string) {
     },
     async resolveVariant(model: ModelPreferenceModel) {
       return normalizeModelVariant((await load()).variant[modelPreferenceKey(model)])
+    },
+    saveSelection(
+      key: "serviceTier" | "upstream" | "reasoningMode",
+      model: ModelPreferenceModel,
+      value: string | undefined,
+    ) {
+      return update((current) => ({ [key]: { ...current[key], [modelPreferenceKey(model)]: value ?? "default" } }))
     },
     saveVariant(model: ModelPreferenceModel, value: string | undefined) {
       const key = modelPreferenceKey(model)

@@ -294,6 +294,17 @@ describe("OpenAI Responses route", () => {
     }),
   )
 
+  it.effect("preserves independent pro reasoning mode on the wire", () =>
+    Effect.gen(function* () {
+      const prepared = yield* compileRequest(
+        LLMRequest.update(request, {
+          providerOptions: { reasoningEffort: "high", reasoningMode: "pro", serviceTier: "priority" },
+        }),
+      )
+      expect(prepared.body).toMatchObject({ reasoning: { effort: "high", mode: "pro" }, service_tier: "priority" })
+    }),
+  )
+
   it.effect("lowers semantic service tier options", () =>
     Effect.gen(function* () {
       const input = LLMRequest.update(request, { providerOptions: { serviceTier: "priority" } })
