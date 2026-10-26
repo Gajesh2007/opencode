@@ -3,9 +3,9 @@
 The target is the complete released OpenCode 2.1.4 source tree at
 `74f8d4860f49c563909e6b039b0cc8b454ebce72`, with the custom behavior from
 `Gajesh2007/opencode` at `48aee9586f153c47579b96f5cec196dfa4b6841a` carried forward.
-The source branch and installed M5 Ultra binary remain unchanged while this
-worktree is being validated. This document records work in progress, not a
-completed migration or a deployment approval.
+The source fork history is preserved. The validated build is installed on the
+M5 Ultra; its former V1 binary, configuration, database and service definition
+are backed up under `~/.local/state/m5ultra-setup/v2-port-20261026`.
 
 `fork-port-inventory.json` records every fork-only commit and changed path from
 the shared ancestor. Generated files and benchmark recordings are included in
@@ -19,7 +19,8 @@ that inventory but are not substitutes for behavioral parity checks.
       fork checkout or its running processes.
 - [x] Run the unmodified upstream `bun run check`: 34 package tasks passed.
 - [ ] Validate V2 pairing with the iPhone client before switching the M5 service.
-- [ ] Exercise migration against copies of the existing databases and settings.
+- [x] Exercise V1 migration and settings normalization; verify the existing M5
+      settings load in V2. Its old database contains no saved sessions.
 
 ## Fork behavior
 
@@ -43,7 +44,8 @@ that inventory but are not substitutes for behavioral parity checks.
 - [x] Port goal lifecycle, recorded usage budgets, continuation outbox, supervisor
       steering and three-consecutive-blocker handling. Include auxiliary review usage.
 - [x] Add goal and reviewer controls through the V2 authenticated plugin RPC.
-- [ ] Finish interruption/recovery integration coverage and persistent goal display.
+- [x] Cover parent interruption, continuation recovery, persisted goal state and
+      the goal status dialog.
 - [x] Port optional per-step reasoning review, persistent configuration and UI controls.
 - [x] Exercise auxiliary review through the LLM service boundary and charge child
       review usage to its root goal.
@@ -58,9 +60,11 @@ that inventory but are not substitutes for behavioral parity checks.
       choices, custom tier headers, gateway cost metadata and Pro wire field.
       Provider internals are V2 implementations, not copies of the old SDK shims.
 - [x] Port the installed Yukon session-attribution hook to the V2 shell plugin contract.
-- [ ] Regenerate public clients; pass affected tests, full checks and builds.
-- [ ] Back up the M5 installation, install the validated fork, verify the
-      mobile session lifecycle and leave a fresh pairing QR on its screen.
+- [x] Regenerate public clients and pass affected tests, full checks and build.
+      The full core suite has the baseline/platform exceptions listed below.
+- [x] Back up and install on the M5; verify its public authenticated API, custom
+      agents, shell execution and native Yukon attribution. Open a fresh QR.
+- [ ] Confirm the final physical iPhone pairing/session lifecycle with the user.
 
 ## Validation scope
 
@@ -111,5 +115,14 @@ The complete upstream tree brings these changes, not just the mobile handshake:
   work; sessions, goals, reviewers and subagent model choices persist across
   restart; shell execution and Yukon attribution work.
 - M5 source data inspection found no saved sessions, goals or reviewer records.
-- M5 installation and final phone pairing remain pending until the machine
-  validation below is recorded.
+- Full isolated server suite: 95 passed, 1 skipped. Client suite: 233 passed.
+- M5 runs `2.1.4-fork.20261026` as `com.gaj.opencode-remote` with `serve --service`;
+  authenticated public API access and a real shell command pass. Its 17 agents
+  include the existing refactor/verifier agents and the ported review/batch agents.
+- The M5 source worktree is `~/Builds/opencode-v2`, tracking `origin/v2-port`.
+  The original `~/Builds/opencode` source worktree is unchanged.
+- M5 FileVault is off by explicit user instruction; its Tailscale daemon is
+  connected; the OpenCode service has RunAtLoad and KeepAlive enabled. No cold
+  reboot was performed during this validation.
+- A fresh pairing QR has been opened in Terminal. Physical phone confirmation
+  is pending.
