@@ -14275,6 +14275,14 @@
               "reserved": {
                 "type": "integer",
                 "minimum": 0
+              },
+              "threshold": {
+                "type": "integer",
+                "exclusiveMinimum": 0
+              },
+              "subagent_threshold": {
+                "type": "integer",
+                "exclusiveMinimum": 0
               }
             },
             "additionalProperties": false

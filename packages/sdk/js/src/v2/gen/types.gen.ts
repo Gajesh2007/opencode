@@ -1488,6 +1488,8 @@ export type Config = {
     tail_turns?: number
     preserve_recent_tokens?: number
     reserved?: number
+    threshold?: number
+    subagent_threshold?: number
   }
   experimental?: {
     disable_paste_summary?: boolean
