@@ -187,6 +187,8 @@ export interface Interface {
   readonly isOverflow: (input: {
     tokens: MessageV2.Assistant["tokens"]
     model: Provider.Model
+    /** The session was spawned by another session: `compaction.subagent_threshold` applies. */
+    subagent?: boolean
   }) => Effect.Effect<boolean>
   readonly prune: (input: { sessionID: SessionID }) => Effect.Effect<void>
   readonly process: (input: {
@@ -225,12 +227,14 @@ export const layer = Layer.effect(
     const isOverflow = Effect.fn("SessionCompaction.isOverflow")(function* (input: {
       tokens: MessageV2.Assistant["tokens"]
       model: Provider.Model
+      subagent?: boolean
     }) {
       return overflow({
         cfg: yield* config.get(),
         tokens: input.tokens,
         model: input.model,
         outputTokenMax: flags.outputTokenMax,
+        subagent: input.subagent,
       })
     })
 

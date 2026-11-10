@@ -562,6 +562,93 @@ describe("session.compaction.isOverflow", () => {
       },
     ),
   )
+
+  // ─── compaction.threshold / compaction.subagent_threshold ────────────
+  // A 1M-token window is only "full" at 1M, and every request re-reads the
+  // whole context: these compact a session long before its model must.
+
+  it.live(
+    "compacts at compaction.threshold when the model's window is larger",
+    provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          const compact = yield* SessionCompaction.Service
+          const model = createModel({ context: 1_000_000, output: 32_000 })
+          const below = { input: 180_000, output: 5_000, reasoning: 0, cache: { read: 10_000, write: 0 } }
+          const above = { input: 10_000, output: 5_000, reasoning: 0, cache: { read: 190_000, write: 0 } }
+          expect(yield* compact.isOverflow({ tokens: below, model })).toBe(false)
+          expect(yield* compact.isOverflow({ tokens: above, model })).toBe(true)
+          // The threshold is for every session, a spawned one included.
+          expect(yield* compact.isOverflow({ tokens: above, model, subagent: true })).toBe(true)
+        }),
+      {
+        config: {
+          compaction: { threshold: 200_000 },
+        },
+      },
+    ),
+  )
+
+  it.live(
+    "a threshold above the model's window never delays compaction",
+    provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          const compact = yield* SessionCompaction.Service
+          // usable = 100K - 32K = 68K, whatever the threshold says.
+          const model = createModel({ context: 100_000, output: 32_000 })
+          const tokens = { input: 75_000, output: 5_000, reasoning: 0, cache: { read: 0, write: 0 } }
+          expect(yield* compact.isOverflow({ tokens, model })).toBe(true)
+          expect(yield* compact.isOverflow({ tokens, model, subagent: true })).toBe(true)
+        }),
+      {
+        config: {
+          compaction: { threshold: 500_000, subagent_threshold: 500_000 },
+        },
+      },
+    ),
+  )
+
+  it.live(
+    "compaction.subagent_threshold applies only to a session another session spawned",
+    provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          const compact = yield* SessionCompaction.Service
+          const model = createModel({ context: 1_000_000, output: 32_000 })
+          const tokens = { input: 10_000, output: 5_000, reasoning: 0, cache: { read: 190_000, write: 0 } }
+          expect(yield* compact.isOverflow({ tokens, model })).toBe(false)
+          expect(yield* compact.isOverflow({ tokens, model, subagent: false })).toBe(false)
+          expect(yield* compact.isOverflow({ tokens, model, subagent: true })).toBe(true)
+        }),
+      {
+        config: {
+          compaction: { subagent_threshold: 200_000 },
+        },
+      },
+    ),
+  )
+
+  it.live(
+    "compaction.subagent_threshold takes precedence over compaction.threshold for a subagent",
+    provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          const compact = yield* SessionCompaction.Service
+          const model = createModel({ context: 1_000_000, output: 32_000 })
+          const between = { input: 10_000, output: 5_000, reasoning: 0, cache: { read: 290_000, write: 0 } }
+          const above = { input: 10_000, output: 5_000, reasoning: 0, cache: { read: 400_000, write: 0 } }
+          expect(yield* compact.isOverflow({ tokens: between, model })).toBe(false)
+          expect(yield* compact.isOverflow({ tokens: between, model, subagent: true })).toBe(true)
+          expect(yield* compact.isOverflow({ tokens: above, model })).toBe(true)
+        }),
+      {
+        config: {
+          compaction: { threshold: 400_000, subagent_threshold: 200_000 },
+        },
+      },
+    ),
+  )
 })
 
 describe("session.compaction.create", () => {

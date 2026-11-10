@@ -283,6 +283,14 @@ export const Info = Schema.Struct({
       reserved: Schema.optional(NonNegativeInt).annotate({
         description: "Token buffer for compaction. Leaves enough window to avoid overflow during compaction.",
       }),
+      threshold: Schema.optional(PositiveInt).annotate({
+        description:
+          "Compact once a session's context reaches this many tokens, even when the model's window is larger. Every request re-reads the whole context, so a lower value makes each later request smaller and cheaper, and summarizes older turns sooner. It never raises the limit above what the model allows (default: the model's usable window)",
+      }),
+      subagent_threshold: Schema.optional(PositiveInt).annotate({
+        description:
+          "The same threshold for sessions spawned by another session (subagents, tasks), which takes precedence over `threshold` for them. Set it alone to keep long-running subagents small while the main session keeps its full window",
+      }),
     }),
   ),
   experimental: Schema.optional(

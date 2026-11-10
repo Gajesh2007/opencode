@@ -76,6 +76,8 @@ type Input = {
   assistantMessage: MessageV2.Assistant
   sessionID: SessionID
   model: Provider.Model
+  /** The session was spawned by another session: `compaction.subagent_threshold` applies. */
+  subagent?: boolean
   /** Step-start tree carried from the previous step-finish, possibly still being captured. */
   snapshot?: Effect.Effect<string | undefined>
 }
@@ -839,7 +841,12 @@ export const layer = Layer.effect(
             yield* session.updateMessage(ctx.assistantMessage)
             if (
               !ctx.assistantMessage.summary &&
-              isOverflow({ cfg: yield* config.get(), tokens: usage.tokens, model: ctx.model })
+              isOverflow({
+                cfg: yield* config.get(),
+                tokens: usage.tokens,
+                model: ctx.model,
+                subagent: input.subagent,
+              })
             ) {
               ctx.needsCompaction = true
             }

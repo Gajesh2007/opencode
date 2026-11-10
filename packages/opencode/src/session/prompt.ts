@@ -1605,7 +1605,7 @@ export const layer = Layer.effect(
           if (
             lastFinished &&
             lastFinished.summary !== true &&
-            (yield* compaction.isOverflow({ tokens: lastFinished.tokens, model }))
+            (yield* compaction.isOverflow({ tokens: lastFinished.tokens, model, subagent: !!session.parentID }))
           ) {
             yield* compaction.create({ sessionID, agent: lastUser.agent, model: lastUser.model, auto: true })
             continue
@@ -1685,6 +1685,7 @@ export const layer = Layer.effect(
               assistantMessage: msg,
               sessionID,
               model,
+              subagent: !!session.parentID,
               timing,
               snapshot: reuse,
             })
